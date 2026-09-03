@@ -96,6 +96,8 @@ adcenter/
 6. **兜底链**：无填充 → MAX 聚合指令 → 平台自有推广
 7. **记账**：BudgetCtrl 预扣（预估消耗），MetricsAgg 计数
 
+**批量模式（count > 1，PRD 5.5）：** 得分定名单（保底 ceil 强制换入）→ 整轮下发（轮内单价降序）+ 余数给高分者 → 逐条物化（素材内选 / 频控 / 预扣，失败跳过）；只返回可用条数不补位。count 上限 20，返回条数受剩余频控额度约束。
+
 ### 2.2 BudgetCtrl（预算控制，接口隔离）
 
 ```go
@@ -165,9 +167,11 @@ migration 工具：golang-migrate，文件在 `migrations/`
 ### 4.1 客户端 API（App 调用，高频）
 
 ```
-POST /v1/ad/req        # 广告决策：入参 slotId、deviceId、userCtx（国家/语言等）
-                       # 出参：填充结果（advertiser/creative + 素材 CDN 签名 URL）
-                       #       或 max_fallback / self_promo 指令
+POST /v1/ad/req        # 广告决策：入参 slotId、deviceId、userCtx（国家/语言等）、
+                       #            count（默认 1，上限 20，批量语义见 PRD 5.5）
+                       # 出参：items[]（advertiser/creative + 素材 CDN 签名 URL，
+                       #       条数 ≤ count，不补位）；count=1 时可为
+                       #       max_fallback / self_promo 指令
                        # 性能预算：内存路径，目标 <10ms，含网络 <100ms
 POST /v1/ad/event      # 事件上报：imp/click/conv（客户端埋点 + 服务端校验）
 ```
