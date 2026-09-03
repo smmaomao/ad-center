@@ -27,7 +27,7 @@
 
 ## 阶段 2：管理后台（前端 + 管理 API）
 
-- [ ] 2.1 管理 API：advertisers CRUD + 暂停/激活（写库后 NOTIFY）
+- [ ] 2.1 管理 API：advertisers CRUD + 暂停/激活（写库后 NOTIFY）；apps 管理（注册 App / 生成与轮换 API Key，原文仅创建时展示一次）
 - [ ] 2.2 管理 API：slots CRUD + fillPriorities 拖拽排序/权重/启停
 - [ ] 2.3 管理 API：creatives 上传（Storage 直传签名 URL）/ 权重 / A/B 分组
 - [ ] 2.4 页面 `/advertisers`：列表、筛选、状态预警（预算将尽/KPI 未达标高亮）
