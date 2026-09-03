@@ -136,6 +136,9 @@ type FrequencyStore interface {
 
 ## 三、数据库设计（Supabase Postgres）
 
+**Schema：`ads_center`**（与同实例其他项目 schema 隔离；本地开发用本机 Supabase，端口 54322）
+migration 工具：golang-migrate，文件在 `migrations/`
+
 在 PRD 第六章实体基础上细化（完整 DDL 在实现阶段以 migration 落地）：
 
 | 表 | 说明 | 关键设计 |
