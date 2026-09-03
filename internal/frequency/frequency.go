@@ -13,11 +13,11 @@ import (
 type Store interface {
 	// CheckAndIncr 原子检查并计数：允许展示则记录并返回 true，否则 false。
 	//
-	// 检查项（PRD FR-04 高级策略）：
-	//   - 日频控：单用户每日该广告位最大展示次数
-	//   - 展示间隔：两次展示间最短间隔
-	//   - 疲劳窗口：连续 N 次内不重复展示同一广告主
+	// 用户身份 = (appID, deviceID)：多客户端 App 隔离由服务端从 API Key
+	// 推导 appID（客户端不可自行声明），不同 App 的同名 ID 天然互不影响。
 	//
-	// 阶段 1.5 实现时会携带策略参数（上限/间隔/窗口），此处签名先固化调用面。
-	CheckAndIncr(ctx context.Context, userID, slotID, advertiserID string, now time.Time) bool
+	// 检查项（两级，任一不过即拒绝）：
+	//   广告位级：滑动24h日频控 / 最小展示间隔 / 疲劳窗口（连续N次不重复同一广告主）
+	//   广告主级：多窗口滑动频控 freq_windows（多档同时生效，如 3h/3 + 24h/10）
+	CheckAndIncr(ctx context.Context, appID, deviceID, slotID, advertiserID string, now time.Time) bool
 }

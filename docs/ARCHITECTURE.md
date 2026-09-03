@@ -115,20 +115,21 @@ type BudgetCtrl interface {
 
 ```go
 type FrequencyStore interface {
-    CheckAndIncr(ctx, userID, slotID, advertiserID string, now time.Time) bool
-    // 两级策略任一不过即拒绝：广告位级（滑动24h日频控/间隔/疲劳窗口）
+    CheckAndIncr(ctx, appID, deviceID, slotID, advertiserID string, now time.Time) bool
+    // 用户身份 = (appID, deviceID)，两级策略任一不过即拒绝：
+    // 广告位级（滑动24h日频控/间隔/疲劳窗口）
     // + 广告主级（多窗口滑动频控 freq_windows，多档同时生效）
 }
 ```
 
-- 实现 A（现在）：进程内；每 (userID, advertiserID) 存**最近展示时间戳环形队列**（TTL = 最大窗口长度），内存估算 10 万 DAU × 人均 5 广告主 × 10 时间戳 ≈ 30MB
-- 实现 B（P1）：Redis ZSET + Lua（ZREMRANGEBYSCORE 清过期 + ZCARD 计数），接口不变
+- 实现 A（现在）：进程内；每 (appID, deviceID, advertiserID) 存**最近展示时间戳环形队列**（TTL = 最大窗口长度），内存估算 10 万 DAU × 人均 5 广告主 × 10 时间戳 ≈ 30MB
+- 实现 B（P1）：Redis ZSET + Lua（ZREMRANGEBYSCORE 清过期 + ZCARD 计数），key 含 appID 前缀，接口不变
 
 **两级频控体系（PRD V1.2）：** 所有时间窗均为**滑动窗口**（无自然日重置，预算的自然日重置独立）；广告主 `freq_windows` 示例：`[{180m, 3}, {1440m, 10}]`。
 
 ### 2.4 ConfigCache（配置秒级生效）
 
-- 启动：全量加载 advertisers / ad_slots / creatives 到内存
+- 启动：全量加载 apps / advertisers / ad_slots / creatives 到内存（广告位按 app 分组）
 - 变更：管理 API 写库后 `NOTIFY config_changed`，Go 订阅后重载对应表（<1s 生效）
 - 兜底：每 60s 定时全量对账，防 NOTIFY 丢失
 
@@ -137,6 +138,23 @@ type FrequencyStore interface {
 - 内存计数器（请求数/填充数/收入/eCPM，按 slot×advertiser×分钟粒度）
 - SSE 端点 `/v1/admin/metrics/stream` 推送给看板
 - 每分钟批量落库 `metrics_minute` 表（持久化 + 历史报表）
+
+### 2.6 多客户端 App 隔离（V1.2 已定）
+
+**用户身份 = (appID, deviceID)**，App 身份由服务端从 API Key 推导，客户端不可自行声明：
+
+```
+POST /v1/ad/req + X-Api-Key: adc_xxx
+  → 中间件查 apps 表（sha256(key) = api_key_hash）→ 得 app_id
+  → 频控 key: appID:deviceID:advertiserID（不同 App 同名 ID 天然隔离）
+```
+
+| 项 | 结论 |
+|----|------|
+| 广告主（预算/KPI/素材） | **全局共享**：预算跨 App 一个池，投放哪个 App 由该 App 广告位的 fill_priorities 决定 |
+| 广告位 | 归属具体 App（ad_slots.app_id），填充策略独立配置 |
+| 频控主体 | deviceId（开屏在登录前展示，不依赖登录态） |
+| API Key | apps 表存 sha256 哈希 + 展示前缀，原文不落库；App 维度贯穿事件/指标/决策日志/预算归因 |
 
 ---
 
@@ -149,8 +167,9 @@ migration 工具：golang-migrate，文件在 `migrations/`
 
 | 表 | 说明 | 关键设计 |
 |----|------|----------|
-| `advertisers` | 广告主 | tier、kpi 目标/实际、budget、bidding、guaranteed、targeting（jsonb）、freq_windows（jsonb 多窗口滑动频控）、priority_score |
-| `ad_slots` | 广告位 | type、frequency_cap（jsonb）、ai_agent（jsonb） |
+| `apps` | 客户端 App 注册表 | api_key_prefix（展示）+ api_key_hash（sha256，原文不落库）；多租户隔离的锚点 |
+| `advertisers` | 广告主（全局共享） | tier、kpi 目标/实际、budget、bidding、guaranteed、targeting（jsonb）、freq_windows（jsonb 多窗口滑动频控）、priority_score |
+| `ad_slots` | 广告位（归属 App） | app_id FK、type、frequency_cap（jsonb）、ai_agent（jsonb） |
 | `fill_priorities` | 填充优先级（独立表） | slot_id FK、source_type、advertiser_id FK、guaranteed_share、weight、enabled、position |
 | `creatives` | 素材 | advertiser_id FK、storage_path、status、weight、ab_group |
 | `decision_logs` | AI 决策日志 | agent、action、old/new value、result deltas、confidence、reverted；按月分区，保留 180 天 |
@@ -171,13 +190,14 @@ migration 工具：golang-migrate，文件在 `migrations/`
 ### 4.1 客户端 API（App 调用，高频）
 
 ```
-POST /v1/ad/req        # 广告决策：入参 slotId、deviceId、userCtx（国家/语言等）、
+POST /v1/ad/req        # 广告决策：头 X-Api-Key（服务端推导 app_id，多 App 隔离锚点）
+                       # 入参 slotId、deviceId、userCtx（国家/语言等）、
                        #            count（默认 1，上限 20，批量语义见 PRD 5.5）
                        # 出参：items[]（advertiser/creative + 素材 CDN 签名 URL，
                        #       条数 ≤ count，不补位）；count=1 时可为
                        #       max_fallback / self_promo 指令
                        # 性能预算：内存路径，目标 <10ms，含网络 <100ms
-POST /v1/ad/event      # 事件上报：imp/click/conv（客户端埋点 + 服务端校验）
+POST /v1/ad/event      # 事件上报：imp/click/conv（客户端埋点 + 服务端校验），同样带 X-Api-Key
 ```
 
 ### 4.2 管理 API（Next.js BFF 转发，Supabase Auth JWT 鉴权 + RBAC）
