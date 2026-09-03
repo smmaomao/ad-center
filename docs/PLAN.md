@@ -60,4 +60,5 @@
 
 - AI Agent 规则引擎（FR-05/06/07）、预算平滑自动化（PRD 5.2）
 - 路线 B：Redis（Upstash SG）外置 BudgetCtrl/FrequencyStore → 双实例零停机
+  - **必须按 ARCHITECTURE.md §5.3.1 迁移手册执行**（先外移状态后扩容；契约测试是前置条件，P0 阶段 1.5/1.6 就要写好）
 - 看板趋势图、下钻、导出；告警渠道接入
