@@ -225,6 +225,18 @@ POST /v1/ad/event      # 事件上报：imp/click/conv（客户端埋点 + 服�
 | 传输 | 全链路 HTTPS |
 | 审计 | 管理操作 + AI 决策全量日志，保留 180 天 |
 
+### 6.1 数据访问模式：直连 Postgres（已定）
+
+Go 后端与 migration **全部直连 Postgres 连接串**，不经过 Supabase REST/Kong 网关：
+
+- 数据读写：`store` 包直连（连接串 + `search_path=ads_center`）
+- 配置热更新：LISTEN/NOTIFY 同样走直连
+- 前端仅用 Supabase 两样东西：**Auth**（`sb_publishable_` key）+ **Storage**（素材上传）
+- 后台用户管理：Studio UI 手动建号（本地 127.0.0.1:54323 / 生产 Dashboard）+ SQL 插 `admin_users` 角色映射；P0 用户量为团队规模，无需程序化管理
+
+> 本地实例（BEREAL-ADS-Backend）为共享实例（drama / mtg_agency / ads_center 多 schema 隔离），
+> 且已启用新 API key 体系（`sb_publishable_` / `sb_secret_`，ES256 签名）——legacy anon/service_role JWT 不可用。
+
 ---
 
 ## 七、里程碑计划
