@@ -168,10 +168,10 @@ migration 工具：golang-migrate，文件在 `migrations/`
 | 表 | 说明 | 关键设计 |
 |----|------|----------|
 | `apps` | 客户端 App 注册表 | api_key_prefix（展示）+ api_key_hash（sha256，原文不落库）；多租户隔离的锚点 |
-| `advertisers` | 广告主（全局共享） | tier、kpi 目标/实际、budget、bidding、guaranteed、targeting（jsonb）、freq_windows（jsonb 多窗口滑动频控）、priority_score |
+| `advertisers` | 广告主（全局共享） | tier、kpi 目标/实际、budget、bidding、guaranteed、targeting（jsonb）、freq_windows（jsonb 多窗口滑动频控）、end_at（投放截止，过期过滤）、priority_score |
 | `ad_slots` | 广告位（归属 App） | app_id FK、type、frequency_cap（jsonb）、ai_agent（jsonb） |
 | `fill_priorities` | 填充优先级（独立表） | slot_id FK、source_type、advertiser_id FK、guaranteed_share、weight、enabled、position |
-| `creatives` | 素材 | advertiser_id FK、storage_path、status、weight、ab_group |
+| `creatives` | 素材 | advertiser_id FK、storage_path、media_type（video/image/html）、orientation（landscape/portrait/square/any）、status、weight、ab_group |
 | `decision_logs` | AI 决策日志 | agent、action、old/new value、result deltas、confidence、reverted；按月分区，保留 180 天 |
 | `budget_ledger` | 预算流水 | advertiser_id、预扣/确认/回滚、金额、hour_bucket（对账与平滑控制依据） |
 | `metrics_minute` | 分钟级指标 | slot_id、advertiser_id、ts、requests/fills/revenue/ecpm |

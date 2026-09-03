@@ -149,6 +149,7 @@
 | 层级 | 下拉选择 | 是 | Tier1 / Tier2 / Tier3 |
 | 保底流量占比 | 数字（0-100%） | 是 | 该广告主最低获得的曝光份额 |
 | 合同周期 | 日期范围 | 否 | 合作起止时间 |
+| 投放截止时间 | 日期时间 | 否 | 投放截止（V1.2）：过期后不参与决策，NULL=永续；与合同周期（商务概念）相互独立 |
 | 对接人 | 文本 | 否 | 甲方联系人 |
 | 状态 | 开关 | 是 | 活跃/暂停 |
 
@@ -175,8 +176,10 @@
 
 | 功能 | 说明 |
 |------|------|
-| 素材列表 | 展示已上传素材（缩略图、名称、状态、CTR、转化率） |
+| 素材列表 | 展示已上传素材（缩略图、名称、方向、形态、状态、CTR、转化率） |
 | 上传素材 | 支持视频（MP4）和图片（JPG/PNG），单个≤50MB |
+| 素材形态 | 视频 / 图片 / 网页（H5），上传时选择；网页素材填 URL |
+| 素材方向 | 竖屏 / 横屏 / 方形 / 不限，上传时选择；服务端下发全部方向，客户端按展示位置自选（短剧 App 以竖屏为主） |
 | 素材状态 | 测试中 / 活跃 / 暂停 |
 | 流量分配 | 支持手动设置各素材流量权重，或启用自动A/B测试 |
 | 删除素材 | 仅可删除"暂停"状态的素材 |
@@ -546,8 +549,9 @@ App 可一次请求 N 条广告：`POST /v1/ad/req` 增加 `count` 参数（默�
 | guaranteed.minShare | Number | 是 | 保底占比（0-1） |
 | targeting.countries | Array | 否 | 目标国家列表 |
 | targeting.ageRange | Array | 否 | [min, max] |
+| endAt | DateTime | 否 | 投放截止时间，过期不参与决策，NULL=永续（V1.2） |
 | freqWindows | Array | 否 | 多窗口滑动频控（V1.2）：[{window分钟, max}]，多档同时生效，如 3h最多3次+24h最多10次 |
-| creatives | Array | 是 | 素材列表 |
+| creatives | Array | 是 | 素材列表（含 mediaType: video/image/html、orientation: landscape/portrait/square/any） |
 | priorityScore | Number | 是 | 实时计算的投放优先级得分 |
 | createdAt | DateTime | 是 | 创建时间 |
 | updatedAt | DateTime | 是 | 更新时间 |
