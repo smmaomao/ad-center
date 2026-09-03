@@ -115,12 +115,16 @@ type BudgetCtrl interface {
 
 ```go
 type FrequencyStore interface {
-    CheckAndIncr(ctx, userID, slotID, advertiserID string) bool // 频控+间隔+疲劳
+    CheckAndIncr(ctx, userID, slotID, advertiserID string, now time.Time) bool
+    // 两级策略任一不过即拒绝：广告位级（滑动24h日频控/间隔/疲劳窗口）
+    // + 广告主级（多窗口滑动频控 freq_windows，多档同时生效）
 }
 ```
 
-- 实现 A（现在）：进程内 LRU（key: userID+slotID，TTL 24h）
-- 实现 B（P1）：Redis，接口不变
+- 实现 A（现在）：进程内；每 (userID, advertiserID) 存**最近展示时间戳环形队列**（TTL = 最大窗口长度），内存估算 10 万 DAU × 人均 5 广告主 × 10 时间戳 ≈ 30MB
+- 实现 B（P1）：Redis ZSET + Lua（ZREMRANGEBYSCORE 清过期 + ZCARD 计数），接口不变
+
+**两级频控体系（PRD V1.2）：** 所有时间窗均为**滑动窗口**（无自然日重置，预算的自然日重置独立）；广告主 `freq_windows` 示例：`[{180m, 3}, {1440m, 10}]`。
 
 ### 2.4 ConfigCache（配置秒级生效）
 
@@ -145,7 +149,7 @@ migration 工具：golang-migrate，文件在 `migrations/`
 
 | 表 | 说明 | 关键设计 |
 |----|------|----------|
-| `advertisers` | 广告主 | tier、kpi 目标/实际、budget、bidding、guaranteed、targeting（jsonb）、priority_score |
+| `advertisers` | 广告主 | tier、kpi 目标/实际、budget、bidding、guaranteed、targeting（jsonb）、freq_windows（jsonb 多窗口滑动频控）、priority_score |
 | `ad_slots` | 广告位 | type、frequency_cap（jsonb）、ai_agent（jsonb） |
 | `fill_priorities` | 填充优先级（独立表） | slot_id FK、source_type、advertiser_id FK、guaranteed_share、weight、enabled、position |
 | `creatives` | 素材 | advertiser_id FK、storage_path、status、weight、ab_group |
