@@ -29,7 +29,7 @@
 
 - [ ] 2.1 管理 API：advertisers CRUD + 暂停/激活（写库后 NOTIFY）；apps 管理（注册 App / 生成与轮换 API Key，原文仅创建时展示一次）
 - [ ] 2.2 管理 API：slots CRUD + fillPriorities 拖拽排序/权重/启停
-- [ ] 2.3 管理 API：creatives 上传（Storage 直传签名 URL）/ 权重 / A/B 分组
+- [ ] 2.3 管理 API：creatives 上传（R2 presigned PUT 直传，见 ARCHITECTURE.md §2.7）/ 权重 / A/B 分组
 - [ ] 2.4 页面 `/advertisers`：列表、筛选、状态预警（预算将尽/KPI 未达标高亮）
 - [ ] 2.5 页面 `/advertisers/:id` + `/new`：KPI 卡片、基本信息、KPI 与预算、投放配置、素材管理
 - [ ] 2.6 页面 `/slots` + `/slots/:id` + `/new`：策略配置页（优先级表格拖拽 + 高级策略表单）

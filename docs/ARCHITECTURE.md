@@ -14,8 +14,8 @@
 |------|----------|----------|------|
 | 决策 + 管理 API | Go（单二进制，单仓库） | Fly.io Singapore（常驻容器） | 进程内状态：预算扣减、频控、实时计数器 |
 | 管理后台前端 | Next.js (App Router) + shadcn/ui | Vercel | 纯页面层，无常驻状态 |
-| 数据库 / 认证 / 素材存储 | Postgres + Auth + Storage | Supabase SG | 与 Fly 同 region，内网延迟 <1ms |
-| 素材分发 | Supabase Storage → CDN | — | 防盗链签名 URL |
+| 数据库 / 认证 | Postgres + Auth | Supabase SG | 与 Fly 同 region，内网延迟 <1ms |
+| 素材存储 + 分发 | Cloudflare R2（S3 兼容） | R2 APAC + Cloudflare CDN | **出口流量永久免费**（视频素材下发量随业务线性增长，Supabase $0.09/GB 会在流量起来后成为最大成本项）；防盗链签名 URL |
 
 ### 1.2 为什么是这套组合
 
@@ -156,6 +156,18 @@ POST /v1/ad/req + X-Api-Key: adc_xxx
 | 频控主体 | deviceId（开屏在登录前展示，不依赖登录态） |
 | API Key | apps 表存 sha256 哈希 + 展示前缀，原文不落库；App 维度贯穿事件/指标/决策日志/预算归因 |
 
+### 2.7 素材存储与分发（Cloudflare R2，V1.2 已定）
+
+**选型理由：** 视频素材的出口流量随业务线性增长（出口 ≈ 展示次数 × 素材大小），R2 出口流量永久免费；同等规模 Supabase Storage 出口费 $0.09/GB（4.5TB/月 ≈ $385，100K DAU 时数千美元/月）。`storage_path` 存后端无关的对象 key，未来换存储层不牵动业务代码。
+
+| 环节 | 方案 |
+|------|------|
+| 对象 key | `creatives/{广告主ID前2位}/{广告主ID}/{素材ID}.{ext}`（分区防单目录对象过多） |
+| 上传 | Next.js 服务端生成 R2 presigned PUT URL（@aws-sdk，R2 token 存环境变量）→ 浏览器直传，不经 Go 服务 |
+| 决策下发 | Go 引擎内存里做 S3 sigv4 签名（HMAC，微秒级，无网络 IO，不在决策路径加延迟）→ presigned GET，1h 短时效防盗链 |
+| CDN 缓存 | P0 直连 R2 端点（零出口费，延迟可接受）；P1 加自定义域 + Cache Rule（cache key 忽略 query string，否则每人签名不同会击穿缓存）→ Jakarta PoP 命中 |
+| 凭证管理 | Next.js 持写权限 token（仅素材前缀），Go 持只读 token；html 素材 storage_path 存完整 URL 不走签名 |
+
 ---
 
 ## 三、数据库设计（Supabase Postgres）
@@ -205,7 +217,7 @@ POST /v1/ad/event      # 事件上报：imp/click/conv（客户端埋点 + 服�
 ```
 /v1/admin/advertisers CRUD + 暂停/激活
 /v1/admin/slots        CRUD + fillPriority 排序/权重/启停
-/v1/admin/creatives    上传（Supabase Storage 直传 + 签名 URL）/权重/A/B
+/v1/admin/creatives    上传（R2 presigned PUT 直传）/权重/A/B
 /v1/admin/agent        状态、决策日志查询、回滚、人工覆盖、策略配置
 /v1/admin/metrics/stream  # SSE 实时看板
 ```
@@ -282,7 +294,7 @@ Go 后端与 migration **全部直连 Postgres 连接串**，不经过 Supabase 
 
 - 数据读写：`store` 包直连（连接串 + `search_path=ads_center`）
 - 配置热更新：LISTEN/NOTIFY 同样走直连
-- 前端仅用 Supabase 两样东西：**Auth**（`sb_publishable_` key）+ **Storage**（素材上传）
+- 前端仅用 Supabase **Auth**（`sb_publishable_` key）；素材存储用 Cloudflare R2（见 2.7）
 - 后台用户管理：Studio UI 手动建号（本地 127.0.0.1:54323 / 生产 Dashboard）+ SQL 插 `admin_users` 角色映射；P0 用户量为团队规模，无需程序化管理
 
 > 本地实例（BEREAL-ADS-Backend）为共享实例（drama / mtg_agency / ads_center 多 schema 隔离），
@@ -298,7 +310,7 @@ Go 后端与 migration **全部直连 Postgres 连接串**，不经过 Supabase 
 |------|------|
 | 基建 | Go 骨架、Supabase schema migration、Fly 部署流水线、CI |
 | 决策引擎 | FR 全链路：筛选→分档→得分→保底→疲劳→兜底；BudgetCtrl/FreqStore（进程内版）；ConfigCache（LISTEN/NOTIFY） |
-| 广告主管理 | FR-01/02：列表、详情配置、素材上传（Supabase Storage） |
+| 广告主管理 | FR-01/02：列表、详情配置、素材上传（Cloudflare R2） |
 | 广告位管理 | FR-03/04：列表、策略配置（优先级排序、高级策略） |
 | 监控看板 | FR-08 简化版：核心 KPI 卡片 + 广告位状态表（SSE 实时） |
 | 客户端 API | /v1/ad/req、/v1/ad/event + App 联调（含兜底链） |
