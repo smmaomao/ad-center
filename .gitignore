@@ -1,0 +1,27 @@
+# 二进制
+/bin/
+/dist/
+adcenter
+adcenter-*
+
+# 本地环境与密钥
+.env
+.env.*
+*.local
+
+# Go
+*.test
+*.out
+coverage.*
+
+# IDE
+.idea/
+.vscode/
+.DS_Store
+
+# 依赖
+/vendor/
+
+# 前端（后续 web/ 子项目自管理）
+web/node_modules/
+web/.next/
