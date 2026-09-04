@@ -1,7 +1,7 @@
 # 自有广告投放管理系统 —— 技术架构设计
 
-> 版本：V1.0（2026-09-03）
-> 依据：`docs/PRD.md`（PRD V1.1）
+> 版本：V1.1（2026-09-04）
+> 依据：`docs/PRD.md`（PRD V1.2）
 > 部署结论：**路线 A —— 单实例常驻 + 自动重启**，P1 预留升级双实例 + Redis 路径
 
 ---
@@ -98,6 +98,15 @@ adcenter/
 
 **批量模式（count > 1，PRD 5.5）：** 得分定名单（保底 ceil 强制换入）→ 整轮下发（轮内单价降序）+ 余数给高分者 → 逐条物化（素材内选 / 频控 / 预扣，失败跳过）；只返回可用条数不补位。count 上限 20，返回条数受剩余频控额度约束。
 
+**工程细节（参照 Prebid Server 生产实践，V1.1）：**
+
+1. **排序可复现**：候选排序用 `sort.SliceStable` + 平局按 `advertiser_id` 升序打破——同样输入永远同样输出，决策日志可重放排查（"为什么选 A 不选 B"有据可查）
+2. **请求内 memoization**：单请求内重复计算的中间量（KPI 分档、消耗进度、Tier 权重）只算一次复用，不打分一个候选就算一遍
+3. **快照刷新失败保留旧值**：ConfigCache 对账 SELECT 失败时**保留旧快照继续服务**（配置旧一点好过没有），仅日志告警；对应 Prebid RateConverter 的 staleness 降级策略
+4. **接口分层原则**（Prebid AdaptedBidder 注释）：单广告主内的计算（打分/分档/消耗）放 per-advertiser 纯函数；跨广告主逻辑（保底/排序/兜底链/批量名单）放引擎编排层——单测按此边界拆分
+
+**超时与兜底原则（P1 接 MAX S2S 竞价时启用）：** deadline 预算制——总预算扣除自身消耗后才给下游（Prebid: "reduce the amount of time the bidders have, to compensate"）；超时后已返回的部分结果照样参拍不整体作废（"enter as many bids as possible... even if the timeout occurs halfway through"）。
+
 ### 2.2 BudgetCtrl（预算控制，接口隔离）
 
 ```go
@@ -181,12 +190,12 @@ migration 工具：golang-migrate，文件在 `migrations/`
 |----|------|----------|
 | `apps` | 客户端 App 注册表 | api_key_prefix（展示）+ api_key_hash（sha256，原文不落库）；多租户隔离的锚点 |
 | `advertisers` | 广告主（全局共享） | tier、kpi 目标/实际、budget、bidding、guaranteed、targeting（jsonb）、freq_windows（jsonb 多窗口滑动频控）、end_at（投放截止，过期过滤）、priority_score |
-| `ad_slots` | 广告位（归属 App） | app_id FK、type、frequency_cap（jsonb）、ai_agent（jsonb） |
+| `ad_slots` | 广告位（归属 App） | app_id FK、**slot_key**（客户端引用的稳定标识，全局唯一）、type、频控三列（freq_daily_limit / freq_interval_minutes / freq_fatigue_window）、ai_agent（jsonb） |
 | `fill_priorities` | 填充优先级（独立表） | slot_id FK、source_type、advertiser_id FK、guaranteed_share、weight、enabled、position |
-| `creatives` | 素材 | advertiser_id FK、storage_path、media_type（video/image/html）、orientation（landscape/portrait/square/any）、status、weight、ab_group |
+| `creatives` | 素材 | advertiser_id FK、storage_path、media_type（video/image/html）、orientation（landscape/portrait/square/any）、width/height/duration_ms（播放 UI 需要）、status、weight、ab_group |
 | `decision_logs` | AI 决策日志 | agent、action、old/new value、result deltas、confidence、reverted；按月分区，保留 180 天 |
 | `budget_ledger` | 预算流水 | advertiser_id、预扣/确认/回滚、金额、hour_bucket（对账与平滑控制依据） |
-| `metrics_minute` | 分钟级指标 | slot_id、advertiser_id、ts、requests/fills/revenue/ecpm |
+| `metrics_minute` | 分钟级指标 | slot_id、advertiser_id（**零值 UUID 哨兵**表示兜底/MAX，主键不可 NULL）、ts、requests/fills/revenue/ecpm |
 | `ad_events` | 原始事件 | event_type（imp/click/conv）、device_id、可回溯审计，保留 180 天 |
 | `admin_users` | 后台用户 | 用 Supabase Auth + `admin_users` 映射角色（role: super_admin/operator/analyst/strategy） |
 
@@ -212,11 +221,14 @@ POST /v1/ad/req        # 广告决策：头 X-Api-Key（服务端推导 app_id�
 POST /v1/ad/event      # 事件上报：imp/click/conv（客户端埋点 + 服务端校验），同样带 X-Api-Key
 ```
 
-### 4.2 管理 API（Next.js BFF 转发，Supabase Auth JWT 鉴权 + RBAC）
+### 4.2 管理 API（Next.js BFF 转发，内部密钥 + RBAC）
+
+**鉴权模式（V1.1 已定）：** 浏览器不直连 Go。Next.js 服务端（route handlers / server actions）持会话，以 `X-Internal-Key`（环境变量共享密钥，仅 Vercel↔Fly 之间）+ `X-Actor-Email`（当前操作者，供审计与 RBAC）调用 Go 管理 API。Go 侧校验内部密钥后，按 actor 查 `admin_users` 复核角色权限——**RBAC 在 Go 侧仍是权威执行点**，前端过滤只是体验层。P1 如需服务间零信任再换 Supabase JWT + JWKS（ES256）校验，接口不变。
 
 ```
 /v1/admin/advertisers CRUD + 暂停/激活
 /v1/admin/slots        CRUD + fillPriority 排序/权重/启停
+/v1/admin/apps         App 注册（生成 API Key，仅创建时返回一次原文）
 /v1/admin/creatives    上传（R2 presigned PUT 直传）/权重/A/B
 /v1/admin/agent        状态、决策日志查询、回滚、人工覆盖、策略配置
 /v1/admin/metrics/stream  # SSE 实时看板
@@ -282,7 +294,7 @@ POST /v1/ad/event      # 事件上报：imp/click/conv（客户端埋点 + 服�
 
 | 项 | 方案 |
 |----|------|
-| 管理后台认证 | Supabase Auth（邮箱 + 密码），JWT 透传 Go 服务校验 |
+| 管理后台认证 | Supabase Auth（邮箱 + 密码）；Next.js BFF 持会话，以内部密钥 + actor 邮箱调用 Go（见 4.2） |
 | RBAC | 四角色（super_admin / operator / analyst / strategy），Go 中间件 + Next.js 路由层双重控制 |
 | 客户端 API | API Key + 设备指纹（防刷），出参素材走 CDN 签名 URL（防盗链，短有效期） |
 | 传输 | 全链路 HTTPS |
