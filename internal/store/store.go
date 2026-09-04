@@ -149,7 +149,7 @@ func (s *Store) LoadSnapshot(ctx context.Context) (*config.Snapshot, error) {
 		SELECT creative_id::text, advertiser_id::text, name, media_type, storage_path,
 		       orientation, COALESCE(width, 0), COALESCE(height, 0), COALESCE(duration_ms, 0),
 		       status, weight::float8, COALESCE(ab_group, '')
-		FROM creatives WHERE status IN ('active', 'testing')`)
+		FROM creatives WHERE status IN ('active', 'testing') AND deleted_at IS NULL`)
 	if err != nil {
 		return nil, fmt.Errorf("load creatives: %w", err)
 	}

@@ -16,6 +16,7 @@ import (
 	"adcenter/internal/config"
 	"adcenter/internal/engine"
 	"adcenter/internal/metrics"
+	"adcenter/internal/storage"
 	"adcenter/internal/store"
 )
 
@@ -41,6 +42,7 @@ type Server struct {
 	Budget      budget.Ctrl
 	InternalKey string // 管理 API 内部密钥（BFF 共享）
 	Log         *slog.Logger
+	Storage     *storage.Signer // R2 预签名（nil = 未配置，下发不含 media_url）
 	events      *eventWriter
 }
 
@@ -65,8 +67,16 @@ func (s *Server) NewRouter() *http.ServeMux {
 	mux.HandleFunc("PATCH /v1/admin/advertisers/{id}", s.handleUpdateAdvertiser)
 	mux.HandleFunc("DELETE /v1/admin/advertisers/{id}", s.handleDeleteAdvertiser)
 	mux.HandleFunc("GET /v1/admin/slots", s.handleListSlots)
+	mux.HandleFunc("POST /v1/admin/slots", s.handleCreateSlot)
+	mux.HandleFunc("GET /v1/admin/slots/{id}", s.handleGetSlot)
+	mux.HandleFunc("PATCH /v1/admin/slots/{id}", s.handleUpdateSlot)
+	mux.HandleFunc("DELETE /v1/admin/slots/{id}", s.handleDeleteSlot)
 	mux.HandleFunc("GET /v1/admin/apps", s.handleListApps)
 	mux.HandleFunc("POST /v1/admin/apps", s.handleCreateApp)
+	mux.HandleFunc("GET /v1/admin/creatives", s.handleListCreatives)
+	mux.HandleFunc("POST /v1/admin/creatives", s.handleCreateCreative)
+	mux.HandleFunc("PATCH /v1/admin/creatives/{id}", s.handleUpdateCreative)
+	mux.HandleFunc("DELETE /v1/admin/creatives/{id}", s.handleDeleteCreative)
 
 	// 健康检查（Fly health check）
 	mux.HandleFunc("GET /healthz", s.handleHealthz)

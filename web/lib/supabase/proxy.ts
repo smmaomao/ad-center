@@ -37,6 +37,10 @@ export async function updateSession(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   if (!user && !pathname.startsWith("/login")) {
+    // API 路由返回 JSON 401（fetch 调用方拿到结构化错误，而非登录页 HTML）
+    if (pathname.startsWith("/api/")) {
+      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    }
     const url = request.nextUrl.clone();
     url.pathname = "/login";
     return NextResponse.redirect(url);

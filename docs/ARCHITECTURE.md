@@ -172,9 +172,9 @@ POST /v1/ad/req + X-Api-Key: adc_xxx
 | 环节 | 方案 |
 |------|------|
 | 对象 key | `creatives/{广告主ID前2位}/{广告主ID}/{素材ID}.{ext}`（分区防单目录对象过多） |
-| 上传 | Next.js 服务端生成 R2 presigned PUT URL（@aws-sdk，R2 token 存环境变量）→ 浏览器直传，不经 Go 服务 |
+| 上传 | Next.js 服务端生成 R2 presigned PUT URL（`web/lib/r2/signer.ts` 纯 TS SigV4，与 Go 签名器同源算法、共享 AWS 官方测试向量对拍，零新增依赖；R2 写凭证存环境变量）→ 浏览器直传，不经 Go 服务。R2 寻址为 path-style：`/{bucket}/{key}`（bucket 必须进签名路径） |
 | 决策下发 | Go 引擎内存里做 S3 sigv4 签名（HMAC，微秒级，无网络 IO，不在决策路径加延迟）→ presigned GET，1h 短时效防盗链 |
-| CDN 缓存 | P0 直连 R2 端点（零出口费，延迟可接受）；P1 加自定义域 + Cache Rule（cache key 忽略 query string，否则每人签名不同会击穿缓存）→ Jakarta PoP 命中 |
+| CDN 缓存 | P0 直连 R2 端点（零出口费，延迟可接受）；P1 加自定义域 + Cache Rule（cache key 忽略 query string，否则每人签名不同会击穿缓存）→ Jakarta PoP 命中。注意：预签名 URL 仅在 S3 API 域有效，不能用于自定义域——P1 落地时需改为公开桶 + 自定义域（对象 key 本身不可猜测，UUID 命名即防盗链），放弃签名机制 |
 | 凭证管理 | Next.js 持写权限 token（仅素材前缀），Go 持只读 token；html 素材 storage_path 存完整 URL 不走签名 |
 
 ---

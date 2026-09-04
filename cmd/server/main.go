@@ -16,6 +16,7 @@ import (
 	"adcenter/internal/engine"
 	"adcenter/internal/frequency"
 	"adcenter/internal/metrics"
+	"adcenter/internal/storage"
 	"adcenter/internal/store"
 )
 
@@ -75,10 +76,23 @@ func main() {
 	eng := &engine.Engine{Freq: freqStore, Budget: budgetCtrl}
 	agg := metrics.New()
 
+	// ④' R2 只读签名器（决策下发 media_url 用；未配置则响应不含签名地址）
+	var r2Signer *storage.Signer
+	if v := os.Getenv("R2_ACCOUNT_ID"); v != "" {
+		r2Signer = storage.New(v,
+			os.Getenv("R2_BUCKET"),
+			os.Getenv("R2_ACCESS_KEY_ID"),
+			os.Getenv("R2_SECRET_ACCESS_KEY"))
+		log.Info("r2 signer enabled", "bucket", os.Getenv("R2_BUCKET"))
+	} else {
+		log.Warn("R2_* not set, decision response will not include media_url")
+	}
+
 	// ⑤ HTTP 装配
 	srv := &api.Server{
 		Cache: cache, Engine: eng, Store: st, Metrics: agg,
 		Budget: budgetCtrl, InternalKey: internalKey, Log: log,
+		Storage: r2Signer,
 	}
 	srv.SetEventWriter(api.NewEventWriter(st, log))
 	srv.RunEventWriter(ctx)

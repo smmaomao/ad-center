@@ -1,6 +1,7 @@
 # 二进制
 /bin/
 /dist/
+/tmp/
 adcenter
 adcenter-*
 

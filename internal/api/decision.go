@@ -51,6 +51,22 @@ func (s *Server) handleAdRequest(w http.ResponseWriter, r *http.Request) {
 		Count: req.Count, Now: now,
 	})
 
+	// 素材下载地址：R2 预签名 GET（1h 短时效防盗链）/ html 直链。
+	// 纯内存 HMAC（微秒级），不触碰决策延迟预算；未配置 R2 时省略字段。
+	if s.Storage != nil {
+		for i := range resp.Items {
+			it := &resp.Items[i]
+			if it.Creative == nil {
+				continue
+			}
+			if it.Creative.MediaType == "html" {
+				it.MediaURL = it.Creative.StoragePath // html 存完整 URL，不签名
+			} else {
+				it.MediaURL = s.Storage.PresignGET(it.Creative.StoragePath, time.Hour)
+			}
+		}
+	}
+
 	// 记账（内存计数 + 异步事件），不在响应关键路径上等待落库
 	var revenue float64
 	var advID string
@@ -75,12 +91,12 @@ func (s *Server) handleAdRequest(w http.ResponseWriter, r *http.Request) {
 
 // adEvent POST /v1/ad/event 请求体。
 type adEvent struct {
-	Event       string  `json:"event"` // impression / click / conversion
-	Slot        string  `json:"slot"`
-	DeviceID    string  `json:"deviceId"`
-	AdvertiserID string `json:"advertiserId,omitempty"`
-	CreativeID  string  `json:"creativeId,omitempty"`
-	Revenue     float64 `json:"revenue,omitempty"`
+	Event        string  `json:"event"` // impression / click / conversion
+	Slot         string  `json:"slot"`
+	DeviceID     string  `json:"deviceId"`
+	AdvertiserID string  `json:"advertiserId,omitempty"`
+	CreativeID   string  `json:"creativeId,omitempty"`
+	Revenue      float64 `json:"revenue,omitempty"`
 }
 
 // handleAdEvent 事件回执：记录 + 指标 + 转化时结转预算。

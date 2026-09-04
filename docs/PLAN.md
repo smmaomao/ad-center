@@ -40,12 +40,21 @@
 ## 阶段 2：管理后台（前端 + 管理 API）
 
 - [x] 2.1 管理 API：advertisers CRUD + 暂停/激活（写库后 NOTIFY）；apps 管理（注册 App / 生成与轮换 API Key，原文仅创建时展示一次）
-- [ ] 2.2 管理 API：slots CRUD + fillPriorities 拖拽排序/权重/启停
-- [ ] 2.3 管理 API：creatives 上传（R2 presigned PUT 直传，见 ARCHITECTURE.md §2.7）/ 权重 / A/B 分组
+- [x] 2.2 管理 API：slots CRUD + fillPriorities 拖拽排序/权重/启停
+- [x] 2.3 管理 API：creatives 上传（R2 presigned PUT 直传，见 ARCHITECTURE.md §2.7）/ 权重 / A/B 分组
 - [x] 2.4 页面 `/advertisers`：列表、筛选、状态预警（预算将尽/KPI 未达标高亮）——接 Go API 真实数据（BFF 转发）
 - [ ] 2.5 页面 `/advertisers/:id` + `/new`：KPI 卡片、基本信息、KPI 与预算、投放配置、素材管理
 - [ ] 2.6 页面 `/slots` + `/slots/:id` + `/new`：策略配置页（优先级表格拖拽 + 高级策略表单）
 - [x] 2.7 MetricsAgg：内存计数器 + 每分钟落库（SSE 端点待阶段 3）
+
+> 阶段 2 管理 API 端到端验证（2026-09-04，本地 Supabase + BFF 会话模拟）：
+> slots CRUD（创建/详情/PATCH 全量替换优先级/列表/软删；非法 source_type 与
+> 保底份额 >100% 拒绝）、creatives CRUD（R2 key 格式校验防路径穿越、权重/A-B
+> 分组/状态更新、软删）、BFF presign 端点（会话+角色校验、扩展名白名单、
+> 100MB 上限、广告主存在性 404、未登录 API 返回 JSON 401）、决策响应含
+> media_url（R2 path-style presigned GET 1h，NOTIFY 秒级生效）。
+> SigV4 签名双实现（Go/TS）均通过 AWS 官方测试向量对拍；真实 R2 桶联调
+> 待凭证配置后进行。
 
 ## 阶段 3：监控看板 + 联调收尾
 

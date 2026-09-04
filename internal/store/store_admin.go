@@ -154,6 +154,7 @@ func (s *Store) ListSlots(ctx context.Context) ([]*AdminSlot, error) {
 		       s.freq_daily_limit, s.freq_interval_minutes, s.freq_fatigue_window,
 		       (SELECT count(*) FROM fill_priorities f WHERE f.slot_id = s.slot_id AND f.enabled)
 		FROM ad_slots s JOIN apps a ON a.app_id = s.app_id
+		WHERE s.deleted_at IS NULL
 		ORDER BY a.name, s.created_at`)
 	if err != nil {
 		return nil, err

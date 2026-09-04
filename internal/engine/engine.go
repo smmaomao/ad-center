@@ -48,6 +48,9 @@ type Item struct {
 	Creative     *config.Creative `json:"creative"`
 	BidPrice     float64          `json:"bid_price"`
 	Score        float64          `json:"score"`
+	// MediaURL 素材下载地址（R2 预签名 GET / html 直链）。
+	// 引擎不负责签名（保持纯函数），由 API 层装饰。
+	MediaURL string `json:"media_url,omitempty"`
 }
 
 // Response 决策结果：Items 非空即直售填充；否则 Fallback 指示降级链
