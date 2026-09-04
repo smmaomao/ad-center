@@ -1,12 +1,19 @@
 import { requireRole } from "@/lib/auth";
-import { Placeholder } from "@/components/placeholder";
+import { AdvertiserForm } from "../advertiser-form";
+
+export const dynamic = "force-dynamic";
 
 export default async function NewAdvertiserPage() {
   await requireRole(["super_admin", "operator"]);
   return (
-    <Placeholder
-      title="新增广告主"
-      stage="阶段 2 实现（FR-02）：基本信息、KPI 与预算、投放配置"
-    />
+    <div className="mx-auto max-w-3xl space-y-6">
+      <div>
+        <h1 className="text-2xl font-semibold">新增广告主</h1>
+        <p className="text-sm text-muted-foreground">
+          创建后可在详情页上传素材并配置投放
+        </p>
+      </div>
+      <AdvertiserForm />
+    </div>
   );
 }

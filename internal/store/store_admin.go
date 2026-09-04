@@ -145,14 +145,20 @@ type AdminSlot struct {
 	FreqIntervalMinutes int    `json:"freq_interval_minutes"`
 	FreqFatigueWindow   int    `json:"freq_fatigue_window"`
 	FillCount           int    `json:"fill_count"` // 启用的填充来源数
+	AIAgentEnabled      bool   `json:"ai_agent_enabled"`
+	AIAgentGoal         string `json:"ai_agent_goal"`
 }
+
+const slotCols = `
+	s.slot_id::text, s.app_id::text, a.name, s.slot_key, s.name, s.type, s.status,
+	s.freq_daily_limit, s.freq_interval_minutes, s.freq_fatigue_window, %s
+	s.ai_agent_enabled, s.ai_agent_goal`
 
 // ListSlots 广告位列表（带 App 名与填充来源计数）。
 func (s *Store) ListSlots(ctx context.Context) ([]*AdminSlot, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT s.slot_id::text, s.app_id::text, a.name, s.slot_key, s.name, s.type, s.status,
-		       s.freq_daily_limit, s.freq_interval_minutes, s.freq_fatigue_window,
-		       (SELECT count(*) FROM fill_priorities f WHERE f.slot_id = s.slot_id AND f.enabled)
+		SELECT `+fmt.Sprintf(slotCols, `
+		       (SELECT count(*) FROM fill_priorities f WHERE f.slot_id = s.slot_id AND f.enabled),`)+`
 		FROM ad_slots s JOIN apps a ON a.app_id = s.app_id
 		WHERE s.deleted_at IS NULL
 		ORDER BY a.name, s.created_at`)
@@ -164,7 +170,8 @@ func (s *Store) ListSlots(ctx context.Context) ([]*AdminSlot, error) {
 	for rows.Next() {
 		sl := &AdminSlot{}
 		if err := rows.Scan(&sl.ID, &sl.AppID, &sl.AppName, &sl.Key, &sl.Name, &sl.Type, &sl.Status,
-			&sl.FreqDailyLimit, &sl.FreqIntervalMinutes, &sl.FreqFatigueWindow, &sl.FillCount); err != nil {
+			&sl.FreqDailyLimit, &sl.FreqIntervalMinutes, &sl.FreqFatigueWindow, &sl.FillCount,
+			&sl.AIAgentEnabled, &sl.AIAgentGoal); err != nil {
 			return nil, err
 		}
 		out = append(out, sl)

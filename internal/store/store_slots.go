@@ -82,13 +82,13 @@ func (s *Store) CreateSlot(ctx context.Context, fields map[string]any, prioritie
 func (s *Store) GetSlotDetail(ctx context.Context, id string) (*SlotDetail, error) {
 	d := &SlotDetail{}
 	err := s.pool.QueryRow(ctx, `
-		SELECT s.slot_id::text, s.app_id::text, a.name, s.slot_key, s.name, s.type, s.status,
-		       s.freq_daily_limit, s.freq_interval_minutes, s.freq_fatigue_window,
-		       (SELECT count(*) FROM fill_priorities f WHERE f.slot_id = s.slot_id AND f.enabled)
+		SELECT `+fmt.Sprintf(slotCols, `
+		       (SELECT count(*) FROM fill_priorities f WHERE f.slot_id = s.slot_id AND f.enabled),`)+`
 		FROM ad_slots s JOIN apps a ON a.app_id = s.app_id
 		WHERE s.slot_id = $1 AND s.deleted_at IS NULL`, id).
 		Scan(&d.ID, &d.AppID, &d.AppName, &d.Key, &d.Name, &d.Type, &d.Status,
-			&d.FreqDailyLimit, &d.FreqIntervalMinutes, &d.FreqFatigueWindow, &d.FillCount)
+			&d.FreqDailyLimit, &d.FreqIntervalMinutes, &d.FreqFatigueWindow, &d.FillCount,
+			&d.AIAgentEnabled, &d.AIAgentGoal)
 	if err != nil {
 		return nil, err
 	}
