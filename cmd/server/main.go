@@ -28,7 +28,7 @@ func main() {
 	loadDotEnv(".env")
 
 	dsn := getenv("DATABASE_URL", "postgres://postgres:postgres@127.0.0.1:54322/postgres?sslmode=disable")
-	port := getenv("PORT", "8080")
+	port := getenv("PORT", "8888")
 	internalKey := os.Getenv("INTERNAL_API_KEY")
 	if internalKey == "" {
 		log.Warn("INTERNAL_API_KEY not set, admin API disabled")
