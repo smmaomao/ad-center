@@ -16,17 +16,17 @@ var guaranteedSumLimit = 1.0
 
 // slotRequest 广告位创建/更新请求体。
 type slotRequest struct {
-	AppID               string                 `json:"app_id"`
-	SlotKey             string                 `json:"slot_key"`
-	Name                string                 `json:"name"`
-	Type                string                 `json:"type"`
-	Status              string                 `json:"status"`
-	FreqDailyLimit      int                    `json:"freq_daily_limit"`
-	FreqIntervalMinutes int                    `json:"freq_interval_minutes"`
-	FreqFatigueWindow   int                    `json:"freq_fatigue_window"`
-	AIAgentEnabled      bool                   `json:"ai_agent_enabled"`
-	AIAgentGoal         string                 `json:"ai_agent_goal"`
-	UpdatedBy           string                 `json:"updated_by"`
+	AppID               string                `json:"app_code"`
+	SlotKey             string                `json:"slot_key"`
+	Name                string                `json:"name"`
+	Type                string                `json:"type"`
+	Status              string                `json:"status"`
+	FreqDailyLimit      int                   `json:"freq_daily_limit"`
+	FreqIntervalMinutes int                   `json:"freq_interval_minutes"`
+	FreqFatigueWindow   int                   `json:"freq_fatigue_window"`
+	AIAgentEnabled      bool                  `json:"ai_agent_enabled"`
+	AIAgentGoal         string                `json:"ai_agent_goal"`
+	UpdatedBy           string                `json:"updated_by"`
 	Priorities          []store.PriorityInput `json:"priorities"`
 }
 
@@ -66,7 +66,7 @@ func (s *Server) handleCreateSlot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.AppID == "" || req.Name == "" || !slotTypes[req.Type] {
-		writeError(w, http.StatusBadRequest, "app_id, name, valid type required")
+		writeError(w, http.StatusBadRequest, "app_code, name, valid type required")
 		return
 	}
 	if !slotKeyRe.MatchString(req.SlotKey) {
@@ -79,7 +79,7 @@ func (s *Server) handleCreateSlot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fields := map[string]any{
-		"app_id": req.AppID, "slot_key": req.SlotKey, "name": req.Name,
+		"app_code": req.AppID, "slot_key": req.SlotKey, "name": req.Name,
 		"type": req.Type, "updated_by": actor, "created_by": actor,
 		"ai_agent_enabled": req.AIAgentEnabled,
 	}
@@ -122,7 +122,7 @@ func (s *Server) handleGetSlot(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleUpdateSlot 更新广告位；priorities 非 nil 时全量替换（拖拽排序语义）。
-// slot_key/app_id 不可改（客户端稳定标识）。
+// slot_key/app_code 不可改（客户端稳定标识）。
 func (s *Server) handleUpdateSlot(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireRole(w, r, true, false)
 	if !ok {
@@ -196,22 +196,26 @@ func (s *Server) handleDeleteSlot(w http.ResponseWriter, r *http.Request) {
 
 var mediaTypes = map[string]bool{"video": true, "image": true, "html": true}
 var orientations = map[string]bool{"portrait": true, "landscape": true, "square": true, "any": true}
-var storagePathRe = regexp.MustCompile(`^creatives/[0-9a-f-]+/[0-9a-f-]+/[0-9a-f-]+\.[a-z0-9]+$`)
+
+// storagePathRe 校验 R2 对象 key：creatives/{内容SHA-256}.{ext}
+// 扁平内容寻址：key 即内容指纹，无广告主前缀；跨广告主相同素材共享同一条对象。
+var storagePathRe = regexp.MustCompile(`^creatives/[0-9a-f]{64}\.[a-z0-9]+$`)
 
 // creativeRequest 素材创建/更新请求体。
 type creativeRequest struct {
-	AdvertiserID  string  `json:"advertiser_id"`
-	Name          string  `json:"name"`
-	MediaType     string  `json:"media_type"`
-	StoragePath   string  `json:"storage_path"`
-	FileSizeBytes int64   `json:"file_size_bytes"`
-	Orientation   string  `json:"orientation"`
-	Width         int     `json:"width"`
-	Height        int     `json:"height"`
-	DurationMS    int     `json:"duration_ms"`
-	Status        string  `json:"status"`
-	Weight        float64 `json:"weight"`
-	ABGroup       string  `json:"ab_group"`
+	AdvertiserID  string   `json:"advertiser_id"`
+	Name          string   `json:"name"`
+	MediaType     string   `json:"media_type"`
+	StoragePath   string   `json:"storage_path"`
+	FileSizeBytes int64    `json:"file_size_bytes"`
+	Orientation   string   `json:"orientation"`
+	Width         int      `json:"width"`
+	Height        int      `json:"height"`
+	DurationMS    int      `json:"duration_ms"`
+	Status        string   `json:"status"`
+	Styles        []string `json:"styles"`
+	TargetApps    []string `json:"target_apps"`
+	ABGroup       string   `json:"ab_group"`
 }
 
 // handleListCreatives 素材列表（可按广告主过滤）。
@@ -240,11 +244,11 @@ func (s *Server) handleCreateCreative(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if req.AdvertiserID == "" || req.Name == "" || !mediaTypes[req.MediaType] {
-		writeError(w, http.StatusBadRequest, "advertiser_id, name, valid media_type required")
+	if req.Name == "" || !mediaTypes[req.MediaType] {
+		writeError(w, http.StatusBadRequest, "name, valid media_type required")
 		return
 	}
-	// html 存完整 URL；video/image 必须是 R2 分区对象 key（防任意路径注入）
+	// html 存完整 URL；video/image 必须是 R2 扁平内容寻址对象 key（防任意路径注入）
 	if req.MediaType == "html" {
 		if len(req.StoragePath) < 8 || (req.StoragePath[:7] != "http://" && req.StoragePath[:8] != "https://") {
 			writeError(w, http.StatusBadRequest, "html storage_path must be a URL")
@@ -252,7 +256,7 @@ func (s *Server) handleCreateCreative(w http.ResponseWriter, r *http.Request) {
 		}
 	} else if !storagePathRe.MatchString(req.StoragePath) {
 		writeError(w, http.StatusBadRequest,
-			"storage_path must match creatives/{adv_prefix}/{advertiser_id}/{creative_id}.ext")
+			"storage_path must match creatives/{sha256}.ext")
 		return
 	}
 	if req.Orientation != "" && !orientations[req.Orientation] {
@@ -280,11 +284,14 @@ func (s *Server) handleCreateCreative(w http.ResponseWriter, r *http.Request) {
 	if req.Status != "" {
 		fields["status"] = req.Status
 	}
-	if req.Weight > 0 {
-		fields["weight"] = req.Weight
-	}
 	if req.ABGroup != "" {
 		fields["ab_group"] = req.ABGroup
+	}
+	if len(req.Styles) > 0 {
+		fields["styles"] = req.Styles
+	}
+	if len(req.TargetApps) > 0 {
+		fields["target_apps"] = req.TargetApps
 	}
 
 	id, err := s.Store.CreateCreative(r.Context(), fields)
@@ -308,14 +315,21 @@ func (s *Server) handleUpdateCreative(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fields := map[string]any{"updated_by": actor}
+	if req.MediaType != "" {
+		if !mediaTypes[req.MediaType] {
+			writeError(w, http.StatusBadRequest, "invalid media_type")
+			return
+		}
+		fields["media_type"] = req.MediaType
+	}
 	if req.Name != "" {
 		fields["name"] = req.Name
 	}
+	if req.StoragePath != "" {
+		fields["storage_path"] = req.StoragePath
+	}
 	if req.Status != "" {
 		fields["status"] = req.Status
-	}
-	if req.Weight > 0 {
-		fields["weight"] = req.Weight
 	}
 	if req.ABGroup != "" {
 		fields["ab_group"] = req.ABGroup
@@ -335,6 +349,12 @@ func (s *Server) handleUpdateCreative(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.DurationMS > 0 {
 		fields["duration_ms"] = req.DurationMS
+	}
+	if len(req.Styles) > 0 {
+		fields["styles"] = req.Styles
+	}
+	if len(req.TargetApps) > 0 {
+		fields["target_apps"] = req.TargetApps
 	}
 
 	if err := s.Store.UpdateCreative(r.Context(), id, fields); err != nil {
@@ -358,4 +378,36 @@ func (s *Server) handleDeleteCreative(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.Store.WriteAudit(r.Context(), actor, "delete", "creative", id, nil)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleCreativePlayURL 后台预览：把素材 storage_path 转成可播放地址。
+// video/image 走 R2 预签名 GET（与决策下发同套签名逻辑）；html 存的是完整 URL，直链不签名。
+func (s *Server) handleCreativePlayURL(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireRole(w, r, false, false); !ok {
+		return
+	}
+	id := r.PathValue("id")
+	c, err := s.Store.GetCreative(r.Context(), id)
+	if err != nil || c == nil {
+		writeError(w, http.StatusNotFound, "creative not found")
+		return
+	}
+	var url string
+	switch c.MediaType {
+	case "html":
+		url = c.StoragePath // 落地页外链，直接播
+	case "video", "image":
+		if s.Storage == nil {
+			writeError(w, http.StatusNotImplemented, "storage (R2) not configured")
+			return
+		}
+		url = s.Storage.PresignGET(c.StoragePath, s.Storage.DefaultExpiry())
+	default:
+		writeError(w, http.StatusBadRequest, "unsupported media_type: "+c.MediaType)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"url":        url,
+		"media_type": c.MediaType,
+	})
 }

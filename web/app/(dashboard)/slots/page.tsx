@@ -1,7 +1,8 @@
 import Link from "next/link";
-import { requireRole } from "@/lib/auth";
+import { canWriteRole, requireMenu } from "@/lib/auth";
 import { listSlots, type AdminSlot } from "@/lib/go-api";
 import { SLOT_TYPE_LABEL } from "./slot-form";
+import { SlotRowActions } from "./row-actions";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -24,7 +25,8 @@ function statusBadge(status: string): string {
 }
 
 export default async function SlotsPage() {
-  const session = await requireRole(["super_admin", "operator"]);
+  const session = await requireMenu("/slots");
+  const canWrite = canWriteRole(session.role);
 
   let slots: AdminSlot[] = [];
   let error: string | null = null;
@@ -43,9 +45,11 @@ export default async function SlotsPage() {
             共 {slots.length} 个广告位，填充优先级在详情页配置
           </p>
         </div>
-        <Link href="/slots/new">
-          <Button>新增广告位</Button>
-        </Link>
+        {canWrite && (
+          <Link href="/slots/new">
+            <Button>新增广告位</Button>
+          </Link>
+        )}
       </div>
 
       {error && (
@@ -70,6 +74,7 @@ export default async function SlotsPage() {
                   <th className="px-4 py-3 font-medium text-right">频控（日上限 / 间隔）</th>
                   <th className="px-4 py-3 font-medium text-right">填充来源</th>
                   <th className="px-4 py-3 font-medium">AI Agent</th>
+                  <th className="px-4 py-3 text-right font-medium">操作</th>
                 </tr>
               </thead>
               <tbody>
@@ -111,6 +116,13 @@ export default async function SlotsPage() {
                       ) : (
                         <span className="text-xs text-muted-foreground">—</span>
                       )}
+                    </td>
+                    <td className="px-4 py-3">
+                      <SlotRowActions
+                        id={s.id}
+                        name={s.name}
+                        canDelete={canWrite}
+                      />
                     </td>
                   </tr>
                 ))}

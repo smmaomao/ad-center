@@ -10,12 +10,13 @@ import (
 	"adcenter/internal/store"
 )
 
-// zeroAdvertiser 兜底/MAX 聚合的哨兵（metrics_minute.advertiser_id 不可 NULL）。
-const zeroAdvertiser = "00000000-0000-0000-0000-000000000000"
+// zeroAdvertiser 兜底/MAX 聚合的哨兵。advertiser_id 已迁移为 bigint 且 NOT NULL，
+// 用 0 作为跨广告主聚合行的占位（真实广告主 id 从序列 1 起，0 永不冲突）。
+const zeroAdvertiser = "0"
 
 type key struct {
-	app, slot, adv string
-	minute         time.Time
+	app, style, adv string
+	minute          time.Time
 }
 
 type counters struct {
@@ -32,16 +33,18 @@ type Agg struct {
 // New 创建聚合器。
 func New() *Agg { return &Agg{m: map[key]*counters{}} }
 
-func (a *Agg) k(app, slot, adv string, now time.Time) key {
+func (a *Agg) k(app, style, adv string, now time.Time) key {
 	if adv == "" {
 		adv = zeroAdvertiser
 	}
-	return key{app, slot, adv, now.UTC().Truncate(time.Minute)}
+	return key{app, style, adv, now.UTC().Truncate(time.Minute)}
 }
 
 // Record 记录一次请求的结果（items>0 为直售填充，否则为兜底）。
-func (a *Agg) Record(app, slot, adv string, items int, revenue float64, now time.Time) {
-	k := a.k(app, slot, adv, now)
+// V1.2 起 revenue 恒为 0：req 只下发不产生收入，收入在计费事件
+// （RecordEvent）累计。
+func (a *Agg) Record(app, style, adv string, items int, revenue float64, now time.Time) {
+	k := a.k(app, style, adv, now)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	c := a.m[k]
@@ -54,9 +57,10 @@ func (a *Agg) Record(app, slot, adv string, items int, revenue float64, now time
 	c.revenue += revenue
 }
 
-// RecordEvent 记录回执事件（impression/click/conversion）。
-func (a *Agg) RecordEvent(app, slot, adv string, event string, revenue float64, now time.Time) {
-	k := a.k(app, slot, adv, now)
+// RecordEvent 记录回执事件并累计收入（revenue = 服务端确认的实际扣费：
+// cpm impression / cpc click / cpa S2S 转化；其余事件恒 0）。
+func (a *Agg) RecordEvent(app, style, adv string, event string, revenue float64, now time.Time) {
+	k := a.k(app, style, adv, now)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	c := a.m[k]
@@ -69,7 +73,10 @@ func (a *Agg) RecordEvent(app, slot, adv string, event string, revenue float64, 
 		c.impressions++
 	case "click":
 		c.clicks++
-	case "conversion":
+	// V1.2：转化计数包含 S2S 细分事件（install/activate/register/
+	// first_purchase/purchase）与 V1.1 遗留的 conversion（客户端通道已拒绝该
+	// 事件，历史数据兼容）。
+	case "conversion", "install", "activate", "register", "first_purchase", "purchase":
 		c.conversions++
 	}
 	c.revenue += revenue
@@ -93,7 +100,7 @@ func (a *Agg) Flush(ctx context.Context, s *store.Store) error {
 	rows := make([]store.MinuteMetric, 0, len(snapshot))
 	for k, c := range snapshot {
 		rows = append(rows, store.MinuteMetric{
-			AppID: k.app, SlotID: k.slot, AdvertiserID: k.adv, Minute: k.minute,
+			AppID: k.app, Style: k.style, AdvertiserID: k.adv, Minute: k.minute,
 			Requests: c.requests, Fills: c.fills, Impressions: c.impressions,
 			Clicks: c.clicks, Conversions: c.conversions, Revenue: c.revenue,
 		})

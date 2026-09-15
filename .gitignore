@@ -26,3 +26,6 @@ coverage.*
 # 前端（后续 web/ 子项目自管理）
 web/node_modules/
 web/.next/
+
+# 本地编译产物
+/server

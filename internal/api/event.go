@@ -2,79 +2,33 @@ package api
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
-	"time"
 
 	"adcenter/internal/store"
 )
 
-// eventWriter 异步批量事件落库：决策路径只入队（带界队列，满则丢弃计数），
-// 后台协程批量写 ad_events。回执事件量级 = 填充量级，批量写足以消化。
-type eventWriter struct {
-	ch      chan store.AdEvent
-	store   *store.Store
-	log     interface{ Warn(string, ...any) }
-	dropped int64
-}
-
-func newEventWriter(s *store.Store, log interface{ Warn(string, ...any) }) *eventWriter {
-	return &eventWriter{ch: make(chan store.AdEvent, 8192), store: s, log: log}
-}
-
-// NewEventWriter 构造异步事件写入器（main 装配用）。
-func NewEventWriter(s *store.Store, log *slog.Logger) *eventWriter {
-	return newEventWriter(s, log)
-}
-
-func (w *eventWriter) enqueue(e store.AdEvent) {
-	select {
-	case w.ch <- e:
-	default:
-		// 队列满：丢弃并计数（决策路径绝不阻塞；DB 端恢复后由对账修正）
-		w.dropped++
+// enqueueEvent 决策/回执路径的唯一写入口：只入队，绝不触碰 DB。
+func (s *Server) enqueueEvent(e store.AdEvent) {
+	if s.Queue == nil {
+		return
 	}
+	s.Queue.Publish(e)
 }
 
-func (w *eventWriter) run(ctx context.Context) {
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-	var batch []store.AdEvent
-	flush := func() {
-		if len(batch) == 0 {
-			return
-		}
-		if err := w.store.InsertAdEvents(context.Background(), batch); err != nil {
-			w.log.Warn("event batch write failed", "err", err, "n", len(batch))
-		}
-		batch = batch[:0]
+// ConsumeEvents 消费端批量落库（M2，SCALING.md §2）。
+//
+// 明细写 ad_events + 扣费金额按「广告主 × 小时」聚合写 budget_ledger，
+// 两步在**同一事务**内：消费是至少一次语义，处理失败会重投，分步写会出现
+// "明细写了、流水没写"的半截状态。
+//
+// 返回 error 时 Redis 后端不 ACK（消息留在 PEL 稍后重投）；
+// Memory 后端无重试，由对账修正。
+func (s *Server) ConsumeEvents(ctx context.Context, batch []store.AdEvent) error {
+	if s.Store == nil {
+		return nil
 	}
-	for {
-		select {
-		case <-ctx.Done():
-			// 排空队列尽力落库
-			for {
-				select {
-				case e := <-w.ch:
-					batch = append(batch, e)
-				default:
-					flush()
-					return
-				}
-			}
-		case e := <-w.ch:
-			batch = append(batch, e)
-			if len(batch) >= 500 {
-				flush()
-			}
-		case <-ticker.C:
-			flush()
-		}
-	}
+	return s.Store.WriteEventBatch(ctx, batch)
 }
-
-// enqueueEvent Server 快捷方法。
-func (s *Server) enqueueEvent(e store.AdEvent) { s.events.enqueue(e) }
 
 // ============================================================
 // 管理 API handlers
@@ -189,7 +143,7 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, list)
 }
 
-// handleCreateApp 注册 App：生成 API Key（原文仅此一次返回），哈希落库。
+// handleCreateApp 注册 App：生成 API Key，明文与哈希一并落库（明文仅作展示/复制）。
 func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireRole(w, r, true, true) // 仅 super_admin
 	if !ok {
@@ -202,17 +156,118 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name required")
 		return
 	}
-	key, prefix, hash, err := generateAPIKey()
+	key, hash, err := generateAPIKey()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	id, err := s.Store.CreateApp(r.Context(), body.Name, prefix, hash)
+	id, err := s.Store.CreateApp(r.Context(), body.Name, key, hash)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	_ = s.Store.WriteAudit(r.Context(), actor, "create", "app", id, nil)
-	// 原文仅创建时返回一次，之后不可再取
+	// 完整 Key 仅在创建时返回一次；之后页面常驻展示脱敏前缀，可复制完整值。
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id, "api_key": key})
+}
+
+// handleUpdateApp 更新 App 名称 / 状态 / 业务后端回调地址。
+//
+//	PATCH /v1/admin/apps/{id}  {"name"?,"status"?,"callback_url"?}
+func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireRole(w, r, true, true) // 仅 super_admin
+	if !ok {
+		return
+	}
+	var body struct {
+		Name        *string `json:"name"`
+		Status      *string `json:"status"`
+		CallbackURL *string `json:"callback_url"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	fields := map[string]any{}
+	if body.Name != nil && *body.Name != "" {
+		fields["name"] = *body.Name
+	}
+	if body.Status != nil {
+		if *body.Status != "active" && *body.Status != "paused" {
+			writeError(w, http.StatusBadRequest, "status must be active or paused")
+			return
+		}
+		fields["status"] = *body.Status
+	}
+	if body.CallbackURL != nil {
+		fields["callback_url"] = *body.CallbackURL
+	}
+	if len(fields) == 0 {
+		writeError(w, http.StatusBadRequest, "no fields to update")
+		return
+	}
+	id := r.PathValue("id")
+	if err := s.Store.UpdateApp(r.Context(), id, fields); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	_ = s.Store.WriteAudit(r.Context(), actor, "update", "app", id, nil)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleDeleteApp 软删 App：仅置 deleted_at，保留历史归因与事件数据。
+//
+//	DELETE /v1/admin/apps/{id}
+func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireRole(w, r, true, true) // 仅 super_admin
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	if err := s.Store.SoftDeleteApp(r.Context(), id); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	_ = s.Store.WriteAudit(r.Context(), actor, "delete", "app", id, nil)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleResetAppSecret 重置 S2S 签名密钥：旧密钥立即失效，业务后端需同步更新。
+//
+//	POST /v1/admin/apps/{id}/secret
+func (s *Server) handleResetAppSecret(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireRole(w, r, true, true) // 仅 super_admin
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	secret, err := s.Store.ResetAppSecret(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	_ = s.Store.WriteAudit(r.Context(), actor, "reset_secret", "app", id, nil)
+	writeJSON(w, http.StatusOK, map[string]string{"secret": secret})
+}
+
+// handleResetAppKey 重置 API Key：旧密钥立即失效，新密钥明文仅在本次返回一次。
+//
+//	POST /v1/admin/apps/{id}/key
+func (s *Server) handleResetAppKey(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireRole(w, r, true, true) // 仅 super_admin
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	key, hash, err := generateAPIKey()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if _, err := s.Store.ResetAppKey(r.Context(), id, key, hash); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	_ = s.Store.WriteAudit(r.Context(), actor, "reset_api_key", "app", id, nil)
+	// 完整 Key 仅本次返回；之后页面展示脱敏前缀，需再次重置才能取到新值。
+	writeJSON(w, http.StatusOK, map[string]string{"key": key})
 }

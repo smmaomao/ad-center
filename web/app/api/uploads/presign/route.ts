@@ -3,7 +3,6 @@
 // 直传 R2 → 浏览器携 object_key 调 Go 管理 API 注册素材元数据。
 // 写凭证只在本服务端使用，不进响应。
 import { NextRequest, NextResponse } from "next/server";
-import { randomUUID } from "node:crypto";
 import { getSession } from "@/lib/auth";
 import { goApi } from "@/lib/go-api";
 import { presignPUT, r2ConfigFromEnv } from "@/lib/r2/signer";
@@ -21,12 +20,15 @@ const MAX_FILE_BYTES = 100 * 1024 * 1024; // 100MB
 const UPLOAD_TTL_SECONDS = 600; // 预签名时效 10 分钟
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const SHA256_RE = /^[0-9a-f]{64}$/;
 
 interface PresignRequest {
   advertiser_id: string;
   media_type: string;
   ext: string;
   file_size_bytes: number;
+  /** 文件内容 SHA-256（hex 64 位），前端读取文件后计算传入，用于内容寻址命名（去重 + 稳定 URL） */
+  content_sha256: string;
 }
 
 export async function POST(req: NextRequest) {
@@ -42,7 +44,11 @@ export async function POST(req: NextRequest) {
   }
 
   const body = (await req.json().catch(() => null)) as PresignRequest | null;
-  if (!body || !UUID_RE.test(body.advertiser_id ?? "")) {
+  // advertiser_id：空 = 公共素材库（不绑定广告主）；非空须为合法 id。
+  // 随广告主 id 迁移为 bigint，故接受整数 id（兼容旧 uuid 形态）。
+  const advId = body?.advertiser_id ?? "";
+  const idValid = advId === "" || /^[0-9]+$/.test(advId) || UUID_RE.test(advId);
+  if (!body || !idValid) {
     return NextResponse.json({ error: "invalid advertiser_id" }, { status: 400 });
   }
   const exts = EXT_ALLOWLIST[body.media_type];
@@ -56,22 +62,30 @@ export async function POST(req: NextRequest) {
   if (!Number.isInteger(body.file_size_bytes) || body.file_size_bytes <= 0 || body.file_size_bytes > MAX_FILE_BYTES) {
     return NextResponse.json({ error: `file_size_bytes must be 1..${MAX_FILE_BYTES}` }, { status: 400 });
   }
-
-  // 广告主存在性校验（复用 Go API，防孤儿对象）
-  try {
-    await goApi(`/v1/admin/advertisers/${body.advertiser_id}`, session.email);
-  } catch {
-    return NextResponse.json({ error: "advertiser not found" }, { status: 404 });
+  if (!SHA256_RE.test(body.content_sha256 ?? "")) {
+    return NextResponse.json(
+      { error: "invalid content_sha256 (need 64-hex SHA-256 of file bytes)" },
+      { status: 400 },
+    );
   }
 
-  // 对象 key：creatives/{广告主ID前2位}/{广告主ID}/{素材ID}.{ext}（分区防单目录对象过多）
-  const creativeId = randomUUID();
-  const objectKey = `creatives/${body.advertiser_id.slice(0, 2)}/${body.advertiser_id}/${creativeId}.${ext}`;
+  // 广告主存在性校验（复用 Go API，防孤儿对象）；公共素材库（空 id）跳过
+  if (advId !== "") {
+    try {
+      await goApi(`/v1/admin/advertisers/${advId}`, session.email);
+    } catch {
+      return NextResponse.json({ error: "advertiser not found" }, { status: 404 });
+    }
+  }
+
+  // 对象 key：creatives/{内容SHA-256}.{ext}
+  // 扁平内容寻址（content-addressed）命名：相同素材天然去重、URL 稳定、跨广告主共享同一条对象，
+  // 配合 CDN 长缓存（immutable）可最大化边缘命中率（见 ARCHITECTURE.md §2.7）。
+  const objectKey = `creatives/${body.content_sha256}.${ext}`;
 
   return NextResponse.json({
     upload_url: presignPUT(cfg, objectKey, UPLOAD_TTL_SECONDS),
     object_key: objectKey,
-    creative_id: creativeId,
     expires_in: UPLOAD_TTL_SECONDS,
   });
 }

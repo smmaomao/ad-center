@@ -1,11 +1,11 @@
-import { requireRole } from "@/lib/auth";
+import { requireMenu } from "@/lib/auth";
 import { listApps, type AdminApp } from "@/lib/go-api";
 import { SlotForm } from "../slot-form";
 
 export const dynamic = "force-dynamic";
 
 export default async function NewSlotPage() {
-  const session = await requireRole(["super_admin", "operator"]);
+  const session = await requireMenu("/slots");
   const apps: AdminApp[] = await listApps(session.email).catch(() => []);
 
   return (

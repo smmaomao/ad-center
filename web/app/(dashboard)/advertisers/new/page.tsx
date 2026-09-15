@@ -1,10 +1,10 @@
-import { requireRole } from "@/lib/auth";
+import { requireMenu } from "@/lib/auth";
 import { AdvertiserForm } from "../advertiser-form";
 
 export const dynamic = "force-dynamic";
 
 export default async function NewAdvertiserPage() {
-  await requireRole(["super_admin", "operator"]);
+  await requireMenu("/advertisers");
   return (
     <div className="mx-auto max-w-3xl space-y-6">
       <div>

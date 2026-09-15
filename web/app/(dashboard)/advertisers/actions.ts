@@ -18,6 +18,8 @@ import {
 
 export interface FormState {
   error?: string;
+  ok?: boolean;
+  id?: string;
 }
 
 function str(fd: FormData, key: string): string {
@@ -50,21 +52,13 @@ export async function saveAdvertiserAction(
   const name = str(fd, "name");
   if (!name) return { error: "广告主名称必填" };
 
-  const endAt = str(fd, "end_at");
+  // 广告主只承载身份 + 计费锚点；KPI / 排期 / 消耗节奏 / 下发有效期
+  // 已下沉到广告任务（campaign）维度（migration 000035）。这里只提交广告主自身字段。
   const fields: Record<string, unknown> = {
     name,
-    tier: Math.max(1, Math.round(num(fd, "tier")) || 1),
-    status: str(fd, "status") || "active",
-    target_cpi: num(fd, "target_cpi"),
-    daily_budget: num(fd, "daily_budget"),
-    consume_speed: str(fd, "consume_speed") || "even",
-    bidding_mode: str(fd, "bidding_mode") || "cpi",
-    bidding_price: num(fd, "bidding_price"),
-    guaranteed_enabled: fd.get("guaranteed_enabled") !== null,
-    guaranteed_min_share: num(fd, "guaranteed_min_share"),
     contact: str(fd, "contact"),
+    notes: str(fd, "notes"),
   };
-  if (endAt) fields.end_at = endAt;
 
   const id = str(fd, "id");
   // redirect 抛出 NEXT_REDIRECT，必须放在 try/catch 之外
@@ -76,7 +70,7 @@ export async function saveAdvertiserAction(
     }
     revalidatePath(`/advertisers/${id}`);
     revalidatePath("/advertisers");
-    return {};
+    return { ok: true };
   }
   let newId: string;
   try {
@@ -86,6 +80,8 @@ export async function saveAdvertiserAction(
     return { error: errMsg(e, "创建失败") };
   }
   revalidatePath("/advertisers");
+  // 弹窗内提交时（带 no_redirect）不跳转，由前端关闭弹窗并刷新
+  if (fd.get("no_redirect")) return { ok: true, id: newId };
   redirect(`/advertisers/${newId}`);
 }
 

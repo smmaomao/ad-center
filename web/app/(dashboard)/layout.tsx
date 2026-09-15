@@ -1,11 +1,7 @@
 import { redirect } from "next/navigation";
-import { createClient } from "@/lib/supabase/server";
-import {
-  ROLE_LABELS,
-  getSession,
-  navItemsForRole,
-} from "@/lib/auth";
+import { getSession, getNavTree, roleLabel } from "@/lib/auth";
 import { Sidebar } from "@/components/sidebar";
+import { logoutAction } from "./logout-action";
 
 export default async function DashboardLayout({
   children,
@@ -15,22 +11,19 @@ export default async function DashboardLayout({
   const session = await getSession();
   if (!session) redirect("/login?error=no_access");
 
-  async function logout() {
-    "use server";
-    const supabase = await createClient();
-    await supabase.auth.signOut();
-    redirect("/login");
-  }
-
   return (
     <div className="flex min-h-screen">
       <Sidebar
-        items={navItemsForRole(session.role)}
+        items={await getNavTree()}
         email={session.email}
-        roleLabel={ROLE_LABELS[session.role]}
-        logout={logout}
+        roleLabel={roleLabel(session.role)}
+        logout={logoutAction}
       />
-      <main className="flex-1 overflow-y-auto bg-muted/40 p-6">{children}</main>
+      <main className="app-canvas flex-1 overflow-y-auto">
+        <div className="relative z-10 mx-auto w-full max-w-7xl px-6 py-8">
+          {children}
+        </div>
+      </main>
     </div>
   );
 }

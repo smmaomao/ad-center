@@ -26,6 +26,7 @@ type Memory struct {
 	mu       sync.Mutex
 	balances map[string]*balance
 	day      string // 当前预算日（Jakarta YYYY-MM-DD），跨日触发重置
+	initDay  bool   // 尚未校准预算日：首次操作按当前时钟设定，避免误清零
 	ledger   LedgerFn
 	now      func() time.Time
 }
@@ -40,7 +41,7 @@ func NewMemory(balances map[string][2]float64, ledger LedgerFn) *Memory {
 	for id, b := range balances {
 		m.balances[id] = &balance{budget: b[0], spent: b[1]}
 	}
-	m.day = m.today()
+	m.initDay = true // 预算日首次操作时按当前时钟校准，不依赖 NewMemory 调用瞬间
 	return m
 }
 
@@ -51,6 +52,14 @@ func (m *Memory) today() string { return m.now().In(jakarta).Format("2006-01-02"
 
 // rolloverLocked 跨日重置：预算日翻页时全部 spent 清零并记流水。
 func (m *Memory) rolloverLocked() {
+	if m.initDay {
+		// 首次操作：仅记录当前预算日，不触发重置。否则若 NewMemory 调用时刻
+		// 与注入时钟/首笔操作日期不一致（测试或动态调钟），会误判跨日而清空
+		// 当日已耗。
+		m.day = m.today()
+		m.initDay = false
+		return
+	}
 	if today := m.today(); today != m.day {
 		for id, b := range m.balances {
 			if b.spent > 0 && m.ledger != nil {
@@ -84,33 +93,6 @@ func (m *Memory) TryDeduct(advertiserID string, amount float64) bool {
 	return true
 }
 
-func (m *Memory) Commit(advertiserID string, amount float64) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.rolloverLocked()
-	if m.ledger != nil {
-		m.ledger(advertiserID, "commit", amount)
-	}
-	return nil
-}
-
-func (m *Memory) Rollback(advertiserID string, amount float64) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.rolloverLocked()
-
-	if b, ok := m.balances[advertiserID]; ok && amount > 0 {
-		b.spent -= amount
-		if b.spent < 0 {
-			b.spent = 0
-		}
-	}
-	if m.ledger != nil {
-		m.ledger(advertiserID, "rollback", amount)
-	}
-	return nil
-}
-
 func (m *Memory) Stats(advertiserID string) (spent, budget float64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -120,6 +102,31 @@ func (m *Memory) Stats(advertiserID string) (spent, budget float64) {
 		return 0, 0
 	}
 	return b.spent, b.budget
+}
+
+// SyncBalances 用 DB 全量快照对齐内存预算表（配置热更新路径调用）。
+//
+// 语义严格遵循 budget.Syncer 接口契约，核心是**只刷新 daily_budget、不动 spent**：
+// spent 的真相在进程内，DB 的 spent_today 是启动时的旧快照（不回写），
+// 拿它覆盖会直接抹掉当日已消耗，导致预算超发。
+func (m *Memory) SyncBalances(balances map[string][2]float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rolloverLocked()
+
+	for id, b := range balances {
+		if cur, ok := m.balances[id]; ok {
+			cur.budget = b[0] // 已存在：只更新预算上限
+			continue
+		}
+		m.balances[id] = &balance{budget: b[0], spent: b[1]} // 新增：按 DB 快照初始化
+	}
+	// DB 中已不存在（软删）：清掉内存状态，避免无主条目常驻
+	for id := range m.balances {
+		if _, ok := balances[id]; !ok {
+			delete(m.balances, id)
+		}
+	}
 }
 
 func (m *Memory) HourlyCalibrate() error {
@@ -133,4 +140,7 @@ func (m *Memory) HourlyCalibrate() error {
 }
 
 // 编译期接口实现检查。
-var _ Ctrl = (*Memory)(nil)
+var (
+	_ Ctrl   = (*Memory)(nil)
+	_ Syncer = (*Memory)(nil)
+)

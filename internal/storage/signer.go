@@ -13,7 +13,9 @@ import (
 	"fmt"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -24,6 +26,15 @@ type Signer struct {
 	accessKey string
 	secretKey string
 	region    string // R2 固定 "auto"
+
+	// CDN 前置（可选）：R2 自定义域 / Cloudflare Worker 代理域名。
+	// 非空时 PresignGET 签发 CDN 域名 URL；PresignGETDirect 始终直连 R2 兜底。
+	cdnBase         string
+	cdnBucketInPath bool // false 时路径去掉桶前缀（R2 自定义域把桶绑到域名）
+	expiry          time.Duration // 预签名默认有效期（默认 24h，可由 R2_SIGN_TTL 覆盖）
+
+	mu    sync.Mutex
+	cache map[string]urlCacheEntry // 进程内签名缓存：同一 (host,key,TTL) 窗口内只签一次
 }
 
 // New 创建签名器。
@@ -31,7 +42,10 @@ func New(accountID, bucket, accessKey, secretKey string) *Signer {
 	return &Signer{
 		accountID: accountID, bucket: bucket,
 		accessKey: accessKey, secretKey: secretKey,
-		region: "auto",
+		region:           "auto",
+		cdnBucketInPath: true,
+		expiry:          24 * time.Hour,
+		cache:           make(map[string]urlCacheEntry),
 	}
 }
 
@@ -44,10 +58,75 @@ func (s *Signer) r2Host() string {
 	return s.accountID + ".r2.cloudflarestorage.com"
 }
 
-// PresignGET 生成对象下载的预签名 URL（短时效防盗链，建议 1h）。
-// R2 寻址为 path-style：/{bucket}/{objectKey}（bucket 必须进签名路径，否则 NoSuchBucket）。
+// SetCDN 配置 CDN 前置域名（R2 自定义域 / Cloudflare Worker 代理）。
+// base 为空则保持直连 R2（默认）。bucketInPath=false 时路径去掉桶前缀
+// （R2 自定义域把桶绑定到域名，路径仅为 /objectKey）；Worker 代理若仍用
+// /bucket/objectKey 转发则保持 true。
+func (s *Signer) SetCDN(base string, bucketInPath bool) {
+	s.cdnBase = base
+	s.cdnBucketInPath = bucketInPath
+}
+
+// SetSignTTL 覆盖预签名默认有效期（默认 24h）。<=0 忽略。
+func (s *Signer) SetSignTTL(d time.Duration) {
+	if d > 0 {
+		s.expiry = d
+	}
+}
+
+// DefaultExpiry 返回当前预签名默认有效期。
+func (s *Signer) DefaultExpiry() time.Duration {
+	return s.expiry
+}
+
+// PresignGET 生成对象下载 URL。
+// 已配置 CDN 前置（SetCDN，公开自定义域）→ 返回纯净无签名 URL（Cloudflare 边缘回源读私有 R2）。
+// 未配置 CDN（冷启动/直连 R2 私有桶）→ 返回 SigV4 预签名 URL（桶私有必须签名才能取）。
 func (s *Signer) PresignGET(objectKey string, expires time.Duration) string {
-	return s.presignAt(s.r2Host(), s.bucket+"/"+objectKey, expires, time.Now().UTC().Format("20060102T150405Z"))
+	if s.cdnBase != "" {
+		// 公开自定义域（绑定私有 R2 的 CDN 前门）：直接返回纯净 URL，无需签名。
+		key := objectKey
+		if s.cdnBucketInPath {
+			key = s.bucket + "/" + objectKey
+		}
+		return strings.TrimSuffix(s.cdnBase, "/") + "/" + strings.TrimPrefix(key, "/")
+	}
+	// 无 CDN（冷启动/直连 R2 私有桶）：用 SigV4 预签名 GET。
+	return s.cachedPresign(s.r2Host(), s.bucket+"/"+objectKey, expires)
+}
+
+// cachedPresign 带进程内缓存的签名：同一 (host,key,TTL) 在窗口内只签一次，
+// 降低高 QPS 决策路径的重复 HMAC（虽微秒级，热门素材可复用）。
+func (s *Signer) cachedPresign(host, objectKey string, expires time.Duration) string {
+	now := time.Now()
+	amz := now.UTC().Format("20060102T150405Z")
+	if s.cache != nil {
+		ck := host + "|" + objectKey + "|" + strconv.Itoa(int(expires.Seconds()))
+		s.mu.Lock()
+		if e, ok := s.cache[ck]; ok && now.Before(e.expire) {
+			url := e.url
+			s.mu.Unlock()
+			return url
+		}
+		s.mu.Unlock()
+	}
+	url := s.presignAt(host, objectKey, expires, amz)
+	if s.cache != nil {
+		cacheFor := expires
+		if cacheFor > 60*time.Second {
+			cacheFor -= 60 * time.Second // 预留余量，避免下发即将过期的 URL
+		}
+		ck := host + "|" + objectKey + "|" + strconv.Itoa(int(expires.Seconds()))
+		s.mu.Lock()
+		s.cache[ck] = urlCacheEntry{url: url, expire: now.Add(cacheFor)}
+		s.mu.Unlock()
+	}
+	return url
+}
+
+type urlCacheEntry struct {
+	url    string
+	expire time.Time
 }
 
 // presignAt SigV4 查询串签名核心（host/时间可注入，供测试向量对拍）。

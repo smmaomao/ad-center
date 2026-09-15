@@ -16,6 +16,7 @@ import (
 	"adcenter/internal/engine"
 	"adcenter/internal/frequency"
 	"adcenter/internal/metrics"
+	"adcenter/internal/queue"
 )
 
 // HTTP 决策路径基准（PLAN 1.9 的接口级验收：均值 <100ms / P99 <200ms
@@ -51,39 +52,34 @@ func benchAPIServer(b *testing.B) (*Server, string) {
 		Apps:                  map[string]*config.App{},
 		AppByKeyHash:          map[string]*config.App{},
 		Advertisers:           map[string]*config.Advertiser{},
-		Slots:                 map[string]*config.Slot{},
-		SlotsByKey:            map[string]*config.Slot{},
 		CreativesByAdvertiser: map[string][]*config.Creative{},
+		Campaigns:             map[string]*config.Campaign{},
+		CreativeCampaign:      map[string]string{},
 	}
 	app := &config.App{ID: "app_bench", Status: "active"}
 	snap.Apps[app.ID] = app
 	snap.AppByKeyHash[keyHash] = app
 
-	slot := &config.Slot{ID: "slot_bench", AppID: app.ID, Key: "bench", Status: "active",
-		FreqDailyLimit: 1 << 20, FreqFatigueWindow: 3}
-	snap.Slots[slot.ID] = slot
-	snap.SlotsByKey[slot.Key] = slot
-
 	bm := map[string][2]float64{}
 	for i := range 20 {
 		id := fmt.Sprintf("adv_%03d", i)
 		snap.Advertisers[id] = &config.Advertiser{
-			ID: id, Name: id, Tier: i%3 + 1, Status: "active",
+			ID: id, Name: id, Status: "active",
+			BiddingPrice: 0.5 + float64(i%9)*0.25,
+		}
+		campID := "cmp_" + id
+		snap.Campaigns[campID] = &config.Campaign{
+			ID: campID, AdvertiserID: id, Status: "active", DailyBudget: 1e9,
 			TargetCPI: 1 + float64(i%5)*0.2, ActualCPI: 0.3 + float64(i%7)*0.15,
-			BiddingPrice: 0.5 + float64(i%9)*0.25, DailyBudget: 1e9,
+			BillingMode: "cpm", BiddingPrice: 15,
+			CreativeIDs: []string{"cr_" + id},
 		}
-		bm[id] = [2]float64{1e9, 0}
+		snap.CreativeCampaign["cr_"+id] = campID
+		bm[campID] = [2]float64{1e9, 0}
 		snap.CreativesByAdvertiser[id] = []*config.Creative{{
-			ID: "cr_" + id, AdvertiserID: id, MediaType: "video", Status: "active", Weight: 1,
+			ID: "cr_" + id, AdvertiserID: id, MediaType: "video", Status: "active",
+			Styles: []string{"rewarded_video"},
 		}}
-		share := 0.0
-		if i == 0 {
-			share = 0.3
-		}
-		slot.Priorities = append(slot.Priorities, config.FillPriority{
-			ID: id, SourceType: "advertiser", AdvertiserID: id,
-			GuaranteedShare: share, Weight: 1,
-		})
 	}
 
 	discard := slog.New(slog.DiscardHandler)
@@ -96,14 +92,14 @@ func benchAPIServer(b *testing.B) (*Server, string) {
 		Cache: cache, Engine: &engine.Engine{Freq: benchFreqPassthrough{}, Budget: bud},
 		Metrics: metrics.New(), Budget: bud, Log: discard,
 	}
-	// 事件写入器：不启动 run 协程，队列满即丢弃（基准只测入队成本）
-	s.SetEventWriter(newEventWriter(nil, discard))
+	// 事件队列：不启动消费协程，队列满即丢弃（基准只测入队成本）
+	s.Queue = queue.NewMemory(8192, 500, 2*time.Second)
 	return s, apiKey
 }
 
 func benchmarkHTTPAdRequest(b *testing.B, count int) {
 	s, apiKey := benchAPIServer(b)
-	body := fmt.Sprintf(`{"slot":"bench","deviceId":"dev_bench","count":%d}`, count)
+	body := fmt.Sprintf(`{"style":"rewarded_video","deviceId":"dev_bench","count":%d}`, count)
 
 	b.ReportAllocs()
 	for b.Loop() {

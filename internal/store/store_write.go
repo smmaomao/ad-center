@@ -14,10 +14,10 @@ import (
 
 // MinuteMetric 一行分钟级指标（advertiserID 传零值 UUID 表示兜底/MAX）。
 type MinuteMetric struct {
-	SlotID, AdvertiserID, AppID string
-	Minute                       time.Time
+	Style, AdvertiserID, AppID string
+	Minute                     time.Time
 	Requests, Fills, Impressions, Clicks, Conversions int64
-	Revenue                      float64
+	Revenue                    float64
 }
 
 // FlushMinuteMetrics 批量 UPSERT 分钟指标（ON CONFLICT 累加，多实例/重试安全）。
@@ -27,19 +27,19 @@ func (s *Store) FlushMinuteMetrics(ctx context.Context, rows []MinuteMetric) err
 	}
 	var sb strings.Builder
 	sb.WriteString(`INSERT INTO metrics_minute
-		(slot_id, advertiser_id, app_id, minute_ts, requests, fills, impressions, clicks, conversions, revenue)
+		(style, advertiser_id, app_code, minute_ts, requests, fills, impressions, clicks, conversions, revenue)
 		VALUES `)
 	args := make([]any, 0, len(rows)*10)
 	for i, r := range rows {
 		if i > 0 {
 			sb.WriteByte(',')
 		}
-		fmt.Fprintf(&sb, "($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
+		fmt.Fprintf(&sb, "($%d,$%d::bigint,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
 			i*10+1, i*10+2, i*10+3, i*10+4, i*10+5, i*10+6, i*10+7, i*10+8, i*10+9, i*10+10)
-		args = append(args, r.SlotID, r.AdvertiserID, r.AppID, r.Minute,
+		args = append(args, r.Style, nilIfEmpty(r.AdvertiserID), r.AppID, r.Minute,
 			r.Requests, r.Fills, r.Impressions, r.Clicks, r.Conversions, r.Revenue)
 	}
-	sb.WriteString(` ON CONFLICT (slot_id, advertiser_id, minute_ts) DO UPDATE SET
+	sb.WriteString(` ON CONFLICT (style, advertiser_id, minute_ts) DO UPDATE SET
 		requests = metrics_minute.requests + EXCLUDED.requests,
 		fills = metrics_minute.fills + EXCLUDED.fills,
 		impressions = metrics_minute.impressions + EXCLUDED.impressions,
@@ -52,55 +52,170 @@ func (s *Store) FlushMinuteMetrics(ctx context.Context, rows []MinuteMetric) err
 
 // AdEvent 原始事件行。
 type AdEvent struct {
-	AppID, SlotID, AdvertiserID, CreativeID, DeviceID, Country, EventType string
+	AppID, Style, AdvertiserID, CreativeID, DeviceID, Country, EventType string
 	Revenue float64
 }
 
 // InsertAdEvents 批量写事件（fill/impression/click/conversion 回执与下发记录）。
 func (s *Store) InsertAdEvents(ctx context.Context, events []AdEvent) error {
+	q, args, ok := buildInsertAdEvents(events)
+	if !ok {
+		return nil
+	}
+	_, err := s.pool.Exec(ctx, q, args...)
+	return err
+}
+
+// WriteEventBatch 在**一个事务**内写入「事件明细 + 聚合扣费流水」（M2）。
+//
+// 为什么必须同事务：消费是"至少一次"语义，处理失败会重新投递。若两步分开写，
+// 失败重投会出现"明细写了、流水没写"的半截状态——重投后明细重复、流水缺失，
+// 对账永远对不齐。同事务后要么都成功，要么整批重试。
+func (s *Store) WriteEventBatch(ctx context.Context, events []AdEvent) error {
 	if len(events) == 0 {
 		return nil
 	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // 已 Commit 时 Rollback 无害
+
+	if q, args, ok := buildInsertAdEvents(events); ok {
+		if _, err := tx.Exec(ctx, q, args...); err != nil {
+			return err
+		}
+	}
+	if rows := AggregateLedger(events); len(rows) > 0 {
+		if q, args, ok := buildUpsertLedgerAgg(rows); ok {
+			if _, err := tx.Exec(ctx, q, args...); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+func buildInsertAdEvents(events []AdEvent) (string, []any, bool) {
+	if len(events) == 0 {
+		return "", nil, false
+	}
 	var sb strings.Builder
 	sb.WriteString(`INSERT INTO ad_events
-		(app_id, slot_id, advertiser_id, creative_id, device_id, country, event_type, revenue)
+		(app_code, style, advertiser_id, creative_id, device_id, country, event_type, revenue)
 		VALUES `)
 	args := make([]any, 0, len(events)*8)
 	for i, e := range events {
 		if i > 0 {
 			sb.WriteByte(',')
 		}
-		fmt.Fprintf(&sb, "($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
+		fmt.Fprintf(&sb, "($%d,$%d,$%d::bigint,$%d::bigint,$%d,$%d,$%d,$%d)",
 			i*8+1, i*8+2, i*8+3, i*8+4, i*8+5, i*8+6, i*8+7, i*8+8)
-		args = append(args, e.AppID, e.SlotID,
+		args = append(args, e.AppID, e.Style,
 			nilIfEmpty(e.AdvertiserID), nilIfEmpty(e.CreativeID),
 			e.DeviceID, nilIfEmpty(e.Country), e.EventType, e.Revenue)
 	}
-	_, err := s.pool.Exec(ctx, sb.String(), args...)
-	return err
+	return sb.String(), args, true
 }
 
-// WriteLedger 记预算流水（deduct/commit/rollback/calibrate/daily_reset）。
+// WriteLedger 记预算流水（V1.2：deduct=事件确认扣费/calibrate/daily_reset；
+// commit/rollback 为 V1.1 预扣模型遗留，不再产生）。
 func (s *Store) WriteLedger(ctx context.Context, advertiserID, appID, opType string, amount float64) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO budget_ledger (advertiser_id, app_id, op_type, amount, day, hour_bucket)
-		VALUES ($1, $2, $3, $4, CURRENT_DATE, extract(hour FROM now())::smallint)`,
+		INSERT INTO budget_ledger (advertiser_id, app_code, op_type, amount, day, hour_bucket)
+		VALUES ($1::bigint, $2, $3, $4, CURRENT_DATE, extract(hour FROM now())::smallint)`,
 		advertiserID, nilIfEmpty(appID), opType, amount)
 	return err
 }
 
-// BudgetBalance 预算余额（启动时加载，之后进程内维护，ledger 对账）。
-type BudgetBalance struct {
+// LedgerAgg 一条聚合扣费流水（广告主 × 当前小时）。
+//
+// M2（SCALING.md §2）：扣费流水不再每事件一行，而是由消费端在批次内先聚合
+// 成 (广告主, 小时) 一行，DB 写入量降 2~3 个数量级。
+type LedgerAgg struct {
 	AdvertiserID string
-	DailyBudget  float64
-	SpentToday   float64
+	AppID        string // 聚合行跨 app，通常留空
+	Amount       float64
+	Count        int
 }
 
-// LoadBudgetBalances 加载未删除广告主的日预算与今日已耗（budget 每日以 DB 为真相起点）。
+// WriteLedgerAgg 批量 UPSERT 聚合扣费流水（migration 000013）。
+//
+// 依赖部分唯一索引 (advertiser_id, day, hour_bucket) WHERE op_type='deduct_agg'：
+// 同一小时重复写入走 DO UPDATE 累加，不会产生多行、也不会覆盖历史。
+//
+// 注意：ON CONFLICT 累加保证的是"不产生重复行"，**不等于**重复投递时金额不重复
+// 累加——真正的事件级幂等（event_uid 唯一键）是 M3 待办（SCALING.md §8）。
+func (s *Store) WriteLedgerAgg(ctx context.Context, rows []LedgerAgg) error {
+	q, args, ok := buildUpsertLedgerAgg(rows)
+	if !ok {
+		return nil
+	}
+	_, err := s.pool.Exec(ctx, q, args...)
+	return err
+}
+
+// AggregateLedger 把批次内的扣费金额聚合成 (广告主, app) 行。
+// 只统计 Revenue>0 且归属到广告主的事件——过程性事件（fill / 未归因转化）不产生流水。
+func AggregateLedger(events []AdEvent) []LedgerAgg {
+	type aggKey struct{ adv, app string }
+	agg := make(map[aggKey]*LedgerAgg)
+	for _, e := range events {
+		if e.Revenue <= 0 || e.AdvertiserID == "" {
+			continue
+		}
+		k := aggKey{e.AdvertiserID, e.AppID}
+		a, ok := agg[k]
+		if !ok {
+			a = &LedgerAgg{AdvertiserID: e.AdvertiserID, AppID: e.AppID}
+			agg[k] = a
+		}
+		a.Amount += e.Revenue
+		a.Count++
+	}
+	rows := make([]LedgerAgg, 0, len(agg))
+	for _, a := range agg {
+		rows = append(rows, *a)
+	}
+	return rows
+}
+
+func buildUpsertLedgerAgg(rows []LedgerAgg) (string, []any, bool) {
+	if len(rows) == 0 {
+		return "", nil, false
+	}
+	var sb strings.Builder
+	sb.WriteString(`INSERT INTO budget_ledger
+		(advertiser_id, app_code, op_type, amount, count, day, hour_bucket) VALUES `)
+	args := make([]any, 0, len(rows)*4)
+	for i, r := range rows {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		fmt.Fprintf(&sb, "($%d::bigint,$%d,'deduct_agg',$%d,$%d,CURRENT_DATE,extract(hour FROM now())::smallint)",
+			i*4+1, i*4+2, i*4+3, i*4+4)
+		args = append(args, nilIfEmpty(r.AdvertiserID), nilIfEmpty(r.AppID), r.Amount, r.Count)
+	}
+	sb.WriteString(` ON CONFLICT (advertiser_id, day, hour_bucket) WHERE op_type = 'deduct_agg'
+		DO UPDATE SET amount = budget_ledger.amount + EXCLUDED.amount,
+		              count = budget_ledger.count + EXCLUDED.count`)
+	return sb.String(), args, true
+}
+
+// BudgetBalance 预算余额（启动时加载，之后进程内维护，ledger 对账）。
+// 预算单元现为 campaign：AdvertiserID 改称 CampaignID。
+type BudgetBalance struct {
+	CampaignID  string
+	DailyBudget float64
+	SpentToday  float64
+}
+
+// LoadBudgetBalances 加载未删除广告任务的日预算与今日已耗（budget 每日以 DB 为真相起点）。
+// 预算闸按 campaign 各自控制，故此处以 campaigns 为数据源。
 func (s *Store) LoadBudgetBalances(ctx context.Context) ([]BudgetBalance, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT advertiser_id::text, daily_budget::float8, spent_today::float8
-		FROM advertisers WHERE deleted_at IS NULL`)
+		SELECT id::text, daily_budget::float8, spent_today::float8
+		FROM campaigns WHERE deleted_at IS NULL`)
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +223,7 @@ func (s *Store) LoadBudgetBalances(ctx context.Context) ([]BudgetBalance, error)
 	var out []BudgetBalance
 	for rows.Next() {
 		var b BudgetBalance
-		if err := rows.Scan(&b.AdvertiserID, &b.DailyBudget, &b.SpentToday); err != nil {
+		if err := rows.Scan(&b.CampaignID, &b.DailyBudget, &b.SpentToday); err != nil {
 			return nil, err
 		}
 		out = append(out, b)
@@ -120,7 +235,7 @@ func (s *Store) LoadBudgetBalances(ctx context.Context) ([]BudgetBalance, error)
 func (s *Store) GetAdminRole(ctx context.Context, email string) (string, error) {
 	var role string
 	err := s.pool.QueryRow(ctx,
-		`SELECT role FROM admin_users WHERE email = $1`, email).Scan(&role)
+		`SELECT role_code FROM admin_users WHERE email = $1`, email).Scan(&role)
 	if errors.Is(err, context.Canceled) {
 		return "", err
 	}

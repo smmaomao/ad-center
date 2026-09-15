@@ -1,8 +1,8 @@
-import { requireRole } from "@/lib/auth";
+import { requireMenu } from "@/lib/auth";
 import { Placeholder } from "@/components/placeholder";
 
 export default async function AiAgentPage() {
-  await requireRole(["super_admin", "operator", "analyst", "strategy"]);
+  await requireMenu("/ai-agent");
   return (
     <Placeholder
       title="AI Agent 控制台"

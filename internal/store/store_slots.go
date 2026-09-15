@@ -41,7 +41,7 @@ type AdminPriority struct {
 	Position        int     `json:"position"`
 }
 
-// slotWritableCols 广告位可写列（白名单防注入；slot_key/app_id 创建后不可改：
+// slotWritableCols 广告位可写列（白名单防注入；slot_key/app_code 创建后不可改：
 // 客户端以 slot_key 为稳定标识，换 App 需重建广告位）。
 var slotWritable = map[string]bool{
 	"name": true, "type": true, "status": true,
@@ -51,7 +51,7 @@ var slotWritable = map[string]bool{
 
 // CreateSlot 新建广告位（+ 优先级，事务）。slot_key 全局唯一，冲突报错。
 func (s *Store) CreateSlot(ctx context.Context, fields map[string]any, priorities []PriorityInput) (string, error) {
-	for _, k := range []string{"app_id", "slot_key", "name", "type"} {
+	for _, k := range []string{"app_code", "slot_key", "name", "type"} {
 		if _, ok := fields[k]; !ok {
 			return "", fmt.Errorf("%s required", k)
 		}
@@ -62,12 +62,12 @@ func (s *Store) CreateSlot(ctx context.Context, fields map[string]any, prioritie
 	}
 	defer tx.Rollback(ctx)
 
-	// slot_key/app_id 只在创建时写入
+	// slot_key/app_code 只在创建时写入
 	cols, placeholders, args := buildInsert(fields, mergeWritable(slotWritable,
-		map[string]bool{"app_id": true, "slot_key": true, "created_by": true}))
+		map[string]bool{"app_code": true, "slot_key": true, "created_by": true}), nil)
 	var id string
 	err = tx.QueryRow(ctx, fmt.Sprintf(
-		`INSERT INTO ad_slots (%s) VALUES (%s) RETURNING slot_id::text`,
+		`INSERT INTO ad_slots (%s) VALUES (%s) RETURNING code`,
 		cols, placeholders), args...).Scan(&id)
 	if err != nil {
 		return "", err
@@ -83,9 +83,9 @@ func (s *Store) GetSlotDetail(ctx context.Context, id string) (*SlotDetail, erro
 	d := &SlotDetail{}
 	err := s.pool.QueryRow(ctx, `
 		SELECT `+fmt.Sprintf(slotCols, `
-		       (SELECT count(*) FROM fill_priorities f WHERE f.slot_id = s.slot_id AND f.enabled),`)+`
-		FROM ad_slots s JOIN apps a ON a.app_id = s.app_id
-		WHERE s.slot_id = $1 AND s.deleted_at IS NULL`, id).
+		       (SELECT count(*) FROM fill_priorities f WHERE f.slot_code = s.id AND f.enabled),`)+`
+		FROM ad_slots s JOIN apps a ON a.code = s.app_code
+		WHERE s.id = $1 AND s.deleted_at IS NULL`, id).
 		Scan(&d.ID, &d.AppID, &d.AppName, &d.Key, &d.Name, &d.Type, &d.Status,
 			&d.FreqDailyLimit, &d.FreqIntervalMinutes, &d.FreqFatigueWindow, &d.FillCount,
 			&d.AIAgentEnabled, &d.AIAgentGoal)
@@ -98,8 +98,8 @@ func (s *Store) GetSlotDetail(ctx context.Context, id string) (*SlotDetail, erro
 		       COALESCE(adv.name, ''), f.expected_ecpm::float8,
 		       f.guaranteed_share::float8, f.weight::float8, f.enabled, f.position
 		FROM fill_priorities f
-		LEFT JOIN advertisers adv ON adv.advertiser_id = f.advertiser_id
-		WHERE f.slot_id = $1 ORDER BY f.position`, id)
+		LEFT JOIN advertisers adv ON adv.id = f.advertiser_id
+		WHERE f.slot_code = $1 ORDER BY f.position`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -124,12 +124,12 @@ func (s *Store) UpdateSlot(ctx context.Context, id string, fields map[string]any
 	defer tx.Rollback(ctx)
 
 	if len(fields) > 0 {
-		sets, args := buildUpdate(fields, slotWritable)
+		sets, args := buildUpdate(fields, slotWritable, nil)
 		if len(sets) > 0 {
 			args = append(args, id)
 			tag, err := tx.Exec(ctx, fmt.Sprintf(
 				`UPDATE ad_slots SET %s, updated_at = now()
-				 WHERE slot_id = $%d AND deleted_at IS NULL`,
+				 WHERE id = $%d AND deleted_at IS NULL`,
 				strings.Join(sets, ", "), len(args)), args...)
 			if err != nil {
 				return err
@@ -141,7 +141,7 @@ func (s *Store) UpdateSlot(ctx context.Context, id string, fields map[string]any
 	}
 
 	if hasPriorities {
-		if _, err := tx.Exec(ctx, `DELETE FROM fill_priorities WHERE slot_id = $1`, id); err != nil {
+		if _, err := tx.Exec(ctx, `DELETE FROM fill_priorities WHERE slot_code = $1`, id); err != nil {
 			return err
 		}
 		if err := insertPriorities(ctx, tx, id, priorities); err != nil {
@@ -155,7 +155,7 @@ func (s *Store) UpdateSlot(ctx context.Context, id string, fields map[string]any
 func (s *Store) SoftDeleteSlot(ctx context.Context, id string) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE ad_slots SET deleted_at = now(), status = 'paused'
-		 WHERE slot_id = $1 AND deleted_at IS NULL`, id)
+		 WHERE id = $1 AND deleted_at IS NULL`, id)
 	if err != nil {
 		return err
 	}
@@ -180,8 +180,8 @@ func insertPriorities(ctx context.Context, tx pgx.Tx, slotID string, priorities 
 		}
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO fill_priorities
-			    (slot_id, source_type, advertiser_id, expected_ecpm, guaranteed_share, weight, enabled, position)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+			    (slot_code, source_type, advertiser_id, expected_ecpm, guaranteed_share, weight, enabled, position)
+			VALUES ($1, $2, $3::bigint, $4, $5, $6, $7, $8)`,
 			slotID, p.SourceType, advID, p.ExpectedECPM, p.GuaranteedShare, weight, p.Enabled, pos); err != nil {
 			return err
 		}

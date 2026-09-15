@@ -1,6 +1,6 @@
 # 自有广告投放管理系统 —— 技术架构设计
 
-> 版本：V1.1（2026-09-04）
+> 版本：V1.3（2026-09-05，在 V1.2 计费模型基础上：单价改为区间随机、请求内预算快照去重、预算同步触发收窄、修复跨日 rollover 误清零）
 > 依据：`docs/PRD.md`（PRD V1.2）
 > 部署结论：**路线 A —— 单实例常驻 + 自动重启**，P1 预留升级双实例 + Redis 路径
 
@@ -90,18 +90,18 @@ adcenter/
 
 1. **筛选**：从 ConfigCache 取活跃广告主，按广告位 fillPriority、定向过滤
 2. **KPI 分档**：`>85%` → 达优/正常保障（×1.2）；`≤85%` → 紧急保障（×0.8）
-3. **得分**：`得分 = 紧急度(1/(达成率+0.01)) × 消耗进度 × 层级权重(1.5/1.2/1.0)`，消耗偏慢 ×1.3、偏快 ×0.8
-4. **保底约束**：Tier1 保底 ≥30%，总保底 ≤100%，按 guaranteedShare 先切份额再排序
+3. **得分**：`得分 = 紧急度(1/(达成率+0.01)) × 消耗进度`，消耗偏慢 ×1.3、偏快 ×0.8（**已彻底去掉 Tier 层权重，纯 KPI 达成率驱动**）
+4. **保底约束**：总保底 ≤100%（slot 级 `guaranteed_share`），按 guaranteedShare 先切份额再排序
 5. **疲劳过滤**：FreqStore 查该用户近 N 次曝光的广告主，跳过重复
 6. **兜底链**：无填充 → MAX 聚合指令 → 平台自有推广
-7. **记账**：BudgetCtrl 预扣（预估消耗），MetricsAgg 计数
+7. **记账**：BudgetCtrl 只读闸（spent ≥ budget 停投，不扣费）；MetricsAgg 计数。真实扣费全部发生在计费事件回执（见 §2.2 V1.2 计费模型）
 
-**批量模式（count > 1，PRD 5.5）：** 得分定名单（保底 ceil 强制换入）→ 整轮下发（轮内单价降序）+ 余数给高分者 → 逐条物化（素材内选 / 频控 / 预扣，失败跳过）；只返回可用条数不补位。count 上限 20，返回条数受剩余频控额度约束。
+**批量模式（count > 1，PRD 5.5）：** 得分定名单（保底 ceil 强制换入）→ 整轮下发（轮内单价降序）+ 余数给高分者 → 逐条物化（素材内选 / 频控 / 预算只读闸，失败跳过）；只返回可用条数不补位。count 上限 20，返回条数受剩余频控额度约束。
 
 **工程细节（参照 Prebid Server 生产实践，V1.1）：**
 
 1. **排序可复现**：候选排序用 `sort.SliceStable` + 平局按 `advertiser_id` 升序打破——同样输入永远同样输出，决策日志可重放排查（"为什么选 A 不选 B"有据可查）
-2. **请求内 memoization**：单请求内重复计算的中间量（KPI 分档、消耗进度、Tier 权重）只算一次复用，不打分一个候选就算一遍
+2. **请求内 memoization**：单请求内重复计算的中间量（KPI 分档、消耗进度）只算一次复用，不打分一个候选就算一遍；预算快照（`spent/budget`）也在 `buildCandidates` 阶段查一次，打分与物化阶段直接复用，避免每个候选重复查 `Budget.Stats` 且保证请求内预算视图一致
 3. **快照刷新失败保留旧值**：ConfigCache 对账 SELECT 失败时**保留旧快照继续服务**（配置旧一点好过没有），仅日志告警；对应 Prebid RateConverter 的 staleness 降级策略
 4. **接口分层原则**（Prebid AdaptedBidder 注释）：单广告主内的计算（打分/分档/消耗）放 per-advertiser 纯函数；跨广告主逻辑（保底/排序/兜底链/批量名单）放引擎编排层——单测按此边界拆分
 
@@ -111,13 +111,30 @@ adcenter/
 
 ```go
 type BudgetCtrl interface {
-    TryDeduct(ctx, advertiserID string, amount float64) bool // 原子预扣
-    Commit / Rollback                                        // 事件回执后确认
-    HourlyCalibrate(ctx)                                     // 每小时平滑校准（PRD 5.2）
+    TryDeduct(advertiserID string, amount float64) bool // 计费事件确认扣费（原子；req 路径不调用）
+    Stats(advertiserID string) (spent, budget float64)  // 只读：req 预算闸 + 打分消耗进度因子
+    HourlyCalibrate(ctx)                                // 每小时平滑校准（PRD 5.2）
 }
 ```
 
-- 实现 A（现在）：进程内 `map[advertiserID]*atomic float` + 定时落库 `budget_ledger` 表（对账用）
+**计费模型（V1.2，migration 000008）：** req 下发**不扣费**——fill 只是"下发成功"日志。扣费全部锚定真实计费事件，锚点由广告主 `billing_mode` 决定（KPI 考核口径仍是 `bidding_mode/target_cpi`，两回事）：
+
+| billing_mode | 计费事件 | 来源 | 单次金额 |
+|---|---|---|---|
+| `cpm` | impression | 客户端 `POST /v1/ad/event` | `bidding_price/1000` |
+| `cpc` | click | 客户端 `POST /v1/ad/event` | `bidding_price` |
+| `cpa` | install/activate/register/first_purchase/purchase | 归因方 `GET /v1/s2s/event`（凭 clickid 反查归属） | `cpa_event_prices[event_name]` |
+
+**单价取值（区间随机，V1.3）：** 单价不再是单一固定值，而是在服务端配置区间内均匀随机——既防客户端预测每次扣费金额、也平滑单广告主的成本波动；金额一律服务端计算，不信客户端上报：
+- `cpm`：`randPrice(bidding_price_min, bidding_price) / 1000`（`bidding_price_min` 缺省 0 → 退化为固定 `bidding_price`）
+- `cpc`：`randPrice(bidding_price_min, bidding_price)`（同上）
+- `cpa`：`randPrice(cpa_event_prices[event][0], cpa_event_prices[event][1])`（区间 `[min, max]`；`min≤0` 或 `min≥max` 退化为固定 `max`；`max≤0` 不扣）
+
+区间退化规则统一由 `config.randPrice` 实现：`min≤0 || min≥max → 返回 max`，否则 `[min, max)` 均匀随机。`cpa_event_prices` 以 jsonb 数组 `[min, max]` 存储，后台可逐事件配置区间。
+
+曾经的"req 按 CPI 全价预扣 → commit/rollback 结转"（V1.1）已废弃：单次安装价 ≠ 单次展示价，按它预扣每条 fill 会让预算几十倍虚假耗尽。req 路径只有只读闸（spent ≥ budget 停投）防超发，允许少量在途超发；`budget_ledger` 的 commit/rollback 流水不再产生（历史数据保留）。金额一律由服务端按配置计算，不信客户端上报 revenue（防刷量伪造）。
+
+- 实现 A（现在）：进程内 `map[advertiserID]*atomic float` + 定时落库 `budget_ledger` 表（对账用）；日预算随配置热更新（`Syncer`，B2/B3，见 §2.4）
 - 实现 B（P1）：换 Redis Lua 脚本实现，**接口不变**，支撑双实例
 
 ### 2.3 FrequencyStore（频控）
@@ -171,10 +188,10 @@ POST /v1/ad/req + X-Api-Key: adc_xxx
 
 | 环节 | 方案 |
 |------|------|
-| 对象 key | `creatives/{广告主ID前2位}/{广告主ID}/{素材ID}.{ext}`（分区防单目录对象过多） |
+| 对象 key | `creatives/{内容SHA-256}.{ext}`（扁平内容寻址命名：相同素材天然去重、URL 稳定、跨广告主共享同一条对象，配合 CDN 长缓存 immutable） |
 | 上传 | Next.js 服务端生成 R2 presigned PUT URL（`web/lib/r2/signer.ts` 纯 TS SigV4，与 Go 签名器同源算法、共享 AWS 官方测试向量对拍，零新增依赖；R2 写凭证存环境变量）→ 浏览器直传，不经 Go 服务。R2 寻址为 path-style：`/{bucket}/{key}`（bucket 必须进签名路径） |
 | 决策下发 | Go 引擎内存里做 S3 sigv4 签名（HMAC，微秒级，无网络 IO，不在决策路径加延迟）→ presigned GET，1h 短时效防盗链 |
-| CDN 缓存 | P0 直连 R2 端点（零出口费，延迟可接受）；P1 加自定义域 + Cache Rule（cache key 忽略 query string，否则每人签名不同会击穿缓存）→ Jakarta PoP 命中。注意：预签名 URL 仅在 S3 API 域有效，不能用于自定义域——P1 落地时需改为公开桶 + 自定义域（对象 key 本身不可猜测，UUID 命名即防盗链），放弃签名机制 |
+| CDN 缓存 | P0 直连 R2 端点（零出口费，延迟可接受）；P1 加自定义域（`R2_CDN_BASE` 指向 Cloudflare 自定义域、`R2_CDN_BUCKET_IN_PATH=false`）后，引擎 presigned GET 自动走 CDN。CDN 侧用 Cache Rule 把 `X-Amz-*` 从 cache key 剥离（否则每次签名不同会击穿缓存）；内容哈希命名使 URL 稳定，可配 `Cache-Control: public, max-age=604800, immutable` 长缓存（几天级，与 1h 签名有效期解耦，靠换文件名而非过期来更新素材）。成熟形态（B 方案）可在 R2 前置 Cloudflare Worker 做边缘验权 + 缓存键归一化 |
 | 凭证管理 | Next.js 持写权限 token（仅素材前缀），Go 持只读 token；html 素材 storage_path 存完整 URL 不走签名 |
 
 ---
@@ -189,14 +206,14 @@ migration 工具：golang-migrate，文件在 `migrations/`
 | 表 | 说明 | 关键设计 |
 |----|------|----------|
 | `apps` | 客户端 App 注册表 | api_key_prefix（展示）+ api_key_hash（sha256，原文不落库）；多租户隔离的锚点 |
-| `advertisers` | 广告主（全局共享） | tier、kpi 目标/实际、budget、bidding、guaranteed、targeting（jsonb）、freq_windows（jsonb 多窗口滑动频控）、end_at（投放截止，过期过滤）、priority_score |
+| `advertisers` | 广告主（全局共享） | kpi 目标/实际、budget、bidding、targeting（jsonb）、freq_windows（jsonb 多窗口滑动频控）、end_at（投放截止，过期过滤）、priority_score、contact、notes（后台联系/备注）；**已移除** tier 与 advertiser 级保量（guaranteed），保量下放到 campaign / slot 级 |
 | `ad_slots` | 广告位（归属 App） | app_id FK、**slot_key**（客户端引用的稳定标识，全局唯一）、type、频控三列（freq_daily_limit / freq_interval_minutes / freq_fatigue_window）、ai_agent（jsonb） |
 | `fill_priorities` | 填充优先级（独立表） | slot_id FK、source_type、advertiser_id FK、guaranteed_share、weight、enabled、position |
 | `creatives` | 素材 | advertiser_id FK、storage_path、media_type（video/image/html）、orientation（landscape/portrait/square/any）、width/height/duration_ms（播放 UI 需要）、status、weight、ab_group |
 | `decision_logs` | AI 决策日志 | agent、action、old/new value、result deltas、confidence、reverted；按月分区，保留 180 天 |
-| `budget_ledger` | 预算流水 | advertiser_id、预扣/确认/回滚、金额、hour_bucket（对账与平滑控制依据） |
+| `budget_ledger` | 预算流水 | advertiser_id、op（deduct=事件扣费/calibrate/daily_reset；commit/rollback 为 V1.1 预扣模型遗留，不再产生）、金额、hour_bucket（对账与平滑控制依据） |
 | `metrics_minute` | 分钟级指标 | slot_id、advertiser_id（**零值 UUID 哨兵**表示兜底/MAX，主键不可 NULL）、ts、requests/fills/revenue/ecpm |
-| `ad_events` | 原始事件 | event_type（imp/click/conv）、device_id、可回溯审计，保留 180 天 |
+| `ad_events` | 原始事件 | event_type（request/fill/impression/click/install/activate/register/first_purchase；conversion 兼容 V1.1 遗留）、device_id、可回溯审计，保留 180 天 |
 | `admin_users` | 后台用户 | 用 Supabase Auth + `admin_users` 映射角色（role: super_admin/operator/analyst/strategy） |
 
 **要点：**
@@ -218,7 +235,21 @@ POST /v1/ad/req        # 广告决策：头 X-Api-Key（服务端推导 app_id�
                        #       条数 ≤ count，不补位）；count=1 时可为
                        #       max_fallback / self_promo 指令
                        # 性能预算：内存路径，目标 <10ms，含网络 <100ms
-POST /v1/ad/event      # 事件上报：imp/click/conv（客户端埋点 + 服务端校验），同样带 X-Api-Key
+POST /v1/ad/event      # 客户端事件回执：imp/click（带 X-Api-Key）；转化不进此通道
+                       # 扣费锚点 = 广告主 billing_mode（cpm→impression、cpc→click），
+                       # 金额服务端按 bidding_price 计算（cpm 折算 /1000）
+GET /v1/s2s/event      # 归因方 S2S 转化回调（无 App Key，V1.2 暂不加密钥），
+                       # 参数对齐 Adjust 转化回调模板（宏展开回传）：
+                       #   clickid（必填：投放时为一次点击生成的唯一 ID，服务端
+                       #           凭它反查点击登记还原 app/slot/advertiser/device；
+                       #           生成与"如何透传给归因方"待定，登记表未接入前
+                       #           只确认收到、不扣费不记账）
+                       #   event_name（install/activate/register/first_purchase/purchase）
+                       #   pixelId（归因方像素标识，仅记录日志）
+                       #   testFlag（测试流量：确认不记账）
+                       #   currency / value（充值事件回传流水，当前只记录不参与
+                       #                   cpa 固定单价计费）
+                       # billing_mode=cpa → 按 cpa_event_prices[event_name] 扣费
 ```
 
 ### 4.2 管理 API（Next.js BFF 转发，内部密钥 + RBAC）
@@ -255,11 +286,15 @@ POST /v1/ad/event      # 事件上报：imp/click/conv（客户端埋点 + 服�
 
 ### 5.3 P1 升级路径（路线 B，接口已预留）
 
+> **完整演进规划见 `docs/SCALING.md`**：内存态外移清单、消息队列选型（Redis Streams → Kafka）、里程碑 M0~M4、key 规范与降级约束、M1 实施说明。
+
 `BudgetCtrl` / `FrequencyStore` 均为接口隔离，P1 换 Redis（Upstash SG，~$8/月）实现即可双实例：
 - 平时 2 实例 + Fly rolling deploy → 发版零停机、单机故障无感
 - 决策路径增加一次同 region Redis RTT（<1ms），性能预算仍充裕
 
 #### 5.3.1 单实例 → 多实例迁移手册（TODO：扩容到 2 实例前必须执行）
+
+**当前进度（2026-09-07）：** 步骤 1（契约测试）早已具备；步骤 3 的**代码侧已完成**——`budget` / `frequency` 的 Redis 实现 + `STATE_STORE=redis` 开关 + Redis 版契约测试（复用同一套用例，见 `docs/SCALING.md §6`）。剩余步骤 2/4/5 属于部署与验证动作，按本文顺序执行即可，仍**严禁跳步**。
 
 **背景：** P0 频控/预算状态在进程内存（单副本，天然一致）；多实例下内存态必然多副本导致超发（预算双倍扣、频控双倍放行）。状态必须先外移再扩容，**顺序不能反**。
 

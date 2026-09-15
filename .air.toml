@@ -1,0 +1,21 @@
+# Air 配置：看守 ad-center 的 cmd/server（:8888）。
+# 编辑 cmd/server 或 internal 下任一 .go 即自动重新编译并重启。
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  cmd = "CGO_ENABLED=0 go build -o ./tmp/adcenter ./cmd/server"
+  bin = "./tmp/adcenter"
+  full_bin = "./tmp/adcenter"
+  include_ext = ["go", "sql", "tmpl", "html"]
+  # 只看守本服务与共享的 internal；排除前端/web、无关大目录。
+  include_dir = ["cmd/server", "internal"]
+  exclude_dir = ["tmp", "bin", "logs", "docs", "web", "node_modules", ".git", "vendor"]
+  delay = 2000          # 改动后延迟 2s 再重建，避免连续保存触发多次
+  stop_on_error = true  # 编译失败时保持旧进程，不空重启
+
+[log]
+  time = true
+
+[misc]
+  clean_on_exit = true

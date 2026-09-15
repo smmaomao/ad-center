@@ -51,7 +51,7 @@ func (c *Cache) listenLoop(ctx context.Context, dsn string, log *slog.Logger) er
 	log.Info("config listener ready", "channel", notifyChannel)
 
 	// 重连成功后先补一次全量（防断线窗口丢通知）
-	if err := c.Reload(ctx); err != nil {
+	if err := c.reload(ctx, "reconnect"); err != nil {
 		log.Warn("config reload after reconnect failed", "err", err)
 	}
 
@@ -62,7 +62,7 @@ func (c *Cache) listenLoop(ctx context.Context, dsn string, log *slog.Logger) er
 			return err
 		}
 		log.Info("config change notified", "table", n.Payload)
-		if err := c.Reload(ctx); err != nil {
+		if err := c.reload(ctx, "notify:"+n.Payload); err != nil {
 			// Reload 内部已保留旧快照并告警，此处继续等下一条通知
 			continue
 		}

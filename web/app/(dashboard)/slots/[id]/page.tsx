@@ -1,4 +1,4 @@
-import { requireRole } from "@/lib/auth";
+import { requireMenu } from "@/lib/auth";
 import {
   getSlot,
   listAdvertisers,
@@ -15,7 +15,7 @@ export const dynamic = "force-dynamic";
 export default async function SlotDetailPage({
   params,
 }: PageProps<"/slots/[id]">) {
-  const session = await requireRole(["super_admin", "operator"]);
+  const session = await requireMenu("/slots");
   const { id } = await params;
 
   let loadError: string | null = null;
@@ -73,7 +73,10 @@ export default async function SlotDetailPage({
         )}
       </div>
 
-      <SlotForm apps={apps} initial={slot} />
+      {/* #edit 锚点：列表页「修改」直接定位到编辑表单 */}
+      <div id="edit" className="scroll-mt-6">
+        <SlotForm apps={apps} initial={slot} />
+      </div>
 
       <PriorityEditor
         slotId={id}

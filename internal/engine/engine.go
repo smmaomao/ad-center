@@ -1,39 +1,58 @@
-// Package engine 是广告决策引擎（PRD 5.1 单条 + 5.5 批量），纯内存计算、无 IO。
+// Package engine 是广告决策引擎。纯内存计算、无 IO。
+//
+// 去广告位（slot）后模型：一次请求携带 App + 展现样式（style），引擎从
+// 「target_apps 含该 App 且 styles 含该样式」的素材里筛选候选，按
+// Price_Score × 优先级系数 × urgency × 消耗节奏 降序排序后下发。
 //
 // 分层原则（参照 Prebid AdaptedBidder 注释）：
-//   - 单广告主内的计算（打分/分档/消耗进度）→ score.go 纯函数
-//   - 跨广告主逻辑（保底/排序/名单/兜底链）→ 本文件编排层
+//   - 单素材打分（Price_Score / urgency / pacing）→ score.go 纯函数
+//   - 跨素材编排（筛选 / 排序 / 频控 / 兜底）→ 本文件
 //
-// 依赖（BudgetCtrl / FrequencyStore）通过接口注入，引擎可单测、可基准测试。
+// 依赖（BudgetCtrl / FrequencyStore）通过接口注入，引擎可单测。
 package engine
 
 import (
-	"cmp"
-	"math"
-	"slices"
 	"sort"
 	"time"
 
 	"adcenter/internal/budget"
 	"adcenter/internal/config"
+	"adcenter/internal/fatigue"
 	"adcenter/internal/frequency"
 )
 
 // MaxCount 单次请求条数上限（PRD 5.5）。
 const MaxCount = 20
 
+// Styles 系统支持的展现样式（client 在请求里传 style 字段，替代旧的广告位 slot_key）。
+// 素材通过 Creative.Styles 声明自己支持哪些样式；引擎按此维度筛选候选。
+var Styles = []string{"splash", "rewarded_video", "interstitial", "feed", "banner"}
+
+// ValidStyle 校验请求传入的 style 是否合法。
+func ValidStyle(s string) bool {
+	for _, v := range Styles {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
 // Engine 决策引擎。并发安全（无共享可变状态，依赖均为并发安全接口）。
 type Engine struct {
-	Freq   frequency.Store
-	Budget budget.Ctrl
+	Freq    frequency.Store
+	Budget  budget.Ctrl
+	Fatigue fatigue.Store // 全局疲劳度（用户×素材），nil 表示不启用
 	// Pick 创意加权随机选择函数（索引选择器），测试注入确定性实现。
 	Pick func(n int) int
 }
 
-// Request 一次决策请求（API 层已解析 App/Slot 并完成校验）。
+// Request 一次决策请求（API 层已解析 App/Style 并完成校验）。
+//
+// 去 slot：不再有「广告位」概念，请求维度是 App + 展现样式。
 type Request struct {
 	App      *config.App
-	Slot     *config.Slot
+	Style    string // 展现样式：splash / rewarded_video / interstitial / feed / banner
 	DeviceID string
 	Country  string
 	Language string
@@ -50,274 +69,253 @@ type Item struct {
 	Score        float64          `json:"score"`
 	// MediaURL 素材下载地址（R2 预签名 GET / html 直链）。
 	// 引擎不负责签名（保持纯函数），由 API 层装饰。
+	// 已配 CDN 前置时为 CDN 域名 URL；未配则直连 R2（冷启动/无 CDN 自动回退）。
 	MediaURL string `json:"media_url,omitempty"`
+	// ExpireAt 客户端展示过期时间（Unix 秒）。超过该时间客户端应隐藏此广告，
+	// 并在下次请求时重新拉取。由广告主 deliver_ttl_minutes（兜底 10 分钟）决定。
+	ExpireAt int64 `json:"expire_at"`
+	// CreativeHash 素材内容 SHA-256（hex）。用于客户端本地去重缓存与完整性校验。
+	// 仅 video/image 下发（对象 key 即内容寻址）；html 外链不填。
+	CreativeHash string `json:"creative_hash,omitempty"`
 }
 
-// Response 决策结果：Items 非空即直售填充；否则 Fallback 指示降级链
-// （"max" = 客户端走 MAX 聚合，"self_promo" = 平台自有推广）。
+// Response 决策结果：Items 非空即直售填充；否则 Fallback 指示降级。
 type Response struct {
 	Items    []Item `json:"items"`
 	Fallback string `json:"fallback,omitempty"`
 }
 
-// candidate 候选广告主（引擎内部视图）。
+// candidate 候选素材（引擎内部视图）。
 type candidate struct {
-	adv *config.Advertiser
-	fp  config.FillPriority
-	// 打分中间量（请求内一次计算，多处复用）
-	achievement float64
-	urgency     float64
-	band        float64 // KPI 分档系数
-	tier        float64 // 层级权重
+	adv         *config.Advertiser
+	creative    *config.Creative
+	achievement float64 // KPI 达成率（campaign.targetCPI/campaign.actualCPI）
+	urgency     float64 // (达成率+0.01) 的倒数，越未达标越紧急
 	pacing      float64 // 消耗节奏系数
+	priceScore  float64 // 出价基准分（Price_Score）
+	bidPrice    float64 // 出价（来自 campaign，用于 Item.BidPrice）
 	score       float64
+	ttl         int // 下发有效期（分钟），来自 campaign（未配置回落默认）
+	// 请求内预算快照：buildCandidates 查一次后注入，score 与 materialize 复用。
+	spent  float64
+	budget float64
 }
 
-// Decide 执行决策（PRD 5.1 / 5.5）。
+// Decide 执行决策（PRD 5.1 / 5.5，去 slot 版）。
 func (e *Engine) Decide(snap *config.Snapshot, req Request) Response {
 	if req.Count < 1 {
 		req.Count = 1
 	}
 	req.Count = min(req.Count, MaxCount)
 
-	// 前置：广告位/App 非活跃 → 直接降级
-	if req.App == nil || !req.App.Active() || req.Slot == nil || !req.Slot.Active() {
-		return e.fallback(req.Slot)
+	// 前置：App 非活跃 → 直接降级
+	if req.App == nil || !req.App.Active() {
+		return Response{Fallback: "self_promo"}
 	}
 
-	// ① 筛选 + ②③ 打分（候选构建，纯函数见 score.go）
+	// ① 筛选（活跃/上下架/定向/样式/投放 App）+ ② 打分
 	cands := e.buildCandidates(snap, req)
 	if len(cands) == 0 {
-		return e.fallback(req.Slot)
+		return Response{Fallback: "self_promo"}
 	}
 
-	// ④ 排序：得分降序，平局按 advertiser_id 升序（决策可复现）
+	// ③ 排序：得分降序，平局按 creative.ID 升序（决策可复现）
 	sort.SliceStable(cands, func(i, j int) bool {
 		if cands[i].score != cands[j].score {
 			return cands[i].score > cands[j].score
 		}
-		return cands[i].adv.ID < cands[j].adv.ID
+		return cands[i].creative.ID < cands[j].creative.ID
 	})
 
-	// ⑤ 广告位级额度预检（count 条一起判，批量不互相卡间隔）
-	slotPolicy := frequency.SlotPolicy{
-		Interval:   time.Duration(req.Slot.FreqIntervalMinutes) * time.Minute,
-		DailyLimit: req.Slot.FreqDailyLimit,
-	}
-	if !e.Freq.CheckSlot(req.App.ID, req.DeviceID, req.Slot.ID, slotPolicy, req.Count, req.Now) {
-		return e.fallback(req.Slot)
-	}
+	// 全局疲劳度配置（系统设置 → 全局频控配置），决策时据此隐藏已达上限的素材。
+	fc := snap.FatigueConfig()
 
-	// ⑥ 名单生成 + 逐条物化
+	// ④ 逐条物化：疲劳度 / 预算闸挡住的跳过，至多取 count 条
 	var items []Item
-	if req.Count == 1 {
-		items = e.decideSingle(snap, req, cands)
-	} else {
-		items = e.decideBatch(snap, req, cands)
+	for _, c := range cands {
+		if len(items) >= req.Count {
+			break
+		}
+		if item, ok := e.materialize(req, c, fc); ok {
+			items = append(items, item)
+		}
 	}
-
 	if len(items) == 0 {
-		return e.fallback(req.Slot)
+		return Response{Fallback: "self_promo"}
 	}
-	e.Freq.RecordSlot(req.App.ID, req.DeviceID, req.Slot.ID, len(items), req.Now)
 	return Response{Items: items}
 }
 
-// buildCandidates 筛选（活跃/截止/定向/有可投素材）+ 打分。
+// buildCandidates 遍历所有广告主的活跃素材，筛出 style∈素材.styles 且
+// (target_apps 为空 或 含 req.App) 的素材，单素材打分。
+//
+// 预算闸按 campaign 各自控制：每个 campaign 在请求内只查一次预算快照，
+// 素材据其归属的 campaign 取 spent/budget；未挂到任何 campaign 的素材不限
+// 预算（不参与预算封顶、也不扣费）。
 func (e *Engine) buildCandidates(snap *config.Snapshot, req Request) []candidate {
-	cands := make([]candidate, 0, len(req.Slot.Priorities))
-	for _, fp := range req.Slot.Priorities {
-		if fp.SourceType != "advertiser" || fp.Weight <= 0 || fp.AdvertiserID == "" {
-			continue
-		}
-		adv, ok := snap.Advertisers[fp.AdvertiserID]
-		if !ok || !adv.Active(req.Now) {
+	campBudgets := make(map[string][2]float64, len(snap.Campaigns))
+	for id := range snap.Campaigns {
+		spent, budget := e.Budget.Stats(id)
+		campBudgets[id] = [2]float64{spent, budget}
+	}
+	cands := make([]candidate, 0)
+	for _, adv := range snap.Advertisers {
+		if !adv.Active(req.Now) {
 			continue
 		}
 		if !adv.Targeting.Match(req.Country, req.Language) {
 			continue
 		}
-		if !hasActiveCreative(snap, adv.ID) {
-			continue
+		for _, cr := range snap.CreativesByAdvertiser[adv.ID] {
+			if !creativeActive(cr) {
+				continue
+			}
+			if !styleIn(cr.Styles, req.Style) {
+				continue
+			}
+			if !targetsApp(cr.TargetApps, req.App.ID) {
+				continue
+			}
+			// 预算 / KPI / 排期 均按素材归属的广告任务（campaign）执行。
+			var camp *config.Campaign
+			if campID, ok := snap.CreativeCampaign[cr.ID]; ok {
+				camp = snap.Campaigns[campID]
+			}
+			if camp != nil && !camp.Active(req.Now) {
+				continue // 任务暂停或超出投放排期
+			}
+			spent, budget := 0.0, 0.0
+			if camp != nil {
+				if b, ok2 := campBudgets[camp.ID]; ok2 {
+					spent, budget = b[0], b[1]
+				}
+			}
+			cands = append(cands, e.scoreCreative(cr, adv, camp, snap.PricingBenchmark, req.Now, spent, budget))
 		}
-		cands = append(cands, e.score(adv, fp, req.Now))
 	}
 	return cands
 }
 
-func hasActiveCreative(snap *config.Snapshot, advertiserID string) bool {
-	for _, c := range snap.CreativesByAdvertiser[advertiserID] {
-		if c.Status == "active" {
+// creativeActive 素材是否处于可投放状态（排期由归属的 campaign 控制，见 buildCandidates）。
+func creativeActive(c *config.Creative) bool {
+	return c.Status == "active" || c.Status == "testing"
+}
+
+func styleIn(styles []string, style string) bool {
+	for _, s := range styles {
+		if s == style {
 			return true
 		}
 	}
 	return false
 }
 
-// decideSingle 单条模式：保底桶优先，按排序顺延物化（PRD 5.1 疲劳过滤 = 跳过继续）。
-func (e *Engine) decideSingle(snap *config.Snapshot, req Request, cands []candidate) []Item {
-	ordered := slices.Clone(cands)
-
-	// 保底：确定性分桶（设备+广告位+小时），流量份额按小时逼近
-	if pick, ok := guaranteedPick(ordered, req); ok {
-		ordered = reorderFirst(ordered, pick)
+// targetsApp 素材是否投放到该 App：target_apps 为空 = 投放全部 App。
+func targetsApp(targetApps []string, appID string) bool {
+	if len(targetApps) == 0 {
+		return true
 	}
-
-	for _, c := range ordered {
-		if item, ok := e.materialize(snap, req, c); ok {
-			return []Item{item}
+	for _, a := range targetApps {
+		if a == appID {
+			return true
 		}
 	}
-	return nil
+	return false
 }
 
-// decideBatch 批量模式（PRD 5.5）：
-// 得分定名单（保底 ceil 强制换入）→ 整轮下发（轮内单价降序）→ 余数给高分者
-// → 逐条物化，失败跳过不补位。
-func (e *Engine) decideBatch(snap *config.Snapshot, req Request, cands []candidate) []Item {
-	n := req.Count
-	l := min(len(cands), n) // 名单大小：分数 top-l（保底可强制换入）
-	quota := make([]int, len(cands))
-	rounds, rem := n/l, n%l
-	for i := range quota {
-		if i >= l {
-			break // 名单外的候选基础额度为 0
+// scoreCreative 单素材打分：
+//
+//	Price_Score = 投放计划出价 ÷ 平台计费标准线 × 100
+//	score       = Price_Score × 优先级系数(priority_score) × urgency × 消耗节奏
+//
+// 出价 / 计费方式 / 优先级系数 均取自归属的广告任务（campaign），素材只承载资产属性。
+func (e *Engine) scoreCreative(
+	c *config.Creative, adv *config.Advertiser, camp *config.Campaign,
+	bm *config.PricingBenchmark, now time.Time, spent, budget float64,
+) candidate {
+	// KPI 达成率来自广告任务（campaign）；未归属任务的素材按中性 1.0 参与排序。
+	achievement := 1.0
+	if camp != nil {
+		achievement = camp.Achievement()
+	}
+	urgency := 1.0 / (achievement + 0.01) // 彻底去掉 Tier 层权重，纯成就率驱动
+	pacing := e.pacingFactor(adv, now, spent, budget)
+
+	// 出价基准分：计费方式 / 出价来自投放计划（campaign），用平台标准线拉平到 100 分制比较。
+	// cpa 模式无单一事件时回落 CPAInstall 标准线；未挂 campaign 的素材按 cpm 中性基准。
+	var benchmark float64
+	price := 0.0
+	if camp != nil {
+		if camp.BillingMode == "cpa" && camp.TargetCPI > 0 {
+			price = camp.TargetCPI
+		} else {
+			price = camp.BiddingPrice
 		}
-		quota[i] = rounds
-		if i < rem {
-			quota[i]++
-		}
+		benchmark = bm.BenchmarkFor(camp.BillingMode, "")
+	} else {
+		benchmark = bm.BenchmarkFor("cpm", "")
+	}
+	priceScore := (price / benchmark) * 100
+
+	// 下发有效期来自广告任务（campaign），未配置回落默认值
+	ttl := config.DefaultDeliverTTLMinutes
+	if camp != nil {
+		ttl = camp.DeliverTTL()
 	}
 
-	// 保底强制换入：ceil(n × share) 不够则从最低分的非保底候选挪额度
-	for i := range cands {
-		if share := cands[i].fp.GuaranteedShare; share > 0 {
-			want := int(math.Ceil(float64(n) * share))
-			for quota[i] < want {
-				stolen := false
-				// 从最低分的非保底候选挪（保底者自身可能就在末位，需全表扫描）
-				for j := len(cands) - 1; j >= 0; j-- {
-					if j != i && cands[j].fp.GuaranteedShare <= 0 && quota[j] > 0 {
-						quota[j]--
-						quota[i]++
-						stolen = true
-						break
-					}
-				}
-				if !stolen {
-					break // 无处可挪（全部是保底或额度已空）
-				}
-			}
-		}
+	// 优先级系数改读 campaign 的 priority_score（替代原素材 weight）
+	weight := 1.0
+	if camp != nil && camp.PriorityScore > 0 {
+		weight = camp.PriorityScore
 	}
 
-	// 整轮下发：每轮包含所有尚有额度的候选，轮内按出价降序（同价按得分）
-	var items []Item
-	for {
-		round := make([]int, 0, l)
-		for i := range cands {
-			if quota[i] > 0 {
-				round = append(round, i)
-			}
-		}
-		if len(round) == 0 {
-			break
-		}
-		slices.SortStableFunc(round, func(a, b int) int {
-			if cands[a].adv.BiddingPrice != cands[b].adv.BiddingPrice {
-				return cmp.Compare(cands[b].adv.BiddingPrice, cands[a].adv.BiddingPrice)
-			}
-			return cmp.Compare(cands[b].score, cands[a].score)
-		})
-		for _, i := range round {
-			quota[i]--
-			if item, ok := e.materialize(snap, req, cands[i]); ok {
-				items = append(items, item)
-			}
-			// 物化失败（频控/预算/无素材）：跳过不补位
-		}
+	score := priceScore * weight * urgency * pacing
+	return candidate{
+		adv:         adv,
+		creative:    c,
+		achievement: achievement,
+		urgency:     urgency,
+		pacing:      pacing,
+		priceScore:  priceScore,
+		bidPrice:    price,
+		score:       score,
+		ttl:         ttl,
+		spent:       spent,
+		budget:      budget,
 	}
-	return items
 }
 
-// materialize 单条物化：频控 → 素材选择 → 预算预扣。任一步失败即放弃该条。
-func (e *Engine) materialize(snap *config.Snapshot, req Request, c candidate) (Item, bool) {
+// materialize 单条物化：全局疲劳度 → 广告主级频控（app:device:素材）→ 预算只读闸。
+// 频控维度按需求为「App + 这个素材」（不管横屏竖屏），故 slotID 参数传素材 ID。
+//
+// 说明：疲劳度的"计数"不在这里做——计数发生在用户真实观看（impression）时
+// （见 api 层的事件处理），此处只读取计数并据此隐藏已达上限的素材。这样决策
+// 缓存命中不会误增计数，疲劳上限始终以真实观看次数为准。
+func (e *Engine) materialize(req Request, c candidate, fc config.FatigueConfig) (Item, bool) {
+	// 全局疲劳度：已达任一上限 → 跳过该素材（不计数）。
+	if e.Fatigue != nil && fc.Enabled {
+		if blocked, _ := e.Fatigue.Check(req.DeviceID, c.creative.ID, fc); blocked {
+			return Item{}, false
+		}
+	}
 	advPolicy := frequency.AdvPolicy{
-		Windows:  toFreqWindows(c.adv.FreqWindows),
-		FatigueN: req.Slot.FreqFatigueWindow,
+		Windows: toFreqWindows(c.adv.FreqWindows),
 	}
-	if !e.Freq.CheckAndIncr(req.App.ID, req.DeviceID, req.Slot.ID, c.adv.ID, advPolicy, req.Now) {
+	if !e.Freq.CheckAndIncr(req.App.ID, req.DeviceID, c.creative.ID, c.adv.ID, advPolicy, req.Now) {
 		return Item{}, false
 	}
-	creative := pickCreative(snap.CreativesByAdvertiser[c.adv.ID], e.pickFunc())
-	if creative == nil {
-		return Item{}, false
-	}
-	if !e.Budget.TryDeduct(c.adv.ID, c.adv.BiddingPrice) {
+	// 预算只读闸：用请求内快照判断（spent >= budget 停投，不扣费）。
+	if c.budget > 0 && c.spent >= c.budget {
 		return Item{}, false
 	}
 	return Item{
 		AdvertiserID: c.adv.ID,
 		Advertiser:   c.adv.Name,
-		Creative:     creative,
-		BidPrice:     c.adv.BiddingPrice,
+		Creative:     c.creative,
+		BidPrice:     c.bidPrice,
 		Score:        c.score,
+		ExpireAt:     req.Now.Add(time.Duration(c.ttl) * time.Minute).Unix(),
 	}, true
-}
-
-func (e *Engine) pickFunc() func(n int) int {
-	if e.Pick != nil {
-		return e.Pick
-	}
-	return defaultPick
-}
-
-// fallback 兜底链：无直售填充时按广告位配置指示降级（MAX → 平台自有）。
-func (e *Engine) fallback(slot *config.Slot) Response {
-	r := Response{Fallback: "self_promo"}
-	if slot != nil {
-		for _, fp := range slot.Priorities {
-			if fp.SourceType == "max" {
-				r.Fallback = "max"
-				break
-			}
-		}
-	}
-	return r
-}
-
-// guaranteedPick 保底分桶：bucket = hash(deviceID|slotKey|小时桶) ∈ [0,10000)，
-// 命中某保底候选的份额区间则优先它。小时级分桶使份额按小时逼近配置值，
-// 同一设备跨小时有轮换（避免锁定单一来源）。
-func guaranteedPick(cands []candidate, req Request) (int, bool) {
-	var total float64
-	for _, c := range cands {
-		total += c.fp.GuaranteedShare
-	}
-	if total <= 0 {
-		return 0, false
-	}
-	bucket := hashBucket(req.DeviceID, req.Slot.Key, req.Now) % 10000
-	var cum float64
-	// 保底候选按得分降序覆盖份额区间
-	for i, c := range cands {
-		if c.fp.GuaranteedShare <= 0 {
-			continue
-		}
-		cum += c.fp.GuaranteedShare * 10000
-		if float64(bucket) < cum {
-			return i, true
-		}
-	}
-	return 0, false
-}
-
-// reorderFirst 把索引 i 的候选提到队首（其余保持原序）。
-func reorderFirst(cands []candidate, i int) []candidate {
-	out := make([]candidate, 0, len(cands))
-	out = append(out, cands[i])
-	out = append(out, cands[:i]...)
-	return append(out, cands[i+1:]...)
 }
 
 func toFreqWindows(ws []config.FreqWindow) []frequency.Window {
