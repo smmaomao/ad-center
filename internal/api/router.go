@@ -56,8 +56,8 @@ type Server struct {
 	Bids          *BidRegistry        // 下发交易上下文登记表（客户端接口 bid_id → 上下文）
 }
 
-// NewRouter 返回根路由（Go 1.26 方法路由）。
-func (s *Server) NewRouter() *http.ServeMux {
+// NewRouter 返回根路由（Go 1.26 方法路由），外层包了请求计时日志中间件。
+func (s *Server) NewRouter() http.Handler {
 	mux := http.NewServeMux()
 
 	// 客户端 API（X-Api-Key 鉴权）
@@ -131,12 +131,47 @@ func (s *Server) NewRouter() *http.ServeMux {
 	mux.HandleFunc("GET /v1/admin/settings/{key}", s.handleGetSetting)
 	mux.HandleFunc("PATCH /v1/admin/settings/{key}", s.handleUpdateSetting)
 
+	// 看板实时流（阶段 3.1）：SSE 推送 KPI 卡 / 广告主监控 / 广告位状态
+	mux.HandleFunc("GET /v1/admin/metrics/stream", s.handleMetricsStream)
+
 	// 健康检查（Fly health check）
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 
 	// Swagger UI（规范由 swag 生成，见 docs/ 包；文档仅覆盖客户端接口）
 	mux.Handle("/swagger/", httpSwagger.WrapHandler)
-	return mux
+	return s.loggingMiddleware(mux)
+}
+
+// statusRecorder 包装 ResponseWriter，记录响应状态码（默认 200）。
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+// loggingMiddleware 对每个请求打印耗时（毫秒）、方法、路径、状态码，
+// 便于通过 fly logs 观察哪些接口慢。/healthz 健康检查每 15s 一次，跳过以免刷屏。
+func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
+	skip := map[string]bool{"/healthz": true, "/swagger/": true}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if skip[r.URL.Path] {
+			next.ServeHTTP(w, r)
+			return
+		}
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		s.Log.Info("request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", rec.status,
+			"dur_ms", time.Since(start).Milliseconds(),
+		)
+	})
 }
 
 // handleHealthz 汇报进程存活与关键子系统状态。
