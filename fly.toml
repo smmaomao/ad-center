@@ -18,7 +18,16 @@ primary_region = 'sin'
   auto_stop_machines = 'stop'
   auto_start_machines = true
   min_machines_running = 1
-  processes = ['app']
+  processes = ["app"]
+  # 应用健康检查在 /healthz（internal/api/router.go），必须显式指定；
+  # 默认探活路径是 /，而路由表里没有 /，会导致 fly 误判机器不健康、返回 502。
+  [http_service.health_checks]
+    path = "/healthz"
+    method = "get"
+    interval = "15s"
+    timeout = "2s"
+    grace_period = "10s"
+    headers = {}
 
 [[vm]]
   cpu_kind = 'shared'
