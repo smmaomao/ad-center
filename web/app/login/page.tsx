@@ -47,7 +47,7 @@ export default function LoginPage() {
       <Card className="w-full max-w-sm">
         <CardHeader>
           <CardTitle className="text-2xl">广告中心</CardTitle>
-          <CardDescription>短剧 App 自有广告投放管理系统</CardDescription>
+          <CardDescription>广告管理系统</CardDescription>
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-4">
