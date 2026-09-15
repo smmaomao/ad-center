@@ -33,13 +33,14 @@ type AdListItem struct {
 	TargetScene      []string `json:"target_scene" example:"APP_LAUNCH"`
 	RequiredDuration int      `json:"required_duration" example:"15"`
 	ClickURL         string   `json:"click_url" example:"https://landing.com?clk={CLICK_ID}"`
-	// Loopable 是否允许在客户端缓存期内循环播放。当前由素材类型推导：视频素材为 true，图片为 false。
-	Loopable bool `json:"loopable" example:"true"`
 }
 
 // AdListData ad_list 包装。
 type AdListData struct {
-	AdList []AdListItem `json:"ad_list"`
+	// Loopable 整个广告列表是否允许在客户端缓存期内循环播放。
+	// 当且仅当列表内所有素材均可循环（视频）时为 true，任一图片素材出现则为 false。
+	Loopable bool         `json:"loopable" example:"true"`
+	AdList   []AdListItem `json:"ad_list"`
 }
 
 // AdListResponse 批量获取广告响应。

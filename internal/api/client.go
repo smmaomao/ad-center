@@ -232,6 +232,7 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	adList := make([]map[string]any, 0, len(collected))
+	allLoopable := true
 	for _, t := range collected {
 		it := t.item
 		cr := it.Creative
@@ -267,7 +268,10 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 		})
 		// loopable：客户端在缓存期内能否循环播放。当前由素材类型推导：
 		// 视频素材允许循环（true），图片素材不循环（false）。
+		// 该标记上提到 data 外层（整个广告列表是否可循环），当且仅当
+		// 列表内所有素材均可循环时才为 true。
 		loopable := cr.MediaType == "video"
+		allLoopable = allLoopable && loopable
 		adList = append(adList, map[string]any{
 			"bid_id":            bid,
 			"creative_id":       cr.ID,
@@ -279,7 +283,6 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 			"target_scene":      sceneForStyle(t.style),
 			"required_duration": reqDur,
 			"click_url":         clickURL,
-			"loopable":          loopable,
 		})
 		// fill 指标 + 事件（仅记日志/填充率，不计费）。
 		s.Metrics.Record(app.ID, t.style, it.AdvertiserID, 1, 0, now)
@@ -289,9 +292,15 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	if len(collected) == 0 {
+		allLoopable = false
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"code": 200, "msg": "success",
-		"data": map[string]any{"ad_list": adList},
+		"data": map[string]any{
+			"loopable": allLoopable,
+			"ad_list":  adList,
+		},
 	})
 }
 

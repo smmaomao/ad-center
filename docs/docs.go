@@ -268,6 +268,11 @@ const docTemplate = `{
                     "items": {
                         "$ref": "#/definitions/api.AdListItem"
                     }
+                },
+                "loopable": {
+                    "description": "Loopable 整个广告列表是否允许在客户端缓存期内循环播放。\n当且仅当列表内所有素材均可循环（视频）时为 true，任一图片素材出现则为 false。",
+                    "type": "boolean",
+                    "example": true
                 }
             }
         },
@@ -293,11 +298,6 @@ const docTemplate = `{
                 "height": {
                     "type": "integer",
                     "example": 1920
-                },
-                "loopable": {
-                    "description": "Loopable 是否允许在客户端缓存期内循环播放。当前由素材类型推导：视频素材为 true，图片为 false。",
-                    "type": "boolean",
-                    "example": true
                 },
                 "material_type": {
                     "type": "string",
