@@ -19,7 +19,11 @@ server
 next.config.*.bak
 
 # 文档 / 杂项（非运行时必需）
+# 注意：docs/docs.go 是 swag 生成的 Go 包，被 cmd/server/main.go 导入（_ "adcenter/docs"），
+# 编译期必须存在，不能忽略；swagger.json/yaml 由 docs.go 内联引用，一并保留以免 /swagger 路由缺数据。
 *.pdf
-docs/swagger.json
-docs/swagger.yaml
-docs/docs.go
+docs/客户端接口.md
+docs/ARCHITECTURE.md
+docs/PLAN.md
+docs/PRD.md
+docs/SCALING.md
