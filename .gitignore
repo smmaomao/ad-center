@@ -29,3 +29,6 @@ web/.next/
 
 # 本地编译产物
 /server
+
+# Next.js 构建缓存备份(不应入库)
+web/.next_bak/
