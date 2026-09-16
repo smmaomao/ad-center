@@ -186,7 +186,10 @@ func (s *Store) LoadSnapshot(ctx context.Context) (*config.Snapshot, error) {
 		       billing_mode, bidding_price::float8, priority_score::float8, bidding_mode,
 		       COALESCE(deliver_ttl_minutes, 10)::int,
 		       COALESCE(creative_ids, '{}')::text[], start_at, end_at,
-		       COALESCE(landing_url, '')
+		       COALESCE(landing_url, ''),
+		       COALESCE(freq_daily_limit, 0)::int,
+		       COALESCE(freq_interval_minutes, 0)::int,
+		       COALESCE(freq_fatigue_window, 0)::int
 		FROM campaigns WHERE deleted_at IS NULL`)
 	if err != nil {
 		return nil, fmt.Errorf("load campaigns: %w", err)
@@ -199,7 +202,8 @@ func (s *Store) LoadSnapshot(ctx context.Context) (*config.Snapshot, error) {
 			&c.TargetCPI, &c.ActualCPI,
 			&c.BillingMode, &c.BiddingPrice, &c.PriorityScore, &c.BiddingMode,
 			&c.DeliverTTLMinutes,
-			&creativeIDs, &c.StartAt, &c.EndAt, &c.LandingURL); err != nil {
+			&creativeIDs, &c.StartAt, &c.EndAt, &c.LandingURL,
+			&c.FreqDailyLimit, &c.FreqIntervalMinute, &c.FreqFatigueWindow); err != nil {
 			rows.Close()
 			return nil, err
 		}

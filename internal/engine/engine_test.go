@@ -192,12 +192,15 @@ func TestDecide_消耗节奏系数(t *testing.T) {
 }
 
 func TestDecideSingle_疲劳过滤顺延(t *testing.T) {
-	// 最高分 adv1（达成率 50%，紧急）被频控拒绝 → 顺延 adv2
+	// 最高分 adv1（达成率 50%，紧急）被任务级疲劳频控拒绝 → 顺延 adv2
 	snap := mkSnapshot(
 		mkAdv("adv1", 1, 1.0, 2.0),
 		mkAdv("adv2", 1, 1.0, 1.1),
 	)
-	freq := &fakeFreq{denyAdv: map[string]bool{"adv1": true}}
+	// 任务级滑动窗口频控：窗口 20min 内最多 3 次（两个字段都 >0 才生效）
+	snap.Campaigns["cmp_adv1"].FreqIntervalMinute = 20
+	snap.Campaigns["cmp_adv1"].FreqFatigueWindow = 3
+	freq := &fakeFreq{denyAdv: map[string]bool{"cmp_adv1": true}}
 	req := Request{App: snap.Apps["app1"], Style: "rewarded_video",
 		DeviceID: "d1", Count: 1, Now: testNow}
 	resp := mkEngine(freq, mkBudget()).Decide(snap, req)
@@ -296,6 +299,9 @@ func TestDecide_投放截止过滤(t *testing.T) {
 
 func TestDecide_无可用降级(t *testing.T) {
 	snap := mkSnapshot(mkAdv("adv1", 1, 1.0, 0.9))
+	// 任务级滑动窗口频控开启后（窗口 20min/3 次），频控全拒 → 无候选 → 降级 self_promo
+	snap.Campaigns["cmp_adv1"].FreqIntervalMinute = 20
+	snap.Campaigns["cmp_adv1"].FreqFatigueWindow = 3
 	req := Request{App: snap.Apps["app1"], Style: "rewarded_video",
 		DeviceID: "d1", Count: 1, Now: testNow}
 	// 频控全拒 → 无候选 → 降级 self_promo
@@ -349,7 +355,10 @@ func TestDecideBatch_物化失败不补位(t *testing.T) {
 		mkAdv("a", 1, 1.0, 2.0),
 		mkAdv("b", 1, 1.0, 1.5),
 	)
-	freq := &fakeFreq{denyAdv: map[string]bool{"b": true}}
+	// 任务级滑动窗口频控开启后（20min/3 次），按 campaign 拒绝 b（cmp_b）
+	snap.Campaigns["cmp_b"].FreqIntervalMinute = 20
+	snap.Campaigns["cmp_b"].FreqFatigueWindow = 3
+	freq := &fakeFreq{denyAdv: map[string]bool{"cmp_b": true}}
 	// count=4 但 b 被频控拒绝，只剩 a，最多 1 条
 	req := Request{App: snap.Apps["app1"], Style: "rewarded_video",
 		DeviceID: "d1", Count: 4, Now: testNow}

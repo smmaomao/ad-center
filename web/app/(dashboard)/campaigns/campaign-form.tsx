@@ -279,17 +279,7 @@ export function CampaignForm({
             </select>
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="freq_daily_limit">日频控（次/天）</Label>
-            <Input
-              id="freq_daily_limit"
-              name="freq_daily_limit"
-              type="number"
-              min="0"
-              defaultValue={initial?.freq_daily_limit || 8}
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="freq_interval_minutes">最小间隔（分钟）</Label>
+            <Label htmlFor="freq_interval_minutes">时间窗（分钟）</Label>
             <Input
               id="freq_interval_minutes"
               name="freq_interval_minutes"
@@ -297,9 +287,12 @@ export function CampaignForm({
               min="0"
               defaultValue={initial?.freq_interval_minutes || 20}
             />
+            <p className="text-xs text-muted-foreground">
+              控制 1 的时间窗长度（1~1440，滑动窗口）。0 表示不启用该窗口。
+            </p>
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="freq_fatigue_window">疲劳窗口（天）</Label>
+            <Label htmlFor="freq_fatigue_window">窗口内上限</Label>
             <Input
               id="freq_fatigue_window"
               name="freq_fatigue_window"
@@ -307,6 +300,22 @@ export function CampaignForm({
               min="0"
               defaultValue={initial?.freq_fatigue_window || 3}
             />
+            <p className="text-xs text-muted-foreground">
+              控制 1：该时间窗内同一用户最多下发同一任务的次数。
+            </p>
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="freq_daily_limit">每日上限</Label>
+            <Input
+              id="freq_daily_limit"
+              name="freq_daily_limit"
+              type="number"
+              min="0"
+              defaultValue={initial?.freq_daily_limit || 8}
+            />
+            <p className="text-xs text-muted-foreground">
+              控制 2：每日（滚动 24h）同一用户最多下发同一任务的次数。0 表示不限。
+            </p>
           </div>
           {billingMode === "cpa" && (
             <div className="space-y-2 sm:col-span-2">

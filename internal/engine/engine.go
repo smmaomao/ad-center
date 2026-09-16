@@ -96,6 +96,7 @@ type candidate struct {
 	bidPrice    float64 // 出价（来自 campaign，用于 Item.BidPrice）
 	score       float64
 	ttl         int // 下发有效期（分钟），来自 campaign（未配置回落默认）
+	camp        *config.Campaign // 归属广告任务（任务级频控来源）
 	// 请求内预算快照：buildCandidates 查一次后注入，score 与 materialize 复用。
 	spent  float64
 	budget float64
@@ -280,13 +281,13 @@ func (e *Engine) scoreCreative(
 		bidPrice:    price,
 		score:       score,
 		ttl:         ttl,
+		camp:        camp,
 		spent:       spent,
 		budget:      budget,
 	}
 }
 
-// materialize 单条物化：全局疲劳度 → 广告主级频控（app:device:素材）→ 预算只读闸。
-// 频控维度按需求为「App + 这个素材」（不管横屏竖屏），故 slotID 参数传素材 ID。
+// materialize 单条物化：全局疲劳度 → 任务级滑动窗口频控（app:device:campaign）→ 预算只读闸。
 //
 // 说明：疲劳度的"计数"不在这里做——计数发生在用户真实观看（impression）时
 // （见 api 层的事件处理），此处只读取计数并据此隐藏已达上限的素材。这样决策
@@ -298,11 +299,32 @@ func (e *Engine) materialize(req Request, c candidate, fc config.FatigueConfig) 
 			return Item{}, false
 		}
 	}
-	advPolicy := frequency.AdvPolicy{
-		Windows: toFreqWindows(c.adv.FreqWindows),
-	}
-	if !e.Freq.CheckAndIncr(req.App.ID, req.DeviceID, c.creative.ID, c.adv.ID, advPolicy, req.Now) {
-		return Item{}, false
+	// 任务级滑动窗口频控（每个 campaign 独立；广告主级 freq_windows 已弃用）。
+	//   freq_interval_minutes = 窗口长度（分钟）
+	//   freq_fatigue_window   = 该窗口内最大下发次数
+	//   另叠加 24h 日频控 freq_daily_limit（>0 时生效）。0 值表示该项不限。
+	// 复用广告主级那套多窗口滑动机制，只是频控主体换成 campaign。
+	if c.camp != nil {
+		camp := c.camp
+		var windows []frequency.Window
+		if camp.FreqIntervalMinute > 0 && camp.FreqFatigueWindow > 0 {
+			windows = append(windows, frequency.Window{
+				WindowMinutes: camp.FreqIntervalMinute,
+				MaxCount:      camp.FreqFatigueWindow,
+			})
+		}
+		if camp.FreqDailyLimit > 0 {
+			windows = append(windows, frequency.Window{
+				WindowMinutes: 1440,
+				MaxCount:      camp.FreqDailyLimit,
+			})
+		}
+		if len(windows) > 0 {
+			if !e.Freq.CheckAndIncr(req.App.ID, req.DeviceID, c.creative.ID, camp.ID,
+				frequency.AdvPolicy{Windows: windows}, req.Now) {
+				return Item{}, false
+			}
+		}
 	}
 	// 预算只读闸：用请求内快照判断（spent >= budget 停投，不扣费）。
 	if c.budget > 0 && c.spent >= c.budget {
@@ -316,15 +338,4 @@ func (e *Engine) materialize(req Request, c candidate, fc config.FatigueConfig) 
 		Score:        c.score,
 		ExpireAt:     req.Now.Add(time.Duration(c.ttl) * time.Minute).Unix(),
 	}, true
-}
-
-func toFreqWindows(ws []config.FreqWindow) []frequency.Window {
-	if len(ws) == 0 {
-		return nil
-	}
-	out := make([]frequency.Window, len(ws))
-	for i, w := range ws {
-		out[i] = frequency.Window{WindowMinutes: w.WindowMinutes, MaxCount: w.MaxCount}
-	}
-	return out
 }

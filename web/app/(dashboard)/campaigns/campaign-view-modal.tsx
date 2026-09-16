@@ -106,9 +106,9 @@ export function CampaignViewModal({
           </h3>
           <dl className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
             <Field label="扣费方式" value={campaign.billing_mode.toUpperCase()} />
-            <Field label="日频控（次/天）" value={campaign.freq_daily_limit} />
-            <Field label="最小间隔（分钟）" value={campaign.freq_interval_minutes} />
-            <Field label="疲劳窗口（天）" value={campaign.freq_fatigue_window} />
+            <Field label="时间窗（分钟）" value={campaign.freq_interval_minutes} />
+            <Field label="窗口内上限" value={campaign.freq_fatigue_window} />
+            <Field label="每日上限" value={campaign.freq_daily_limit} />
           </dl>
         </section>
 

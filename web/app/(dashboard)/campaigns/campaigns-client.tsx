@@ -134,7 +134,7 @@ export function CampaignsClient({
                   <td className="px-5 py-3 text-xs">
                     <div>{c.billing_mode.toUpperCase()}</div>
                     <div className="text-muted-foreground">
-                      {c.freq_daily_limit}/天 · {c.freq_interval_minutes}min
+                      {c.freq_interval_minutes}分钟/{c.freq_fatigue_window}次 · 日{c.freq_daily_limit}
                     </div>
                   </td>
                   <td className="px-5 py-3 text-right tabular-nums">
