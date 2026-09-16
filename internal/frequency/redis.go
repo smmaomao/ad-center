@@ -135,6 +135,49 @@ redis.call('EXPIRE', KEYS[2], ttl)
 return 1
 `)
 
+// checkOnlyScript 只读检查（疲劳 + 多窗口），不写状态。与 checkAndIncrScript 前段一致。
+var checkOnlyScript = redis.NewScript(`
+local now = tonumber(ARGV[1])
+local advID = ARGV[2]
+local fatigueN = tonumber(ARGV[3])
+local wcount = tonumber(ARGV[4])
+if fatigueN > 0 then
+  local recent = redis.call('ZREVRANGE', KEYS[1], 0, fatigueN - 1)
+  local pfx = advID .. ':'
+  local plen = string.len(pfx)
+  for _, m in ipairs(recent) do
+    if string.sub(m, 1, plen) == pfx then return 0 end
+  end
+end
+local i = 5
+for _ = 1, wcount do
+  local wms = tonumber(ARGV[i])
+  local maxc = tonumber(ARGV[i + 1])
+  i = i + 2
+  if wms > 0 and maxc > 0 then
+    if redis.call('ZCOUNT', KEYS[2], now - wms, now) >= maxc then return 0 end
+  end
+end
+return 1
+`)
+
+// recordOnlyScript 仅记账（与 checkAndIncrScript 后段一致）。
+var recordOnlyScript = redis.NewScript(`
+local now = tonumber(ARGV[1])
+local advID = ARGV[2]
+local maxWindow = tonumber(ARGV[3])
+local seq = redis.call('INCR', KEYS[1] .. ':seq')
+local member = advID .. ':' .. seq
+local ttl = math.ceil(maxWindow / 1000)
+redis.call('ZADD', KEYS[1], now, member)
+redis.call('ZREMRANGEBYRANK', KEYS[1], 0, -11)
+redis.call('EXPIRE', KEYS[1], ttl)
+redis.call('ZADD', KEYS[2], now, member)
+redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now - maxWindow)
+redis.call('EXPIRE', KEYS[2], ttl)
+return 1
+`)
+
 func (s *RedisStore) CheckSlot(appID, deviceID, slotID string, policy SlotPolicy, count int, now time.Time) bool {
 	if count <= 0 {
 		return true
@@ -179,6 +222,33 @@ func (s *RedisStore) CheckAndIncr(appID, deviceID, slotID, advertiserID string, 
 	}
 	n, ok := res.(int64)
 	return !ok || n == 1
+}
+
+func (s *RedisStore) Check(appID, deviceID, slotID, advertiserID string, policy AdvPolicy, now time.Time) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+	defer cancel()
+
+	args := make([]any, 0, 4+2*len(policy.Windows))
+	args = append(args, now.UnixMilli(), advertiserID, policy.FatigueN, len(policy.Windows))
+	for _, w := range policy.Windows {
+		args = append(args, int64(w.WindowMinutes)*60_000, w.MaxCount)
+	}
+	res, err := checkOnlyScript.Run(ctx, s.client,
+		[]string{s.recentKey(appID, deviceID, slotID), s.advKey(appID, deviceID, advertiserID)},
+		args...).Result()
+	if err != nil {
+		return true // fail-open
+	}
+	n, ok := res.(int64)
+	return !ok || n == 1
+}
+
+func (s *RedisStore) Record(appID, deviceID, slotID, advertiserID string, policy AdvPolicy, now time.Time) {
+	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+	defer cancel()
+	_ = recordOnlyScript.Run(ctx, s.client,
+		[]string{s.recentKey(appID, deviceID, slotID), s.advKey(appID, deviceID, advertiserID)},
+		now.UnixMilli(), advertiserID, s.maxWindow.Milliseconds()).Err()
 }
 
 // 编译期接口实现检查。

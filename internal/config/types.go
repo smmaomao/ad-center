@@ -140,7 +140,7 @@ type Creative struct {
 	ABGroup      string  `json:"ab_group,omitempty"`
 
 	// 展现样式（多选）：splash 开屏 / rewarded_video 激励视频 / interstitial 插屏
-	// / feed 信息流 / banner。素材直接声明支持哪些样式，不再依赖 slot。
+	// / feed 信息流 / banner 横幅。素材直接声明支持哪些样式，不再依赖 slot。
 	Styles []string `json:"styles,omitempty"`
 	// 投放目标 App（多选）；空 = 投放到全部 App
 	TargetApps []string `json:"target_apps,omitempty"`
@@ -318,48 +318,6 @@ func (s *Snapshot) DecisionCacheConfig() DecisionCacheConfig {
 	}
 	if c.TTLSeconds <= 0 {
 		c.TTLSeconds = DefaultDecisionCacheConfig.TTLSeconds
-	}
-	return c
-}
-
-// FatigueConfig 用户疲劳度（全局频控）配置（来自 settings 表 fatigue 行）。
-//
-// 控制 1：在自定义时间窗（WindowMinutes 分钟）内，同一用户最多观看同一个
-// 素材（creative）WindowMax 次；超过则在该窗口结束前对该用户自动隐藏。
-//
-// 控制 2：每日（滚动 24h）同一用户最多观看同一个素材 DailyMax 次。
-//
-// 两个上限均可后台配置（系统设置 → 全局频控配置）。
-type FatigueConfig struct {
-	Enabled       bool `json:"enabled"`        // 是否启用全局疲劳度控制
-	WindowMinutes int  `json:"window_minutes"` // 控制1 时间窗（分钟），默认 20
-	WindowMax     int  `json:"window_max"`     // 控制1 上限（该窗内最多观看次数），默认 3
-	DailyMax      int  `json:"daily_max"`      // 控制2 每日上限（滚动 24h 最多观看次数），默认 8
-}
-
-// DefaultFatigueConfig 未配置时的兜底：启用、20 分钟窗内 3 次、每日 8 次。
-var DefaultFatigueConfig = FatigueConfig{Enabled: true, WindowMinutes: 20, WindowMax: 3, DailyMax: 8}
-
-// FatigueConfig 从快照的 settings 解析全局疲劳度配置；
-// 缺失 / 非法 / 关键数值 ≤0 时回退到 DefaultFatigueConfig（Enabled 仍按解析结果，
-// 缺省为 false，避免"写了一半的配置"误开启限制）。
-func (s *Snapshot) FatigueConfig() FatigueConfig {
-	raw, ok := s.Settings["fatigue"]
-	if !ok || len(raw) == 0 {
-		return DefaultFatigueConfig
-	}
-	var c FatigueConfig
-	if err := json.Unmarshal(raw, &c); err != nil {
-		return DefaultFatigueConfig
-	}
-	if c.WindowMinutes <= 0 {
-		c.WindowMinutes = DefaultFatigueConfig.WindowMinutes
-	}
-	if c.WindowMax <= 0 {
-		c.WindowMax = DefaultFatigueConfig.WindowMax
-	}
-	if c.DailyMax <= 0 {
-		c.DailyMax = DefaultFatigueConfig.DailyMax
 	}
 	return c
 }

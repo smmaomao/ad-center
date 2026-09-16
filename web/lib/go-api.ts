@@ -325,45 +325,6 @@ export async function updatePricingBenchmark(
 // 控制2：每日（滚动24h）同一用户看同一素材最多 daily_max 次。
 // ============================================================
 
-export interface FatigueConfig {
-  enabled: boolean;
-  window_minutes: number;
-  window_max: number;
-  daily_max: number;
-}
-
-/** 后台从未配置时的兜底值（与 Go config.DefaultFatigueConfig 保持一致） */
-export const DEFAULT_FATIGUE_CONFIG: FatigueConfig = {
-  enabled: true,
-  window_minutes: 20,
-  window_max: 3,
-  daily_max: 8,
-};
-
-/** 读取疲劳度配置（未配置时接口返回 404，调用方需 catch 用兜底值） */
-export async function getFatigueConfig(
-  actorEmail: string,
-): Promise<FatigueConfig> {
-  const r = await goApi<{ value: FatigueConfig }>(
-    "/v1/admin/settings/fatigue",
-    actorEmail,
-  );
-  return r.value;
-}
-
-/** 更新疲劳度配置（PATCH /v1/admin/settings/fatigue） */
-export async function updateFatigueConfig(
-  actorEmail: string,
-  cfg: FatigueConfig,
-): Promise<void> {
-  await goSend<{ status: string }>(
-    "/v1/admin/settings/fatigue",
-    actorEmail,
-    "PATCH",
-    { value: cfg },
-  );
-}
-
 export async function listSlots(actorEmail: string) {
   return goApi<AdminSlot[]>("/v1/admin/slots", actorEmail);
 }

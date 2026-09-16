@@ -5,9 +5,7 @@ import { getSession } from "@/lib/auth";
 import {
   updateDecisionCache,
   updatePricingBenchmark,
-  updateFatigueConfig,
   type PricingBenchmark,
-  type FatigueConfig,
   GoApiError,
 } from "@/lib/go-api";
 
@@ -71,43 +69,6 @@ export async function updatePricingBenchmarkAction(
 
   try {
     await updatePricingBenchmark(session.email, b);
-  } catch (e) {
-    return { error: e instanceof GoApiError ? e.message : "保存失败" };
-  }
-  revalidatePath("/settings");
-  return { ok: true };
-}
-
-/** 更新用户疲劳度（全局频控）配置（表单提交） */
-export async function updateFatigueConfigAction(
-  _prev: FormState,
-  fd: FormData,
-): Promise<FormState> {
-  const session = await getSession();
-  if (!session) return { error: "会话已过期，请重新登录" };
-
-  const enabled = fd.get("enabled") !== null;
-  const windowMinutes = Number.parseInt(str(fd, "window_minutes"), 10);
-  const windowMax = Number.parseInt(str(fd, "window_max"), 10);
-  const dailyMax = Number.parseInt(str(fd, "daily_max"), 10);
-  if (!Number.isFinite(windowMinutes) || windowMinutes <= 0 || windowMinutes > 1440) {
-    return { error: "时间窗需为 1~1440 分钟" };
-  }
-  if (!Number.isFinite(windowMax) || windowMax <= 0) {
-    return { error: "窗口内观看上限需 > 0" };
-  }
-  if (!Number.isFinite(dailyMax) || dailyMax <= 0) {
-    return { error: "每日观看上限需 > 0" };
-  }
-
-  const cfg: FatigueConfig = {
-    enabled,
-    window_minutes: windowMinutes,
-    window_max: windowMax,
-    daily_max: dailyMax,
-  };
-  try {
-    await updateFatigueConfig(session.email, cfg);
   } catch (e) {
     return { error: e instanceof GoApiError ? e.message : "保存失败" };
   }

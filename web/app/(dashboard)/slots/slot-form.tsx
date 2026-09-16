@@ -23,6 +23,7 @@ export const SLOT_TYPE_LABEL: Record<string, string> = {
   splash: "开屏",
   interstitial: "插屏",
   feed: "信息流",
+  banner: "Banner",
 };
 
 export function SlotForm({

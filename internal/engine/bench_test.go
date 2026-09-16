@@ -23,6 +23,10 @@ func (benchFreq) RecordSlot(string, string, string, int, time.Time) {}
 func (benchFreq) CheckAndIncr(string, string, string, string, frequency.AdvPolicy, time.Time) bool {
 	return true
 }
+func (benchFreq) Check(string, string, string, string, frequency.AdvPolicy, time.Time) bool {
+	return true
+}
+func (benchFreq) Record(string, string, string, string, frequency.AdvPolicy, time.Time) {}
 
 // benchSnapshot 构建基准快照：nAdv 个活跃广告主（tier/出价/达成率错开制造真实排序压力），
 // 每广告主 5 个活跃素材（均支持 rewarded_video、投放全部 App）。

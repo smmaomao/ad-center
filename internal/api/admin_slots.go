@@ -31,7 +31,7 @@ type slotRequest struct {
 }
 
 var slotTypes = map[string]bool{
-	"rewarded_video": true, "splash": true, "interstitial": true, "feed": true,
+	"rewarded_video": true, "splash": true, "interstitial": true, "feed": true, "banner": true,
 }
 
 func validatePriorities(ps []store.PriorityInput) (float64, bool) {

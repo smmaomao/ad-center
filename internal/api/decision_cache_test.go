@@ -83,7 +83,8 @@ func newTestServer(t *testing.T, snap *config.Snapshot, dec Decider, dc cache.De
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
-	return &Server{Cache: c, Engine: dec, Metrics: metrics.New(), DecisionCache: dc}
+	return &Server{Cache: c, Engine: dec, Metrics: metrics.New(), DecisionCache: dc,
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 }
 
 func doAdReq(t *testing.T, srv *Server) string {

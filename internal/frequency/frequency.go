@@ -51,4 +51,11 @@ type Store interface {
 	// CheckAndIncr 原子检查并计数（广告主级多窗口 + 疲劳窗口）：
 	// 通过则记账并返回 true；任一不过返回 false 且不记账。
 	CheckAndIncr(appID, deviceID, slotID, advertiserID string, policy AdvPolicy, now time.Time) bool
+
+	// Check 只读检查多窗口 + 疲劳窗口（不下发、不计数）；通过返回 true。
+	// 用于决策期——"能否下发"判断，真正的计数放到 Record（真实曝光时）。
+	Check(appID, deviceID, slotID, advertiserID string, policy AdvPolicy, now time.Time) bool
+
+	// Record 仅记账（多窗口 + 疲劳序列）；在真实观看/曝光时调用。
+	Record(appID, deviceID, slotID, advertiserID string, policy AdvPolicy, now time.Time)
 }

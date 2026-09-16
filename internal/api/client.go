@@ -14,6 +14,7 @@ import (
 
 	"adcenter/internal/config"
 	"adcenter/internal/engine"
+	"adcenter/internal/frequency"
 	"adcenter/internal/store"
 )
 
@@ -440,10 +441,30 @@ func (s *Server) chargeClientEvent(app *config.App, advID, creativeID, style, de
 		CreativeID: creativeID, DeviceID: deviceID,
 		EventType: event, Revenue: charged,
 	})
-	if event == "impression" && s.Fatigue != nil {
-		if fc := snap.FatigueConfig(); fc.Enabled {
-			s.Fatigue.Record(deviceID, creativeID, fc)
-		}
+	// 任务级频控：仅在真实观看（impression）时累加计数。计数失败一律 fail-open
+	// （不挡广告）——最坏是少限一次，不影响曝光。
+	if event == "impression" {
+		s.recordCampaignImpression(snap, app.ID, creativeID, deviceID, now)
 	}
 	return charged
+}
+
+// recordCampaignImpression 在 impression 时累加"设备×任务"频控计数：
+// 由素材反查其归属 campaign（snap.CreativeCampaign），复用与决策期 Check 同款的
+// 窗口定义（engine.CampaignFreqWindows），保证"只读检查"与"真实观看计数"一致。
+func (s *Server) recordCampaignImpression(snap *config.Snapshot, appID, creativeID, deviceID string, now time.Time) {
+	if s.Freq == nil {
+		return
+	}
+	campID, ok := snap.CreativeCampaign[creativeID]
+	if !ok || campID == "" {
+		return
+	}
+	camp := snap.Campaigns[campID]
+	if camp == nil {
+		return
+	}
+	if ws := engine.CampaignFreqWindows(camp); len(ws) > 0 {
+		s.Freq.Record(appID, deviceID, creativeID, campID, frequency.AdvPolicy{Windows: ws}, now)
+	}
 }

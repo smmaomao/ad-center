@@ -7,14 +7,13 @@ import (
 
 	"adcenter/internal/budget"
 	"adcenter/internal/config"
-	"adcenter/internal/fatigue"
 	"adcenter/internal/frequency"
 )
 
 // ===== 测试替身 =====
 
 type fakeFreq struct {
-	denyAdv map[string]bool // 拒绝这些广告主（CheckAndIncr）
+	denyAdv map[string]bool // 拒绝这些 campaign（Check）
 	denyAll bool
 }
 
@@ -28,6 +27,13 @@ func (f *fakeFreq) CheckAndIncr(_, _, _, advID string, _ frequency.AdvPolicy, _ 
 	}
 	return !f.denyAdv[advID]
 }
+func (f *fakeFreq) Check(_, _, _, advID string, _ frequency.AdvPolicy, _ time.Time) bool {
+	if f.denyAll {
+		return false
+	}
+	return !f.denyAdv[advID]
+}
+func (f *fakeFreq) Record(string, string, string, string, frequency.AdvPolicy, time.Time) {}
 
 type fakeBudget struct {
 	spent  map[string]float64
@@ -36,21 +42,7 @@ type fakeBudget struct {
 	deduct []string // TryDeduct 成功记录（事件扣费路径；决策路径不应触发）
 }
 
-// fakeFatigue 决策期只读的疲劳度替身：命中屏蔽集合则隐藏该素材（不计数，
-// 计数逻辑见 internal/fatigue 单测）。
-type fakeFatigue struct {
-	blocked map[string]bool // "userID\x00creativeID" → 屏蔽
-}
-
-func (f *fakeFatigue) Check(userID, creativeID string, _ config.FatigueConfig) (bool, string) {
-	if f.blocked != nil && f.blocked[userID+"\x00"+creativeID] {
-		return true, "window_exceeded"
-	}
-	return false, ""
-}
-func (f *fakeFatigue) Record(_, _ string, _ config.FatigueConfig) {}
-var _ fatigue.Store = (*fakeFatigue)(nil)
-
+// fakeBudget 预算控制替身。
 func (b *fakeBudget) TryDeduct(advID string, amount float64) bool {
 	if b.deny[advID] {
 		return false
@@ -399,30 +391,32 @@ func TestDecide_无活跃素材降级(t *testing.T) {
 	}
 }
 
-func TestDecide_疲劳度隐藏已达上限素材(t *testing.T) {
-	// adv1 分数最高（达成率 50%，紧急），但用户 d1 对 cr_adv1 已达疲劳上限
+func TestDecide_CampaignFreq隐藏已达上限素材(t *testing.T) {
+	// cmp_adv1 启用任务级频控且其窗口计数已达上限（决策期只读 Check 返回 false）
 	// → 决策时隐藏并顺延 adv2。
 	snap := mkSnapshot(
 		mkAdv("adv1", 1, 1.0, 2.0),
 		mkAdv("adv2", 1, 1.0, 1.0),
 	)
-	eng := mkEngine(&fakeFreq{}, mkBudget())
-	eng.Fatigue = &fakeFatigue{blocked: map[string]bool{"d1\x00cr_adv1": true}}
+	snap.Campaigns["cmp_adv1"].FreqIntervalMinute = 20
+	snap.Campaigns["cmp_adv1"].FreqFatigueWindow = 3
+	freq := &fakeFreq{denyAdv: map[string]bool{"cmp_adv1": true}}
+	eng := mkEngine(freq, mkBudget())
 	req := Request{App: snap.Apps["app1"], Style: "rewarded_video",
 		DeviceID: "d1", Count: 1, Now: testNow}
 	resp := eng.Decide(snap, req)
 	if len(resp.Items) != 1 || resp.Items[0].AdvertiserID != "adv2" {
-		t.Fatalf("疲劳素材应被隐藏并顺延 adv2，实际 %v", ids(resp.Items))
+		t.Fatalf("频控素材应被隐藏并顺延 adv2，实际 %v", ids(resp.Items))
 	}
 
-	// 全部疲劳 → 降级 self_promo
-	eng2 := mkEngine(&fakeFreq{}, mkBudget())
-	eng2.Fatigue = &fakeFatigue{blocked: map[string]bool{
-		"d1\x00cr_adv1": true, "d1\x00cr_adv2": true,
-	}}
+	// 全部频控拒绝 → 降级 self_promo
+	snap.Campaigns["cmp_adv2"].FreqIntervalMinute = 20
+	snap.Campaigns["cmp_adv2"].FreqFatigueWindow = 3
+	freq2 := &fakeFreq{denyAdv: map[string]bool{"cmp_adv1": true, "cmp_adv2": true}}
+	eng2 := mkEngine(freq2, mkBudget())
 	resp2 := eng2.Decide(snap, req)
 	if resp2.Fallback != "self_promo" {
-		t.Fatalf("全部疲劳应降级 self_promo，实际 %q items=%v", resp2.Fallback, ids(resp2.Items))
+		t.Fatalf("全部频控拒绝应降级 self_promo，实际 %q items=%v", resp2.Fallback, ids(resp2.Items))
 	}
 }
 

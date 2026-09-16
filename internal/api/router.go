@@ -16,7 +16,7 @@ import (
 	"adcenter/internal/cache"
 	"adcenter/internal/config"
 	"adcenter/internal/engine"
-	"adcenter/internal/fatigue"
+	"adcenter/internal/frequency"
 	"adcenter/internal/metrics"
 	"adcenter/internal/queue"
 	"adcenter/internal/storage"
@@ -53,7 +53,7 @@ type Server struct {
 	Clicks        ClickResolver       // clickid 归因反查（S2S 转化用）；nil = 未接入，转化只确认不扣费
 	DecisionCache cache.DecisionCache // 决策结果缓存（Redis；nil/Noop = 实时计算）
 	Queue         queue.Backend       // 事件队列（M2：memory / redis streams）；nil = 丢弃事件
-	Fatigue       fatigue.Store       // 全局疲劳度（用户×素材）；nil = 不启用
+	Freq          frequency.Store     // 任务级频控（与引擎共用同一实例）
 	Bids          *BidRegistry        // 下发交易上下文登记表（客户端接口 bid_id → 上下文）
 }
 

@@ -41,7 +41,6 @@ const FALLBACK_NAV: NavItem[] = [
   { href: "/ai-agent", label: "AI Agent 控制台" },
   { href: "/settings/pricing", label: "平台计费标准线" },
   { href: "/settings/cache", label: "决策结果缓存" },
-  { href: "/settings/fatigue", label: "全局频控配置" },
 ];
 
 /**
@@ -141,14 +140,6 @@ const FALLBACK_TREE: NavNode[] = [
         href: "/settings/cache",
         parentCode: "other_config",
         sortOrder: 20,
-        children: [],
-      },
-      {
-        code: "fatigue",
-        label: "全局频控配置",
-        href: "/settings/fatigue",
-        parentCode: "other_config",
-        sortOrder: 30,
         children: [],
       },
     ],

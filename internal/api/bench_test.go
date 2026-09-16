@@ -35,6 +35,10 @@ func (benchFreqPassthrough) RecordSlot(string, string, string, int, time.Time) {
 func (benchFreqPassthrough) CheckAndIncr(string, string, string, string, frequency.AdvPolicy, time.Time) bool {
 	return true
 }
+func (benchFreqPassthrough) Check(string, string, string, string, frequency.AdvPolicy, time.Time) bool {
+	return true
+}
+func (benchFreqPassthrough) Record(string, string, string, string, frequency.AdvPolicy, time.Time) {}
 
 type fixedLoader struct{ snap *config.Snapshot }
 

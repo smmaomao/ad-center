@@ -23,7 +23,6 @@ import (
 	cachestore "adcenter/internal/cache"
 	"adcenter/internal/config"
 	"adcenter/internal/engine"
-	"adcenter/internal/fatigue"
 	"adcenter/internal/frequency"
 	"adcenter/internal/migrate"
 	"adcenter/internal/metrics"
@@ -170,22 +169,8 @@ func main() {
 		freqStore = fs
 		log.Info("frequency store enabled (redis)")
 	}
-	// ④' 全局疲劳度（用户×素材）：REDIS_URL 可用时走 Redis（多实例共享），
-	// 否则内存版（单实例 / 本地开发）。错误一律 fail-open（放行）。
-	var fatigueStore fatigue.Store = fatigue.NewMemory()
-	if redisURL != "" {
-		fs, err := fatigue.NewRedis(redisURL)
-		if err != nil {
-			log.Warn("fatigue redis init failed, using in-memory", "err", err)
-		} else if err := fs.Ping(ctx); err != nil {
-			log.Warn("fatigue redis ping failed, using in-memory", "err", err)
-			_ = fs.Close()
-		} else {
-			fatigueStore = fs
-			log.Info("fatigue store enabled (redis)")
-		}
-	}
-	eng := &engine.Engine{Freq: freqStore, Budget: budgetCtrl, Fatigue: fatigueStore}
+	// ④' 全局疲劳度已移除：任务级频控（engine + frequency）统一在 impression 时计数。
+	eng := &engine.Engine{Freq: freqStore, Budget: budgetCtrl}
 	agg := metrics.New()
 
 	// ④' R2 只读签名器（决策下发 media_url 用；未配置则响应不含签名地址）
@@ -240,7 +225,7 @@ func main() {
 		Budget: budgetCtrl, InternalKey: internalKey, SessionSecret: sessionSecret, Log: log,
 		Storage: r2Signer, DecisionCache: decisionCache,
 		Clicks:   api.NewClickResolver(st), // clickid 归因反查（落库实现）
-		Fatigue:  fatigueStore,
+		Freq:     freqStore,                // 任务级频控：与引擎共用同一实例
 	}
 	// ⑤' 事件队列：memory = 进程内 channel（现状）；redis = Streams + consumer group
 	var evtQueue queue.Backend = queue.NewMemory(8192, 500, 2*time.Second)

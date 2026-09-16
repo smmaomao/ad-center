@@ -36,7 +36,7 @@
 
 ### 2.1 产品定位
 
-短剧App自有广告投放管理系统是一套面向运营人员的广告策略管理工具，用于管理App内所有广告位（激励视频、开屏、插屏、信息流）的填充策略，支持多Slots广告主（甲方客户）的流量分配、实时竞价、保底策略，并提供AI Agent辅助决策与全链路数据监控。
+短剧App自有广告投放管理系统是一套面向运营人员的广告策略管理工具，用于管理App内所有广告位（激励视频、开屏、插屏、信息流、Banner）的填充策略，支持多Slots广告主（甲方客户）的流量分配、实时竞价、保底策略，并提供AI Agent辅助决策与全链路数据监控。
 
 ### 2.2 核心原则（V1.1 更新）
 
@@ -204,7 +204,7 @@
 | 字段 | 说明 |
 |------|------|
 | 广告位名称 | — |
-| 广告位类型 | 激励视频 / 开屏 / 插屏 / 信息流 |
+| 广告位类型 | 激励视频 / 开屏 / 插屏 / 信息流 / Banner |
 | 日请求量 | 今日广告请求总数 |
 | 填充率 | 成功填充比例 |
 | 收入 | 今日广告收入 |
@@ -562,7 +562,7 @@ App 可一次请求 N 条广告：`POST /v1/ad/req` 增加 `count` 参数（默�
 |------|------|------|------|
 | slotId | String | 是 | 唯一标识 |
 | name | String | 是 | 广告位名称 |
-| type | String | 是 | rewarded_video / splash / interstitial / feed |
+| type | String | 是 | rewarded_video / splash / interstitial / feed / banner |
 | status | String | 是 | active / paused |
 | fillPriority | Array | 是 | 填充优先级列表 |
 | fillPriority[].sourceType | String | 是 | advertiser / max / fallback |

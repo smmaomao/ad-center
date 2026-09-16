@@ -148,6 +148,22 @@ func runStoreContract(t *testing.T, s Store) {
 		}
 	})
 
+	t.Run("Check只读_与Record解耦", func(t *testing.T) {
+		const dev = "dev11"
+		policy := AdvPolicy{Windows: []Window{{WindowMinutes: 180, MaxCount: 2}}}
+		if !s.Check(app, dev, slot, advA, policy, base) {
+			t.Fatal("初始 Check 应通过")
+		}
+		s.Record(app, dev, slot, advA, policy, base)
+		s.Record(app, dev, slot, advA, policy, base.Add(time.Minute))
+		if s.Check(app, dev, slot, advA, policy, base.Add(2*time.Minute)) {
+			t.Fatal("窗口内达 2 应拒绝")
+		}
+		if !s.Check(app, dev, slot, advA, policy, base.Add(3*time.Hour+time.Minute)) {
+			t.Fatal("窗口滑出应放行")
+		}
+	})
+
 	t.Run("广告主窗口跨广告位共享", func(t *testing.T) {
 		const dev = "dev8"
 		policy := AdvPolicy{Windows: []Window{{WindowMinutes: 180, MaxCount: 3}}}

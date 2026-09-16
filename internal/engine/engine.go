@@ -17,7 +17,6 @@ import (
 
 	"adcenter/internal/budget"
 	"adcenter/internal/config"
-	"adcenter/internal/fatigue"
 	"adcenter/internal/frequency"
 )
 
@@ -40,9 +39,8 @@ func ValidStyle(s string) bool {
 
 // Engine 决策引擎。并发安全（无共享可变状态，依赖均为并发安全接口）。
 type Engine struct {
-	Freq    frequency.Store
-	Budget  budget.Ctrl
-	Fatigue fatigue.Store // 全局疲劳度（用户×素材），nil 表示不启用
+	Freq   frequency.Store
+	Budget budget.Ctrl
 	// Pick 创意加权随机选择函数（索引选择器），测试注入确定性实现。
 	Pick func(n int) int
 }
@@ -128,16 +126,13 @@ func (e *Engine) Decide(snap *config.Snapshot, req Request) Response {
 		return cands[i].creative.ID < cands[j].creative.ID
 	})
 
-	// 全局疲劳度配置（系统设置 → 全局频控配置），决策时据此隐藏已达上限的素材。
-	fc := snap.FatigueConfig()
-
-	// ④ 逐条物化：疲劳度 / 预算闸挡住的跳过，至多取 count 条
+	// ④ 逐条物化：频控 / 预算闸挡住的跳过，至多取 count 条
 	var items []Item
 	for _, c := range cands {
 		if len(items) >= req.Count {
 			break
 		}
-		if item, ok := e.materialize(req, c, fc); ok {
+		if item, ok := e.materialize(req, c); ok {
 			items = append(items, item)
 		}
 	}
@@ -287,40 +282,46 @@ func (e *Engine) scoreCreative(
 	}
 }
 
-// materialize 单条物化：全局疲劳度 → 任务级滑动窗口频控（app:device:campaign）→ 预算只读闸。
-//
-// 说明：疲劳度的"计数"不在这里做——计数发生在用户真实观看（impression）时
-// （见 api 层的事件处理），此处只读取计数并据此隐藏已达上限的素材。这样决策
-// 缓存命中不会误增计数，疲劳上限始终以真实观看次数为准。
-func (e *Engine) materialize(req Request, c candidate, fc config.FatigueConfig) (Item, bool) {
-	// 全局疲劳度：已达任一上限 → 跳过该素材（不计数）。
-	if e.Fatigue != nil && fc.Enabled {
-		if blocked, _ := e.Fatigue.Check(req.DeviceID, c.creative.ID, fc); blocked {
-			return Item{}, false
-		}
+// CampaignFreqWindows 由 campaign 的配置推导频控窗口（统一给 materialize 的
+// Check 与 api 层 impression 的 Record 用，保证"只读检查"与"真实观看计数"用同一套
+// 窗口定义）：
+//   - freq_interval_minutes（>0 且 freq_fatigue_window>0）= 滑动窗口长度（分钟）
+//   - freq_fatigue_window = 该窗口内最大下发次数
+//   - 另叠加 24h 日频控 freq_daily_limit（>0 时生效）
+// 任一窗口为 0 则该档视为不限。
+func CampaignFreqWindows(camp *config.Campaign) []frequency.Window {
+	if camp == nil {
+		return nil
 	}
+	var windows []frequency.Window
+	if camp.FreqIntervalMinute > 0 && camp.FreqFatigueWindow > 0 {
+		windows = append(windows, frequency.Window{
+			WindowMinutes: camp.FreqIntervalMinute,
+			MaxCount:      camp.FreqFatigueWindow,
+		})
+	}
+	if camp.FreqDailyLimit > 0 {
+		windows = append(windows, frequency.Window{
+			WindowMinutes: 1440,
+			MaxCount:      camp.FreqDailyLimit,
+		})
+	}
+	return windows
+}
+
+// materialize 单条物化：任务级滑动窗口频控（app:device:campaign）→ 预算只读闸。
+//
+// 注意：频控的"计数"不在这里做，计数发生在用户真实观看（impression）时由 api
+// 层调用 frequency.Store.Record（见 CampaignFreqWindows 的同款窗口）。materialize
+// 只通过 frequency.Store.Check 读取计数，据此隐藏已达上限的素材——决策缓存命中
+// 也不会误增计数，上限始终以真实观看次数为准。
+func (e *Engine) materialize(req Request, c candidate) (Item, bool) {
 	// 任务级滑动窗口频控（每个 campaign 独立；广告主级 freq_windows 已弃用）。
-	//   freq_interval_minutes = 窗口长度（分钟）
-	//   freq_fatigue_window   = 该窗口内最大下发次数
-	//   另叠加 24h 日频控 freq_daily_limit（>0 时生效）。0 值表示该项不限。
-	// 复用广告主级那套多窗口滑动机制，只是频控主体换成 campaign。
+	// 计数时机改为真实观看（impression），此处仅做只读检查。
 	if c.camp != nil {
-		camp := c.camp
-		var windows []frequency.Window
-		if camp.FreqIntervalMinute > 0 && camp.FreqFatigueWindow > 0 {
-			windows = append(windows, frequency.Window{
-				WindowMinutes: camp.FreqIntervalMinute,
-				MaxCount:      camp.FreqFatigueWindow,
-			})
-		}
-		if camp.FreqDailyLimit > 0 {
-			windows = append(windows, frequency.Window{
-				WindowMinutes: 1440,
-				MaxCount:      camp.FreqDailyLimit,
-			})
-		}
+		windows := CampaignFreqWindows(c.camp)
 		if len(windows) > 0 {
-			if !e.Freq.CheckAndIncr(req.App.ID, req.DeviceID, c.creative.ID, camp.ID,
+			if !e.Freq.Check(req.App.ID, req.DeviceID, c.creative.ID, c.camp.ID,
 				frequency.AdvPolicy{Windows: windows}, req.Now) {
 				return Item{}, false
 			}

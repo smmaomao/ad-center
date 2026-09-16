@@ -87,7 +87,28 @@ func (m *MemoryStore) RecordSlot(appID, deviceID, slotID string, n int, now time
 func (m *MemoryStore) CheckAndIncr(appID, deviceID, slotID, advertiserID string, policy AdvPolicy, now time.Time) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if !m.checkLocked(appID, deviceID, slotID, advertiserID, policy, now) {
+		return false
+	}
+	m.recordLocked(appID, deviceID, slotID, advertiserID, policy, now)
+	return true
+}
 
+// Check 只读检查（与 CheckAndIncr 的检查逻辑一致，不记账）。
+func (m *MemoryStore) Check(appID, deviceID, slotID, advertiserID string, policy AdvPolicy, now time.Time) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.checkLocked(appID, deviceID, slotID, advertiserID, policy, now)
+}
+
+// Record 仅记账（与 CheckAndIncr 的记账逻辑一致）。
+func (m *MemoryStore) Record(appID, deviceID, slotID, advertiserID string, policy AdvPolicy, now time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.recordLocked(appID, deviceID, slotID, advertiserID, policy, now)
+}
+
+func (m *MemoryStore) checkLocked(appID, deviceID, slotID, advertiserID string, policy AdvPolicy, now time.Time) bool {
 	slotKey := appID + ":" + deviceID + ":" + slotID
 	st := m.slots[slotKey]
 
@@ -110,8 +131,12 @@ func (m *MemoryStore) CheckAndIncr(appID, deviceID, slotID, advertiserID string,
 			}
 		}
 	}
+	return true
+}
 
-	// 全部通过：记账（失败路径到此为止，状态未变）
+func (m *MemoryStore) recordLocked(appID, deviceID, slotID, advertiserID string, policy AdvPolicy, now time.Time) {
+	slotKey := appID + ":" + deviceID + ":" + slotID
+	st := m.slots[slotKey]
 	if st == nil {
 		st = &slotState{}
 		m.slots[slotKey] = st
@@ -126,7 +151,6 @@ func (m *MemoryStore) CheckAndIncr(appID, deviceID, slotID, advertiserID string,
 	}
 	adv.fills = append(adv.fills, now)
 	adv.fills = pruneBefore(adv.fills, now.Add(-m.maxWindow))
-	return true
 }
 
 // Prune 清理完全过期的状态（后台周期调用，冷设备自动出局）。

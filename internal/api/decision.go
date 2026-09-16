@@ -240,12 +240,10 @@ func (s *Server) handleAdEvent(w http.ResponseWriter, r *http.Request) {
 		EventType: req.Event, Revenue: charged, // revenue = 实际扣费（服务端算），不是客户端上报
 	})
 
-	// 全局疲劳度：用户真实观看（impression）后才累加计数——上限以真实观看次数
-	// 为准，与决策缓存解耦。计数失败只告警，不影响本次事件响应。
-	if req.Event == "impression" && s.Fatigue != nil {
-		if fc := snap.FatigueConfig(); fc.Enabled {
-			s.Fatigue.Record(req.DeviceID, req.CreativeID, fc)
-		}
+	// 任务级频控：仅在真实观看（impression）时累加计数（详见 client.go 的
+	// recordCampaignImpression，二者共用同一逻辑，避免重复实现）。
+	if req.Event == "impression" {
+		s.recordCampaignImpression(snap, app.ID, req.CreativeID, req.DeviceID, now)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})

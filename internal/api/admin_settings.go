@@ -35,7 +35,7 @@ func (s *Server) handleUpdateSetting(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := r.PathValue("key")
-	if key != "decision_cache" && key != "pricing_benchmark" && key != "fatigue" {
+	if key != "decision_cache" && key != "pricing_benchmark" {
 		writeError(w, http.StatusBadRequest, "unknown setting: "+key)
 		return
 	}
@@ -43,29 +43,6 @@ func (s *Server) handleUpdateSetting(w http.ResponseWriter, r *http.Request) {
 		Value json.RawMessage `json:"value"`
 	}
 	if !decodeJSON(w, r, &body) {
-		return
-	}
-
-	// 用户疲劳度（全局频控）：控制1 短窗口 + 控制2 滚动24h，按用户×素材限流。
-	if key == "fatigue" {
-		var c config.FatigueConfig
-		if err := json.Unmarshal(body.Value, &c); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid fatigue config: "+err.Error())
-			return
-		}
-		if c.WindowMinutes <= 0 || c.WindowMinutes > 1440 {
-			writeError(w, http.StatusBadRequest, "window_minutes must be in (0, 1440]")
-			return
-		}
-		if c.WindowMax <= 0 || c.DailyMax <= 0 {
-			writeError(w, http.StatusBadRequest, "window_max and daily_max must be > 0")
-			return
-		}
-		if err := s.Store.UpsertSetting(r.Context(), key, body.Value); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
 	}
 
