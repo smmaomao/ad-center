@@ -17,6 +17,9 @@ type Store struct {
 	pool *pgxpool.Pool
 }
 
+// Pool 暴露底层连接池，供迁移等基础设施使用。
+func (s *Store) Pool() *pgxpool.Pool { return s.pool }
+
 // New 创建连接池（search_path 固定 ads_center）。
 func New(ctx context.Context, dsn string) (*Store, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)

@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"adcenter"
 	"adcenter/internal/api"
 	"adcenter/internal/budget"
 	cachestore "adcenter/internal/cache"
@@ -24,6 +25,7 @@ import (
 	"adcenter/internal/engine"
 	"adcenter/internal/fatigue"
 	"adcenter/internal/frequency"
+	"adcenter/internal/migrate"
 	"adcenter/internal/metrics"
 	"adcenter/internal/queue"
 	"adcenter/internal/storage"
@@ -60,6 +62,15 @@ func main() {
 		os.Exit(1)
 	}
 	defer st.Close()
+
+	// ①' 数据库迁移：启动即把未执行的迁移应用到当前库（幂等；已在追踪表的跳过）。
+	// 见 internal/migrate。可用 RUN_MIGRATIONS=false 关闭（如只想手动跑 cmd/migrate）。
+	if os.Getenv("RUN_MIGRATIONS") != "false" {
+		if err := migrate.Up(ctx, st.Pool(), adcenter.MigrationFS, log); err != nil {
+			log.Error("db migration failed", "err", err)
+			os.Exit(1)
+		}
+	}
 
 	// ② 配置缓存：全量加载（监听/对账协程在预算就绪后再启动，见 ③'）
 	cache, err := config.NewCache(ctx, st, log)
