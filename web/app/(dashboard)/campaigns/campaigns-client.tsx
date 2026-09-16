@@ -92,6 +92,7 @@ export function CampaignsClient({
                 <th className="px-5 py-3">ID</th>
                 <th className="px-5 py-3">任务</th>
                 <th className="px-5 py-3">广告主</th>
+                <th className="px-5 py-3">产品</th>
                 <th className="px-5 py-3">状态</th>
                 <th className="px-5 py-3">出价 / KPI</th>
                 <th className="px-5 py-3">计费 / 频控</th>
@@ -118,6 +119,7 @@ export function CampaignsClient({
                     </button>
                   </td>
                   <td className="px-5 py-3 text-xs">{c.advertiser_name}</td>
+                  <td className="px-5 py-3 text-xs">{c.product_name ?? "—"}</td>
                   <td className="px-5 py-3">
                     <StatusBadge status={c.status} />
                   </td>
