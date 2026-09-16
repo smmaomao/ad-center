@@ -207,7 +207,7 @@ const docTemplate = `{
                 },
                 "bid_id": {
                     "type": "string",
-                    "example": "bid_20260908_0001"
+                    "example": "bid_20260908143052_aB3xK9zQ"
                 },
                 "creative_id": {
                     "type": "string",
@@ -248,7 +248,7 @@ const docTemplate = `{
                 },
                 "bid_id": {
                     "type": "string",
-                    "example": "bid_20260908_0001"
+                    "example": "bid_20260908143052_aB3xK9zQ"
                 },
                 "creative_id": {
                     "type": "string",
@@ -285,7 +285,7 @@ const docTemplate = `{
                 },
                 "bid_id": {
                     "type": "string",
-                    "example": "bid_20260908_0001"
+                    "example": "bid_20260908143052_aB3xK9zQ"
                 },
                 "click_url": {
                     "type": "string",
@@ -380,7 +380,7 @@ const docTemplate = `{
                 },
                 "bid_id": {
                     "type": "string",
-                    "example": "bid_20260908_0001"
+                    "example": "bid_20260908143052_aB3xK9zQ"
                 },
                 "creative_id": {
                     "type": "string",

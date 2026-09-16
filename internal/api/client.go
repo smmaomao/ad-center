@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 
 	"adcenter/internal/config"
 	"adcenter/internal/engine"
@@ -32,10 +35,13 @@ import (
 
 // BidContext 一次下发（bid）的归因上下文：下发时服务端快照登记，
 // 后续曝光/点击/完播凭 bid_id 还原，避免客户端自报归属参数（防伪造）。
+// CampaignID 在下发时即由服务端记下，使频控计数在曝光处可直接取用，
+// 无需再依赖配置快照反查 campaign——bid_id 缓存本身即闭环归因。
 type BidContext struct {
 	AppID        string
 	AdvertiserID string
 	CreativeID   string
+	CampaignID   string // 素材归属任务（下发时快照，频控计数直接使用，免反查）
 	Style        string
 	DeviceID     string
 	UserID       string
@@ -44,30 +50,41 @@ type BidContext struct {
 	ExpiresAt    time.Time
 }
 
-// BidRegistry 进程内 bid_id → 上下文 映射（带 TTL）。本地/单实例够用；
-// 多实例部署需外移 Redis（与决策缓存同等级，见 SCALING.md）。
-type BidRegistry struct {
+// BidStore 下发交易上下文登记表（bid_id → 上下文）。Redis 实现跨实例共享、
+// 重启不丢；内存实现作为 Redis 不可用时的降级（与决策缓存同等级，见 SCALING.md）。
+type BidStore interface {
+	// Put 登记一次下发上下文，返回全局唯一 bid_id。
+	Put(ctx context.Context, c *BidContext) string
+	// Get 反查下发上下文；过期或不存在返回 false。
+	Get(ctx context.Context, id string) (*BidContext, bool)
+}
+
+// NewMemBidStore 构造进程内下发上下文登记表（默认 30 分钟 TTL），用于无 Redis 环境。
+func NewMemBidStore() BidStore {
+	return &memBidStore{m: map[string]*BidContext{}, ttl: 30 * time.Minute}
+}
+
+// NewRedisBidStore 从 REDIS_URL 构造 Redis 下发上下文登记表（TTL 默认 30 分钟）。
+// 返回具体类型以便调用方做 Ping / Close 探活与资源释放；其仍满足 BidStore 接口。
+func NewRedisBidStore(redisURL string, ttl time.Duration) (*redisBidStore, error) {
+	opt, err := redis.ParseURL(redisURL)
+	if err != nil {
+		return nil, err
+	}
+	if ttl <= 0 {
+		ttl = 30 * time.Minute
+	}
+	return &redisBidStore{client: redis.NewClient(opt), prefix: "adcenter:bid:", ttl: ttl}, nil
+}
+
+// memBidStore 进程内 bid_id → 上下文 映射（带 TTL）。
+type memBidStore struct {
 	mu  sync.Mutex
 	m   map[string]*BidContext
 	ttl time.Duration
 }
 
-// NewBidRegistry 构造下发上下文登记表（默认 30 分钟 TTL）。
-func NewBidRegistry() *BidRegistry {
-	return &BidRegistry{m: map[string]*BidContext{}, ttl: 30 * time.Minute}
-}
-
-// newBidID 生成全局唯一下发交易 ID（"bid_" + 96-bit base64url）。
-func newBidID() (string, error) {
-	b := make([]byte, 12)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return "bid_" + base64.RawURLEncoding.EncodeToString(b), nil
-}
-
-// Put 登记一次下发上下文，返回全局唯一 bid_id。
-func (r *BidRegistry) Put(c *BidContext) string {
+func (r *memBidStore) Put(ctx context.Context, c *BidContext) string {
 	id, _ := newBidID()
 	c.ExpiresAt = time.Now().Add(r.ttl)
 	r.mu.Lock()
@@ -76,8 +93,7 @@ func (r *BidRegistry) Put(c *BidContext) string {
 	return id
 }
 
-// Get 反查下发上下文；过期或不存在返回 false。
-func (r *BidRegistry) Get(id string) (*BidContext, bool) {
+func (r *memBidStore) Get(ctx context.Context, id string) (*BidContext, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	c, ok := r.m[id]
@@ -89,6 +105,57 @@ func (r *BidRegistry) Get(id string) (*BidContext, bool) {
 		return nil, false
 	}
 	return c, true
+}
+
+// redisBidStore Redis 版下发上下文登记表，跨实例共享且重启不丢。
+// value 为 BidContext 的 JSON，键 TTL = ttl；过期由 Redis 承担。
+type redisBidStore struct {
+	client *redis.Client
+	prefix string
+	ttl    time.Duration
+}
+
+func (r *redisBidStore) Close() error                   { return r.client.Close() }
+func (r *redisBidStore) Ping(ctx context.Context) error { return r.client.Ping(ctx).Err() }
+
+func (r *redisBidStore) Put(ctx context.Context, c *BidContext) string {
+	id, _ := newBidID()
+	c.ExpiresAt = time.Now().Add(r.ttl)
+	if b, err := json.Marshal(c); err == nil {
+		_ = r.client.Set(ctx, r.prefix+id, b, r.ttl).Err()
+	}
+	return id
+}
+
+func (r *redisBidStore) Get(ctx context.Context, id string) (*BidContext, bool) {
+	b, err := r.client.Get(ctx, r.prefix+id).Bytes()
+	if err != nil {
+		return nil, false // 不存在或 Redis 故障 → fail-open：当作无效 bid_id
+	}
+	var c BidContext
+	if err := json.Unmarshal(b, &c); err != nil {
+		return nil, false
+	}
+	return &c, true
+}
+
+// 编译期接口实现检查。
+var (
+	_ BidStore = (*memBidStore)(nil)
+	_ BidStore = (*redisBidStore)(nil)
+)
+
+// newBidID 生成全局唯一下发交易 ID：bid_{YYYYMMDD}{HHMMSS}_{8位随机}。
+// 中间嵌入下发时刻的日期与时分秒，便于线上按 bid_id 直接定位时间排查；
+// 末尾 8 位 base64url 随机串保证同一秒内唯一。
+func newBidID() (string, error) {
+	now := time.Now()
+	randBytes := make([]byte, 6)
+	if _, err := rand.Read(randBytes); err != nil {
+		return "", err
+	}
+	return "bid_" + now.Format("20060102") + now.Format("150405") + "_" +
+		base64.RawURLEncoding.EncodeToString(randBytes), nil
 }
 
 // ---- 文档字段映射 ----
@@ -146,7 +213,7 @@ func sceneForStyle(s string) []string {
 // 每条素材生成一个 bid_id，后续埋点必须回传该 bid_id 以闭环归因。
 //
 //	@Summary      批量获取广告
-//	@Description  一次请求跨全部广告样式下发，按综合得分汇总取前 count 条；每条素材生成 bid_id，供后续曝光/点击/完播埋点闭环归因。
+//	@Description  一次请求跨全部广告样式下发，按综合得分汇总取前 count 条；每条素材生成 bid_id（格式 bid_{日期}{时分秒}_{随机}，服务端缓存到 Redis），供后续曝光/点击/完播埋点闭环归因。
 //	@Tags         客户端接口
 //	@Accept       json
 //	@Produce      json
@@ -245,25 +312,24 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 			materialURL = cr.StoragePath
 		}
 		// click_url / landing_url：来自广告任务 landing_url，{CLICK_ID} 占位符由客户端替换；
-		// 同时把 landing_url 记进 bid 上下文，点击接口据此生成最终跳转地址 jump_url。
+		// 同时把 landing_url 与 campaign_id 记进 bid 上下文，点击/频控据此直接使用。
 		clickURL := ""
 		landingURL := ""
-		if campID, ok := snap.CreativeCampaign[cr.ID]; ok {
-			if camp, ok2 := snap.Campaigns[campID]; ok2 && camp.LandingURL != "" {
-				sep := "?"
-				if strings.Contains(camp.LandingURL, "?") {
-					sep = "&"
-				}
-				landingURL = camp.LandingURL
-				clickURL = camp.LandingURL + sep + "clk={CLICK_ID}"
+		campID, _ := snap.CreativeCampaign[cr.ID]
+		if camp, ok2 := snap.Campaigns[campID]; ok2 && camp.LandingURL != "" {
+			sep := "?"
+			if strings.Contains(camp.LandingURL, "?") {
+				sep = "&"
 			}
+			landingURL = camp.LandingURL
+			clickURL = camp.LandingURL + sep + "clk={CLICK_ID}"
 		}
 		reqDur := 0
 		if t.style == "rewarded_video" && cr.DurationMS > 0 {
 			reqDur = cr.DurationMS / 1000
 		}
-		bid := s.Bids.Put(&BidContext{
-			AppID: app.ID, AdvertiserID: it.AdvertiserID, CreativeID: cr.ID,
+		bid := s.Bids.Put(r.Context(), &BidContext{
+			AppID: app.ID, AdvertiserID: it.AdvertiserID, CreativeID: cr.ID, CampaignID: campID,
 			Style: t.style, DeviceID: deviceID, UserID: req.UserID, AdjustAdid: req.AdjustAdid,
 			LandingURL: landingURL,
 		})
@@ -330,7 +396,7 @@ func (s *Server) handleAdImpression(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	bid, ok := s.Bids.Get(req.BidID)
+	bid, ok := s.Bids.Get(r.Context(), req.BidID)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid or expired bid_id")
 		return
@@ -339,7 +405,7 @@ func (s *Server) handleAdImpression(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "creative_id mismatch")
 		return
 	}
-	s.chargeClientEvent(app, bid.AdvertiserID, bid.CreativeID, bid.Style, bid.DeviceID, "impression", time.Now())
+	s.chargeClientEvent(app, bid.AdvertiserID, bid.CreativeID, bid.CampaignID, bid.Style, bid.DeviceID, "impression", time.Now())
 	writeJSON(w, http.StatusOK, map[string]any{"code": 200, "msg": "success"})
 }
 
@@ -374,7 +440,7 @@ func (s *Server) handleAdVideoComplete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "user_id required")
 		return
 	}
-	bid, ok := s.Bids.Get(req.BidID)
+	bid, ok := s.Bids.Get(r.Context(), req.BidID)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid or expired bid_id")
 		return
@@ -400,7 +466,7 @@ func (s *Server) fireRewardCallback(app *config.App, bid *BidContext, bidID, use
 		"user_id":     userID,
 		"bid_id":      bidID,
 		"creative_id": bid.CreativeID,
-		"app_code":      app.ID,
+		"app_code":    app.ID,
 		"style":       bid.Style,
 		"timestamp":   ts,
 	}
@@ -423,13 +489,14 @@ func (s *Server) fireRewardCallback(app *config.App, bid *BidContext, bidID, use
 
 // chargeClientEvent 按计费方式确认扣费并记指标/事件（供客户端埋点复用）。
 // 金额以服务端配置为准，不接受客户端上报（防伪造刷量）。返回实际扣费金额。
-func (s *Server) chargeClientEvent(app *config.App, advID, creativeID, style, deviceID, event string, now time.Time) float64 {
+func (s *Server) chargeClientEvent(app *config.App, advID, creativeID, campaignID, style, deviceID, event string, now time.Time) float64 {
 	snap := s.Cache.Snapshot()
 	var charged float64
 	if adv := snap.Advertisers[advID]; adv != nil {
 		if amt, ok := adv.BillingAmount(event); ok {
 			if campID, ok := snap.CreativeCampaign[creativeID]; ok && campID != "" {
-				if s.Budget.TryDeduct(campID, amt) {
+				// campaign 日预算闸 + 广告主总钱包闸：任一不足即不扣费
+				if s.Budget.TryDeduct(campID, amt) && s.Budget.WalletDeduct(advID, amt) {
 					charged = amt
 				}
 			}
@@ -444,27 +511,32 @@ func (s *Server) chargeClientEvent(app *config.App, advID, creativeID, style, de
 	// 任务级频控：仅在真实观看（impression）时累加计数。计数失败一律 fail-open
 	// （不挡广告）——最坏是少限一次，不影响曝光。
 	if event == "impression" {
-		s.recordCampaignImpression(snap, app.ID, creativeID, deviceID, now)
+		s.recordCampaignImpression(snap, app.ID, creativeID, campaignID, deviceID, now)
 	}
 	return charged
 }
 
 // recordCampaignImpression 在 impression 时累加"设备×任务"频控计数：
-// 由素材反查其归属 campaign（snap.CreativeCampaign），复用与决策期 Check 同款的
-// 窗口定义（engine.CampaignFreqWindows），保证"只读检查"与"真实观看计数"一致。
-func (s *Server) recordCampaignImpression(snap *config.Snapshot, appID, creativeID, deviceID string, now time.Time) {
+// campaignID 优先取下发时登记的 bid 上下文（Redis 缓存，免反查快照），
+// 缺失时回退到配置快照 CreativeCampaign 反查，兼容历史路径。
+// 窗口定义复用与决策期 Check 同款的 engine.CampaignFreqWindows，
+// 保证"只读检查"与"真实观看计数"一致。
+func (s *Server) recordCampaignImpression(snap *config.Snapshot, appID, creativeID, campaignID, deviceID string, now time.Time) {
 	if s.Freq == nil {
 		return
 	}
-	campID, ok := snap.CreativeCampaign[creativeID]
-	if !ok || campID == "" {
-		return
+	if campaignID == "" {
+		var ok bool
+		campaignID, ok = snap.CreativeCampaign[creativeID]
+		if !ok || campaignID == "" {
+			return
+		}
 	}
-	camp := snap.Campaigns[campID]
+	camp := snap.Campaigns[campaignID]
 	if camp == nil {
 		return
 	}
 	if ws := engine.CampaignFreqWindows(camp); len(ws) > 0 {
-		s.Freq.Record(appID, deviceID, creativeID, campID, frequency.AdvPolicy{Windows: ws}, now)
+		s.Freq.Record(appID, deviceID, creativeID, campaignID, frequency.AdvPolicy{Windows: ws}, now)
 	}
 }

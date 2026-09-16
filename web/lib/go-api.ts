@@ -240,6 +240,61 @@ export async function deleteAdvertiser(actorEmail: string, id: string) {
 }
 
 // ============================================================
+// 广告主总钱包（充值 - 扣费；余额为投放硬顶）
+// ============================================================
+
+/** 钱包概览（GET /v1/admin/advertisers/{id}/wallet） */
+export interface AdminWallet {
+  advertiser_id: string;
+  /** 是否已启用总钱包闸：false=存量广告主，不受总余额限制；首次充值后为 true */
+  enabled: boolean;
+  balance: number; // 当前余额
+  deposited: number; // 累计充值
+  spent: number; // 累计扣费
+  currency: string;
+}
+
+/** 钱包流水一行（充值 + 扣费合并，时间倒序） */
+export interface WalletFlowRow {
+  kind: "recharge" | "deduct";
+  amount: number; // 恒为正，方向由 kind 区分
+  currency: string;
+  op_type?: string; // 扣费细分：deduct / deduct_agg
+  note?: string;
+  created_by?: string;
+  at: string; // YYYY-MM-DD HH24:MI:SS
+}
+
+export async function getWallet(actorEmail: string, id: string) {
+  return goApi<AdminWallet>(`/v1/admin/advertisers/${id}/wallet`, actorEmail);
+}
+
+export async function listWalletFlow(
+  actorEmail: string,
+  id: string,
+  limit = 200,
+) {
+  return goApi<WalletFlowRow[]>(
+    `/v1/admin/advertisers/${id}/wallet/flow?limit=${limit}`,
+    actorEmail,
+  );
+}
+
+/** 充值：写充值流水 + 递增余额 + 启用钱包闸 */
+export async function rechargeWallet(
+  actorEmail: string,
+  id: string,
+  body: { amount: number; currency?: string; note?: string },
+) {
+  return goSend<{ status: string; balance: number }>(
+    `/v1/admin/advertisers/${id}/wallet/recharge`,
+    actorEmail,
+    "POST",
+    body,
+  );
+}
+
+// ============================================================
 // 运行时设置（决策缓存等）
 // ============================================================
 

@@ -227,7 +227,8 @@ func (s *Server) handleAdEvent(w http.ResponseWriter, r *http.Request) {
 			// 预算闸按 campaign 各自控制：创意归属的 campaign 为扣费单元；
 			// 未挂到任何 campaign 的素材不扣费（也不参与预算封顶）。
 			if campID, ok := snap.CreativeCampaign[req.CreativeID]; ok && campID != "" {
-				if s.Budget.TryDeduct(campID, amt) {
+				// campaign 日预算闸 + 广告主总钱包闸：任一不足即不扣费
+				if s.Budget.TryDeduct(campID, amt) && s.Budget.WalletDeduct(req.AdvertiserID, amt) {
 					charged = amt
 				}
 			}
@@ -243,7 +244,7 @@ func (s *Server) handleAdEvent(w http.ResponseWriter, r *http.Request) {
 	// 任务级频控：仅在真实观看（impression）时累加计数（详见 client.go 的
 	// recordCampaignImpression，二者共用同一逻辑，避免重复实现）。
 	if req.Event == "impression" {
-		s.recordCampaignImpression(snap, app.ID, req.CreativeID, req.DeviceID, now)
+		s.recordCampaignImpression(snap, app.ID, req.CreativeID, "", req.DeviceID, now)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})

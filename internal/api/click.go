@@ -57,7 +57,7 @@ func (s *Server) handleAdClick(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bid_id required")
 		return
 	}
-	bid, ok := s.Bids.Get(req.BidID)
+	bid, ok := s.Bids.Get(r.Context(), req.BidID)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid or expired bid_id")
 		return
@@ -84,7 +84,7 @@ func (s *Server) handleAdClick(w http.ResponseWriter, r *http.Request) {
 	// 点击计费：billing_mode=cpc 时按 BiddingPrice 扣（跳转即一次有效点击）；
 	// cpa/cpm 广告主此事件不扣，只记指标。金额以服务端配置为准。
 	now := time.Now()
-	charged := s.chargeClientEvent(app, bid.AdvertiserID, bid.CreativeID, bid.Style, bid.DeviceID, "click", now)
+	charged := s.chargeClientEvent(app, bid.AdvertiserID, bid.CreativeID, bid.CampaignID, bid.Style, bid.DeviceID, "click", now)
 
 	// 生成最终跳转地址：基于广告任务的落地页地址拼接 click_id，
 	// 客户端拿到 jump_url 直接打开即可（无需自行替换 {CLICK_ID} 占位符）。

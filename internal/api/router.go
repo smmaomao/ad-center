@@ -11,7 +11,6 @@ import (
 	"runtime"
 	"time"
 
-	httpSwagger "github.com/swaggo/http-swagger"
 	"adcenter/internal/budget"
 	"adcenter/internal/cache"
 	"adcenter/internal/config"
@@ -21,6 +20,7 @@ import (
 	"adcenter/internal/queue"
 	"adcenter/internal/storage"
 	"adcenter/internal/store"
+	httpSwagger "github.com/swaggo/http-swagger"
 )
 
 // generateAPIKey 生成 App API Key：原文 adc_{32hex}（仅创建时返回一次），落库 sha256 哈希。
@@ -54,7 +54,7 @@ type Server struct {
 	DecisionCache cache.DecisionCache // 决策结果缓存（Redis；nil/Noop = 实时计算）
 	Queue         queue.Backend       // 事件队列（M2：memory / redis streams）；nil = 丢弃事件
 	Freq          frequency.Store     // 任务级频控（与引擎共用同一实例）
-	Bids          *BidRegistry        // 下发交易上下文登记表（客户端接口 bid_id → 上下文）
+	Bids          BidStore            // 下发交易上下文登记表（客户端接口 bid_id → 上下文，Redis/内存）
 }
 
 // NewRouter 返回根路由（Go 1.26 方法路由），外层包了请求计时日志中间件。
@@ -80,6 +80,10 @@ func (s *Server) NewRouter() http.Handler {
 	mux.HandleFunc("PATCH /v1/admin/advertisers/{id}", s.handleUpdateAdvertiser)
 	mux.HandleFunc("DELETE /v1/admin/advertisers/{id}", s.handleDeleteAdvertiser)
 	mux.HandleFunc("GET /v1/admin/advertisers/{id}/rollup", s.handleRollupAdvertiserKPIs)
+	// 广告主总钱包（充值 - 扣费；余额为投放硬顶）
+	mux.HandleFunc("GET /v1/admin/advertisers/{id}/wallet", s.handleGetWallet)
+	mux.HandleFunc("GET /v1/admin/advertisers/{id}/wallet/flow", s.handleListWalletFlow)
+	mux.HandleFunc("POST /v1/admin/advertisers/{id}/wallet/recharge", s.handleRecharge)
 	mux.HandleFunc("GET /v1/admin/slots", s.handleListSlots)
 	mux.HandleFunc("POST /v1/admin/slots", s.handleCreateSlot)
 	mux.HandleFunc("GET /v1/admin/slots/{id}", s.handleGetSlot)

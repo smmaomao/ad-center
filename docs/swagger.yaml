@@ -17,7 +17,7 @@ definitions:
         example: adj_xyz_9988
         type: string
       bid_id:
-        example: bid_20260908_0001
+        example: bid_20260908143052_aB3xK9zQ
         type: string
       creative_id:
         example: cr_90002
@@ -46,7 +46,7 @@ definitions:
         example: app_10001
         type: string
       bid_id:
-        example: bid_20260908_0001
+        example: bid_20260908143052_aB3xK9zQ
         type: string
       creative_id:
         example: cr_90002
@@ -74,7 +74,7 @@ definitions:
         example: REWARDED_VIDEO
         type: string
       bid_id:
-        example: bid_20260908_0001
+        example: bid_20260908143052_aB3xK9zQ
         type: string
       click_url:
         example: https://landing.com?clk={CLICK_ID}
@@ -142,7 +142,7 @@ definitions:
         example: app_10001
         type: string
       bid_id:
-        example: bid_20260908_0001
+        example: bid_20260908143052_aB3xK9zQ
         type: string
       creative_id:
         example: cr_90002

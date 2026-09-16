@@ -93,7 +93,7 @@ type candidate struct {
 	priceScore  float64 // 出价基准分（Price_Score）
 	bidPrice    float64 // 出价（来自 campaign，用于 Item.BidPrice）
 	score       float64
-	ttl         int // 下发有效期（分钟），来自 campaign（未配置回落默认）
+	ttl         int              // 下发有效期（分钟），来自 campaign（未配置回落默认）
 	camp        *config.Campaign // 归属广告任务（任务级频控来源）
 	// 请求内预算快照：buildCandidates 查一次后注入，score 与 materialize 复用。
 	spent  float64
@@ -288,6 +288,7 @@ func (e *Engine) scoreCreative(
 //   - freq_interval_minutes（>0 且 freq_fatigue_window>0）= 滑动窗口长度（分钟）
 //   - freq_fatigue_window = 该窗口内最大下发次数
 //   - 另叠加 24h 日频控 freq_daily_limit（>0 时生效）
+//
 // 任一窗口为 0 则该档视为不限。
 func CampaignFreqWindows(camp *config.Campaign) []frequency.Window {
 	if camp == nil {
@@ -326,6 +327,11 @@ func (e *Engine) materialize(req Request, c candidate) (Item, bool) {
 				return Item{}, false
 			}
 		}
+	}
+	// 广告主总钱包硬顶：余额 <=0 → 停投该广告主下全部 campaign（即使 campaign
+	// 日预算没超）。未启用钱包的广告主 WalletBalance 返回 +inf，不受此闸限制。
+	if c.adv != nil && e.Budget.WalletBalance(c.adv.ID) <= 0 {
+		return Item{}, false
 	}
 	// 预算只读闸：用请求内快照判断（spent >= budget 停投，不扣费）。
 	if c.budget > 0 && c.spent >= c.budget {

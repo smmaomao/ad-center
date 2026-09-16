@@ -2,6 +2,7 @@ package budget
 
 import (
 	"context"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -288,6 +289,108 @@ func parseDeductResult(v any) (ok bool, resets []resetEntry) {
 		ok = n == 1
 	}
 	return ok, parseResets(arr[1])
+}
+
+// ---- 广告主总钱包（充值 - 扣费），与 Memory 同语义 ----
+//
+// 状态：Redis Hash {wal}:{advertiserID} 字段 balance。**键存在 = 已启用钱包**；
+// 键不存在 = 未启用（不受总余额限制）—— 用 EXISTS 区分"未启用"与"余额为 0"。
+
+func (r *Redis) walletKey(advertiserID string) string {
+	return r.prefix + "{wal}:" + advertiserID
+}
+
+// walletDeductScript 原子扣减总余额：
+//
+//	键不存在 → 返回 1（未启用，放行扣费，仍走 campaign 日预算闸）
+//	余额不足 → 返回 0
+//	否则扣减并返回 1
+var walletDeductScript = redis.NewScript(`
+if redis.call('EXISTS', KEYS[1]) == 0 then return 1 end
+local bal = tonumber(redis.call('HGET', KEYS[1], 'balance')) or 0
+local amount = tonumber(ARGV[1])
+if amount < 0 or bal < amount then return 0 end
+redis.call('HSET', KEYS[1], 'balance', tostring(bal - amount))
+return 1
+`)
+
+// WalletBalance 总余额；未启用 / 读失败 → MaxFloat64（不限制，fail-open）。
+func (r *Redis) WalletBalance(advertiserID string) float64 {
+	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
+	defer cancel()
+	k := r.walletKey(advertiserID)
+	n, err := r.client.Exists(ctx, k).Result()
+	if err != nil || n == 0 {
+		return math.MaxFloat64
+	}
+	v, err := r.client.HGet(ctx, k, "balance").Result()
+	if err != nil {
+		return math.MaxFloat64
+	}
+	return parseFloat(v)
+}
+
+// WalletDeduct 总余额扣减；未启用 / 失败放行（true）。
+func (r *Redis) WalletDeduct(advertiserID string, amount float64) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
+	defer cancel()
+	res, err := walletDeductScript.Run(ctx, r.client,
+		[]string{r.walletKey(advertiserID)}, formatFloat(amount)).Result()
+	if err != nil {
+		return true // fail-open：Redis 不可用 → 放行（仍受 campaign 日预算闸）
+	}
+	n, ok := res.(int64)
+	return !ok || n == 1
+}
+
+// WalletCredit 充值入账；键不存在时创建（充值即启用钱包）。
+func (r *Redis) WalletCredit(advertiserID string, amount float64) {
+	if amount <= 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
+	defer cancel()
+	_ = r.client.HIncrByFloat(ctx, r.walletKey(advertiserID), "balance", amount).Err()
+}
+
+// SyncWallets 用 DB 快照覆盖钱包余额，并清理不再启用的钱包键。
+func (r *Redis) SyncWallets(balances map[string]float64) {
+	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
+	defer cancel()
+	pipe := r.client.Pipeline()
+	for id, b := range balances {
+		pipe.HSet(ctx, r.walletKey(id), "balance", formatFloat(b))
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		return
+	}
+	r.sweepWallets(ctx, balances)
+}
+
+// sweepWallets 清理 DB 中未启用（已停用钱包/已删除）的广告主钱包键。
+func (r *Redis) sweepWallets(ctx context.Context, keep map[string]float64) {
+	const tag = "{wal}:"
+	var cursor uint64
+	for {
+		keys, next, err := r.client.Scan(ctx, cursor, r.prefix+tag+"*", 500).Result()
+		if err != nil {
+			return
+		}
+		var del []string
+		for _, k := range keys {
+			id := strings.TrimPrefix(k, r.prefix+tag)
+			if _, ok := keep[id]; !ok {
+				del = append(del, k)
+			}
+		}
+		if len(del) > 0 {
+			_ = r.client.Del(ctx, del...).Err()
+		}
+		cursor = next
+		if cursor == 0 {
+			return
+		}
+	}
 }
 
 // 编译期接口实现检查。

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"strconv"
 
 	"adcenter/internal/store"
 )
@@ -111,6 +112,77 @@ func (s *Server) handleDeleteAdvertiser(w http.ResponseWriter, r *http.Request) 
 	}
 	_ = s.Store.WriteAudit(r.Context(), actor, "delete", "advertiser", id, nil)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// ---- 广告主总钱包（充值 - 扣费）----
+
+// handleGetWallet 钱包概览：启用状态 / 当前余额 / 累计充值 / 累计扣费。
+func (s *Server) handleGetWallet(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireRole(w, r, false, false); !ok {
+		return
+	}
+	wl, err := s.Store.GetWallet(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, wl)
+}
+
+// handleListWalletFlow 钱包流水（充值 + 扣费合并，时间倒序）。
+func (s *Server) handleListWalletFlow(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireRole(w, r, false, false); !ok {
+		return
+	}
+	limit := 200
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			limit = n
+		}
+	}
+	list, err := s.Store.ListWalletFlow(r.Context(), r.PathValue("id"), limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if list == nil {
+		list = []*store.WalletFlowRow{}
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+// handleRecharge 广告主充值：写充值流水 + 递增余额 + 启用钱包闸，并即时更新
+// 进程内闸门（不等下一轮对账）。
+//
+//	POST /v1/admin/advertisers/{id}/wallet/recharge  {"amount":1000,"currency":"USD","note":""}
+func (s *Server) handleRecharge(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireRole(w, r, true, false)
+	if !ok {
+		return
+	}
+	var body struct {
+		Amount   float64 `json:"amount"`
+		Currency string  `json:"currency"`
+		Note     string  `json:"note"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body.Amount <= 0 {
+		writeError(w, http.StatusBadRequest, "amount must be positive")
+		return
+	}
+	id := r.PathValue("id")
+	balance, err := s.Store.Recharge(r.Context(), id, body.Amount, body.Currency, body.Note, actor)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if s.Budget != nil {
+		s.Budget.WalletCredit(id, body.Amount)
+	}
+	_ = s.Store.WriteAudit(r.Context(), actor, "recharge", "advertiser", id, nil)
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "balance": balance})
 }
 
 func (s *Server) handleListSlots(w http.ResponseWriter, r *http.Request) {

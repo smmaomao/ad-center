@@ -17,16 +17,18 @@ import (
 
 // AdminAdvertiser 管理 API 的广告主视图（身份 + 计费锚点；KPI/排期在广告任务维度）。
 type AdminAdvertiser struct {
-	ID                string                  `json:"id"`
-	Name              string                  `json:"name"`
-	Status            string                  `json:"status"`
-	BiddingPrice      float64                 `json:"bidding_price"`
-	BiddingPriceMin   float64                 `json:"bidding_price_min"` // 单价下限；0=未配置→固定 BiddingPrice
-	BillingMode       string                  `json:"billing_mode"` // 计费方式（cpm/cpc/cpa），扣费锚点
-	CPAEventPrices    map[string][2]float64   `json:"cpa_event_prices"` // 事件→[min,max] 区间
-	Contact           string                  `json:"contact"`
-	Notes             string                  `json:"notes"`
-	CreatedAt         string                  `json:"created_at"` // 创建日期（YYYY-MM-DD）
+	ID              string                `json:"id"`
+	Name            string                `json:"name"`
+	Status          string                `json:"status"`
+	BiddingPrice    float64               `json:"bidding_price"`
+	BiddingPriceMin float64               `json:"bidding_price_min"` // 单价下限；0=未配置→固定 BiddingPrice
+	BillingMode     string                `json:"billing_mode"`      // 计费方式（cpm/cpc/cpa），扣费锚点
+	CPAEventPrices  map[string][2]float64 `json:"cpa_event_prices"`  // 事件→[min,max] 区间
+	WalletEnabled   bool                  `json:"wallet_enabled"`    // 是否启用总钱包闸（首次充值置 true）
+	WalletBalance   float64               `json:"wallet_balance"`    // 总余额 = 累计充值 - 累计扣费
+	Contact         string                `json:"contact"`
+	Notes           string                `json:"notes"`
+	CreatedAt       string                `json:"created_at"` // 创建日期（YYYY-MM-DD）
 }
 
 // adminAdvertiserCols 管理端广告主列。
@@ -40,6 +42,7 @@ const adminAdvertiserCols = `
 	id::text, name, status,
 	bidding_price::float8, bidding_price_min::float8,
 	billing_mode, cpa_event_prices::text,
+	wallet_enabled, wallet_balance::float8,
 	COALESCE(contact, ''),
 	COALESCE(notes, ''), to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')`
 
@@ -49,6 +52,7 @@ func scanAdminAdvertiser(scan func(...any) error) (*AdminAdvertiser, error) {
 	if err := scan(&a.ID, &a.Name, &a.Status,
 		&a.BiddingPrice, &a.BiddingPriceMin,
 		&a.BillingMode, &cpaPrices,
+		&a.WalletEnabled, &a.WalletBalance,
 		&a.Contact, &a.Notes, &a.CreatedAt); err != nil {
 		return nil, err
 	}
@@ -226,8 +230,8 @@ type AdminApp struct {
 	Status      string  `json:"status"`
 	CallbackURL *string `json:"callback_url"` // 业务后端 S2S 接收地址
 	SecretKey   string  `json:"secret_key"`   // S2S 签名密钥（支持重置）
-	APIKey      *string `json:"api_key"`       // API Key 明文（仅展示/交付；鉴权走 hash）
-	CreatedAt   *string `json:"created_at"`    // 创建日期（YYYY-MM-DD）
+	APIKey      *string `json:"api_key"`      // API Key 明文（仅展示/交付；鉴权走 hash）
+	CreatedAt   *string `json:"created_at"`   // 创建日期（YYYY-MM-DD）
 }
 
 // ListApps App 列表（已软删的不展示）。

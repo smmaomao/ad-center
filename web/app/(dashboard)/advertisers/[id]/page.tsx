@@ -1,14 +1,19 @@
 import Link from "next/link";
-import { requireMenu } from "@/lib/auth";
+import { requireMenu, canWriteRole } from "@/lib/auth";
 import {
   getAdvertiser,
   listProducts,
   getAdvertiserRollup,
+  getWallet,
+  listWalletFlow,
   type AdminAdvertiser,
   type AdminProduct,
+  type AdminWallet,
   type CampaignRollup,
+  type WalletFlowRow,
 } from "@/lib/go-api";
 import { DeleteEntityButton } from "@/components/danger-zone";
+import { WalletPanel } from "./wallet-panel";
 import {
   Card,
   CardContent,
@@ -65,6 +70,18 @@ export default async function AdvertiserDetailPage({
   } catch {
     rollup = null;
   }
+  let wallet: AdminWallet | null = null;
+  try {
+    wallet = await getWallet(session.email, id);
+  } catch {
+    wallet = null;
+  }
+  let walletFlow: WalletFlowRow[] = [];
+  try {
+    walletFlow = await listWalletFlow(session.email, id);
+  } catch {
+    walletFlow = [];
+  }
   if (loadError || !advertiser) {
     return (
       <Card className="border-destructive">
@@ -120,6 +137,16 @@ export default async function AdvertiserDetailPage({
           "KPI / 预算的细化在广告任务管理",
         )}
       </div>
+
+      {/* 账户总钱包：充值 - 扣费；余额为投放硬顶（日预算没超、余额超了也停投） */}
+      {wallet && (
+        <WalletPanel
+          advertiserId={id}
+          wallet={wallet}
+          flow={walletFlow}
+          canWrite={canWriteRole(session.role)}
+        />
+      )}
 
       <div className="surface-card rise-1 p-6 text-sm text-muted-foreground">
         素材与投放配置不属于单个广告主：素材由「

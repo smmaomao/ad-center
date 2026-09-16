@@ -100,7 +100,8 @@ func (s *Server) handleS2SEvent(w http.ResponseWriter, r *http.Request) {
 	if adv != nil {
 		if amt, ok := adv.BillingAmount(eventName); ok {
 			if campID, ok := snap.CreativeCampaign[ctx.CreativeID]; ok && campID != "" {
-				if s.Budget.TryDeduct(campID, amt) {
+				// campaign 日预算闸 + 广告主总钱包闸：任一不足即不扣费
+				if s.Budget.TryDeduct(campID, amt) && s.Budget.WalletDeduct(ctx.AdvertiserID, amt) {
 					charged = amt
 				}
 			}

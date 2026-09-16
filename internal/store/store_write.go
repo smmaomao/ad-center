@@ -14,10 +14,10 @@ import (
 
 // MinuteMetric 一行分钟级指标（advertiserID 传零值 UUID 表示兜底/MAX）。
 type MinuteMetric struct {
-	Style, AdvertiserID, AppID string
-	Minute                     time.Time
+	Style, AdvertiserID, AppID                        string
+	Minute                                            time.Time
 	Requests, Fills, Impressions, Clicks, Conversions int64
-	Revenue                    float64
+	Revenue                                           float64
 }
 
 // FlushMinuteMetrics 批量 UPSERT 分钟指标（ON CONFLICT 累加，多实例/重试安全）。
@@ -53,7 +53,7 @@ func (s *Store) FlushMinuteMetrics(ctx context.Context, rows []MinuteMetric) err
 // AdEvent 原始事件行。
 type AdEvent struct {
 	AppID, Style, AdvertiserID, CreativeID, DeviceID, Country, EventType string
-	Revenue float64
+	Revenue                                                              float64
 }
 
 // InsertAdEvents 批量写事件（fill/impression/click/conversion 回执与下发记录）。
@@ -92,8 +92,38 @@ func (s *Store) WriteEventBatch(ctx context.Context, events []AdEvent) error {
 				return err
 			}
 		}
+		// 广告主总钱包同事务递减：余额真相在 DB，进程内 WalletDeduct 只是实时
+		// 只读闸。与流水同事务保证「扣了钱就有流水、有流水就扣了钱」。
+		if q, args, ok := buildWalletDebit(rows); ok {
+			if _, err := tx.Exec(ctx, q, args...); err != nil {
+				return err
+			}
+		}
 	}
 	return tx.Commit(ctx)
+}
+
+// buildWalletDebit 由聚合流水构造广告主钱包批量递减语句。
+// GREATEST(...,0) 兜底防负（正常路径 WalletDeduct 已保证余额充足）。
+// 只对已启用钱包的广告主扣减（wallet_enabled）——存量广告主不受影响。
+func buildWalletDebit(rows []LedgerAgg) (string, []any, bool) {
+	if len(rows) == 0 {
+		return "", nil, false
+	}
+	var sb strings.Builder
+	sb.WriteString(`UPDATE advertisers a
+		SET wallet_balance = GREATEST(a.wallet_balance - v.amt, 0), updated_at = now()
+		FROM (VALUES `)
+	args := make([]any, 0, len(rows)*2)
+	for i, r := range rows {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		fmt.Fprintf(&sb, "($%d::bigint,$%d::float8)", i*2+1, i*2+2)
+		args = append(args, nilIfEmpty(r.AdvertiserID), r.Amount)
+	}
+	sb.WriteString(`) AS v(id, amt) WHERE a.id = v.id AND a.wallet_enabled`)
+	return sb.String(), args, true
 }
 
 func buildInsertAdEvents(events []AdEvent) (string, []any, bool) {

@@ -29,6 +29,20 @@ type Ctrl interface {
 	// HourlyCalibrate 每小时预算平滑校准记账（PRD 5.2；
 	// 权重调整本身在引擎打分内实时进行，此处落校准流水供审计）。
 	HourlyCalibrate() error
+
+	// ---- 广告主总钱包（充值 - 扣费），campaign 日预算之上的硬顶 ----
+
+	// WalletBalance 返回广告主总余额。**未注册钱包**（未启用钱包的存量广告主）
+	// 返回 math.MaxFloat64 = 不受总余额限制，使只读闸放行——保证上线兼容。
+	WalletBalance(advertiserID string) float64
+
+	// WalletDeduct 从总钱包原子扣减：余额充足则扣减返回 true；不足返回 false。
+	// 未注册钱包返回 true（放行扣费，存量广告主照旧走 campaign 日预算闸）。
+	WalletDeduct(advertiserID string, amount float64) bool
+
+	// WalletCredit 充值入账（后台充值成功后调用），使实时闸门立即反映新余额；
+	// 未注册的广告主会被登记（充值即启用钱包）。
+	WalletCredit(advertiserID string, amount float64)
 }
 
 // Syncer 预算控制器的可选能力：由配置变更驱动的日预算同步。
@@ -48,4 +62,10 @@ type Ctrl interface {
 //   - 实现必须并发安全
 type Syncer interface {
 	SyncBalances(balances map[string][2]float64)
+
+	// SyncWallets 用 DB 全量快照对齐广告主总钱包（启动 / 定时对账 / 充值后）。
+	// 与 SyncBalances 不同：钱包余额真相在 DB（消费端扣费同事务递减、充值同事务
+	// 递增），故此处理解为**全量覆盖**——入参含的广告主写入，不在入参的（未启用
+	// 或已删除）移除。存量广告主未启用钱包时不在入参，即不受总余额限制。
+	SyncWallets(balances map[string]float64)
 }

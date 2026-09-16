@@ -24,8 +24,8 @@ import (
 	"adcenter/internal/config"
 	"adcenter/internal/engine"
 	"adcenter/internal/frequency"
-	"adcenter/internal/migrate"
 	"adcenter/internal/metrics"
+	"adcenter/internal/migrate"
 	"adcenter/internal/queue"
 	"adcenter/internal/storage"
 	"adcenter/internal/store"
@@ -78,15 +78,24 @@ func main() {
 		os.Exit(1)
 	}
 
-	// ③ 预算：STATE_STORE=redis 时状态外移到 Redis（多实例前置，SCALING.md §6）
-	//
-	// 默认 memory（单实例 / 本地开发）；切 redis 后预算与频控以 Redis 为唯一副本。
-	// 连接失败**启动即退出**而非静默回退内存版——避免"以为分布式、其实各实例
-	// 各管各的"这种最难排查的超发资损。
 	redisURL := os.Getenv("REDIS_URL")
-	stateStore := getenv("STATE_STORE", "memory")
+	// 频控 / 预算 / 队列的默认后端：只要配了 REDIS_URL 就默认走 Redis
+	// （多实例共享、重启不丢），与决策缓存、bid 登记表共用同一开关；本地开发
+	// 不配 REDIS_URL 时退回进程内实现，或显式 STATE_STORE=memory /
+	// QUEUE_DRIVER=memory 强制内存。
+	// REDIS_URL 支持 /<db> 指定库号（go-redis ParseURL 解析）。库号约定：本地多
+	// 项目共用一个 Redis，按 DB index 隔离，广告中心本地用 /10；线上各项目有
+	// 独立 Redis 实例，REDIS_URL 直连即可，测试/正式如需共用实例再用 index 区分。预算/频控走 Redis 时若连接失败会**启动即退出**
+	// （fail-loud），避免"以为分布式、其实各实例各管各的"超发资损（见 SCALING.md §6）。
+	defState := "memory"
+	defQueue := "memory"
+	if redisURL != "" {
+		defState = "redis"
+		defQueue = "redis"
+	}
+	stateStore := getenv("STATE_STORE", defState)
 	// 事件队列驱动（M2，SCALING.md §2）：redis = Streams + 消费端批量落库 + 流水聚合
-	queueDriver := getenv("QUEUE_DRIVER", "memory")
+	queueDriver := getenv("QUEUE_DRIVER", defQueue)
 
 	balances, err := st.LoadBudgetBalances(ctx)
 	if err != nil {
@@ -137,6 +146,17 @@ func main() {
 		bc.SyncBalances(bm)
 		budgetCtrl = bc
 		log.Info("budget store enabled (redis)")
+	}
+
+	// 广告主总钱包：启动灌入**已启用钱包**的余额（未启用的存量广告主不在内 →
+	// 不受总余额限制，行为与上线前一致）。余额真相在 DB，消费端扣费 / 后台充值
+	// 都会落库，此处只是进程内实时只读闸的初始副本。
+	if wallets, werr := st.LoadWalletBalances(ctx); werr != nil {
+		log.Error("wallet load failed", "err", werr)
+		os.Exit(1)
+	} else {
+		budgetCtrl.SyncWallets(wallets)
+		log.Info("wallets loaded", "count", len(wallets))
 	}
 
 	// ③' 配置刷新 → 预算同步：后台新建广告主 / 调整日预算无需重启即生效。
@@ -224,8 +244,8 @@ func main() {
 		Cache: cache, Engine: eng, Store: st, Metrics: agg,
 		Budget: budgetCtrl, InternalKey: internalKey, SessionSecret: sessionSecret, Log: log,
 		Storage: r2Signer, DecisionCache: decisionCache,
-		Clicks:   api.NewClickResolver(st), // clickid 归因反查（落库实现）
-		Freq:     freqStore,                // 任务级频控：与引擎共用同一实例
+		Clicks: api.NewClickResolver(st), // clickid 归因反查（落库实现）
+		Freq:   freqStore,                // 任务级频控：与引擎共用同一实例
 	}
 	// ⑤' 事件队列：memory = 进程内 channel（现状）；redis = Streams + consumer group
 	var evtQueue queue.Backend = queue.NewMemory(8192, 500, 2*time.Second)
@@ -243,8 +263,20 @@ func main() {
 		log.Info("event queue enabled (redis streams)")
 	}
 	srv.Queue = evtQueue
-	// 下发交易上下文登记表（客户端接口 bid_id → 上下文，TTL 30min）
-	srv.Bids = api.NewBidRegistry()
+	// 下发交易登记表（客户端接口 bid_id → 上下文，TTL 30min）：
+	// 优先 Redis（跨实例共享、重启不丢），未配置 REDIS_URL 或连接失败则降级内存。
+	srv.Bids = api.NewMemBidStore()
+	if redisURL != "" {
+		if rb, err := api.NewRedisBidStore(redisURL, 30*time.Minute); err != nil {
+			log.Warn("redis init failed, bid registry falls back to in-memory", "err", err)
+		} else if err := rb.Ping(ctx); err != nil {
+			log.Warn("redis ping failed, bid registry falls back to in-memory", "err", err)
+			_ = rb.Close()
+		} else {
+			srv.Bids = rb
+			log.Info("bid registry enabled (redis)")
+		}
+	}
 	// 消费失败必须可见：Redis 后端不 ACK（留在 PEL 重试），此处负责打日志
 	go evtQueue.Run(ctx, func(ctx context.Context, batch []store.AdEvent) error {
 		if err := srv.ConsumeEvents(ctx, batch); err != nil {
@@ -416,6 +448,14 @@ func syncBudgets(ctx context.Context, st *store.Store, ctrl budget.Syncer, log *
 		bm[b.CampaignID] = [2]float64{b.DailyBudget, b.SpentToday}
 	}
 	ctrl.SyncBalances(bm)
+
+	// 广告主总钱包同步（充值 / 扣费后对账）。失败不回退日预算——两者独立，
+	// 钱包晚一拍对齐即可。
+	if wallets, werr := st.LoadWalletBalances(c); werr != nil {
+		log.Error("wallet sync failed", "reason", reason, "err", werr)
+	} else {
+		ctrl.SyncWallets(wallets)
+	}
 	log.Debug("budget synced", "reason", reason, "advertisers", len(bm))
 }
 

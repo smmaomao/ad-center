@@ -13,6 +13,7 @@ import {
   createCreative,
   updateCreative,
   deleteCreative,
+  rechargeWallet,
   GoApiError,
 } from "@/lib/go-api";
 
@@ -156,4 +157,34 @@ export async function deleteCreativeAction(
   }
   revalidatePath(`/advertisers/${advertiserId}`);
   return {};
+}
+
+// ============================================================
+// 广告主总钱包
+// ============================================================
+
+/** 广告主充值：写充值流水 + 递增余额 + 启用总钱包闸（余额 <=0 停投） */
+export async function rechargeWalletAction(
+  _prev: FormState,
+  fd: FormData,
+): Promise<FormState> {
+  const session = await getSession();
+  if (!session) return { error: "会话已过期，请重新登录" };
+
+  const advertiserId = str(fd, "advertiser_id");
+  const amount = num(fd, "amount");
+  if (!advertiserId) return { error: "缺少广告主" };
+  if (amount <= 0) return { error: "充值金额必须大于 0" };
+
+  try {
+    await rechargeWallet(session.email, advertiserId, {
+      amount,
+      currency: str(fd, "currency") || "USD",
+      note: str(fd, "note"),
+    });
+  } catch (e) {
+    return { error: errMsg(e, "充值失败") };
+  }
+  revalidatePath(`/advertisers/${advertiserId}`);
+  return { ok: true };
 }

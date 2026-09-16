@@ -1,6 +1,7 @@
 package budget
 
 import (
+	"math"
 	"sync"
 	"time"
 )
@@ -25,16 +26,21 @@ type LedgerFn func(advertiserID, opType string, amount float64)
 type Memory struct {
 	mu       sync.Mutex
 	balances map[string]*balance
-	day      string // 当前预算日（Jakarta YYYY-MM-DD），跨日触发重置
-	initDay  bool   // 尚未校准预算日：首次操作按当前时钟设定，避免误清零
-	ledger   LedgerFn
-	now      func() time.Time
+	// wallets 广告主总余额（充值 - 扣费）。仅登记**已启用钱包**的广告主；
+	// 未登记 = 不受总余额限制（存量广告主向后兼容）。
+	wallets map[string]float64
+	day     string // 当前预算日（Jakarta YYYY-MM-DD），跨日触发重置
+	initDay bool   // 尚未校准预算日：首次操作按当前时钟设定，避免误清零
+	ledger  LedgerFn
+	now     func() time.Time
 }
 
 // NewMemory 创建预算控制器，balances 为启动加载的当日状态。
+// 钱包余额随后由 SyncWallets 灌入（启动装配时调用）。
 func NewMemory(balances map[string][2]float64, ledger LedgerFn) *Memory {
 	m := &Memory{
 		balances: make(map[string]*balance, len(balances)),
+		wallets:  map[string]float64{},
 		ledger:   ledger,
 		now:      time.Now,
 	}
@@ -137,6 +143,55 @@ func (m *Memory) HourlyCalibrate() error {
 		m.ledger("", "calibrate", 0)
 	}
 	return nil
+}
+
+// ---- 广告主总钱包 ----
+
+// WalletBalance 总余额；未注册（未启用钱包）返回 MaxFloat64 = 不限制。
+func (m *Memory) WalletBalance(advertiserID string) float64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	b, ok := m.wallets[advertiserID]
+	if !ok {
+		return math.MaxFloat64
+	}
+	return b
+}
+
+// WalletDeduct 总余额扣减；未注册放行（true，仍走 campaign 日预算闸）。
+func (m *Memory) WalletDeduct(advertiserID string, amount float64) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	b, ok := m.wallets[advertiserID]
+	if !ok {
+		return true
+	}
+	if amount < 0 || b < amount {
+		return false
+	}
+	m.wallets[advertiserID] = b - amount
+	return true
+}
+
+// WalletCredit 充值入账；未注册的广告主在此登记（充值即启用钱包）。
+func (m *Memory) WalletCredit(advertiserID string, amount float64) {
+	if amount <= 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.wallets[advertiserID] += amount
+}
+
+// SyncWallets 用 DB 全量快照覆盖钱包余额（充值 / 对账后调用）。
+func (m *Memory) SyncWallets(balances map[string]float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	w := make(map[string]float64, len(balances))
+	for id, b := range balances {
+		w[id] = b
+	}
+	m.wallets = w
 }
 
 // 编译期接口实现检查。

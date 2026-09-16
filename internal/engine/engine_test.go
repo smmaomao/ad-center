@@ -39,7 +39,8 @@ type fakeBudget struct {
 	spent  map[string]float64
 	budget map[string]float64
 	deny   map[string]bool
-	deduct []string // TryDeduct 成功记录（事件扣费路径；决策路径不应触发）
+	wallet map[string]float64 // 已启用钱包余额；缺失 = 不限制
+	deduct []string           // TryDeduct 成功记录（事件扣费路径；决策路径不应触发）
 }
 
 // fakeBudget 预算控制替身。
@@ -55,6 +56,32 @@ func (b *fakeBudget) Stats(advID string) (float64, float64) {
 	return b.spent[advID], b.budget[advID]
 }
 func (b *fakeBudget) HourlyCalibrate() error { return nil }
+
+// 广告主总钱包替身：wallet 为 nil 或未收录该广告主 → 不限制（MaxFloat64 / 放行），
+// 保证既有预算用例不受总余额闸影响。
+func (b *fakeBudget) WalletBalance(advID string) float64 {
+	if v, ok := b.wallet[advID]; ok {
+		return v
+	}
+	return math.MaxFloat64
+}
+func (b *fakeBudget) WalletDeduct(advID string, amount float64) bool {
+	v, ok := b.wallet[advID]
+	if !ok {
+		return true
+	}
+	if v < amount {
+		return false
+	}
+	b.wallet[advID] = v - amount
+	return true
+}
+func (b *fakeBudget) WalletCredit(advID string, amount float64) {
+	if b.wallet == nil {
+		b.wallet = map[string]float64{}
+	}
+	b.wallet[advID] += amount
+}
 
 var _ budget.Ctrl = (*fakeBudget)(nil)
 
@@ -87,7 +114,7 @@ func mkSnapshot(specs ...advSpec) *config.Snapshot {
 		cr := &config.Creative{
 			ID: "cr_" + a.ID, AdvertiserID: a.ID, Status: "active",
 			MediaType: "video",
-			Styles:      []string{"rewarded_video"},
+			Styles:    []string{"rewarded_video"},
 		}
 		snap.CreativesByAdvertiser[a.ID] = []*config.Creative{cr}
 		// 每个广告主对应一个 campaign（预算单元），其素材归属该 campaign；
@@ -180,6 +207,35 @@ func TestDecide_消耗节奏系数(t *testing.T) {
 	resp := mkEngine(&fakeFreq{}, bud).Decide(snap, req)
 	if resp.Items[0].AdvertiserID != "slow" {
 		t.Fatalf("消耗偏慢者应加速胜出，实际 %v", ids(resp.Items))
+	}
+}
+
+func TestDecideSingle_总余额耗尽停投(t *testing.T) {
+	// 广告主已启用总钱包且余额为 0 → 即使 campaign 日预算充足也必须停投并降级。
+	snap := mkSnapshot(mkAdv("adv_broke", 1, 1.0, 1.0))
+	bud := mkBudget()
+	bud.wallet = map[string]float64{"adv_broke": 0}
+	req := Request{App: snap.Apps["app1"], Style: "rewarded_video",
+		DeviceID: "d1", Count: 1, Now: testNow}
+	resp := mkEngine(&fakeFreq{}, bud).Decide(snap, req)
+	if len(resp.Items) != 0 {
+		t.Fatalf("总余额耗尽应停投，实际下发 %v", ids(resp.Items))
+	}
+	if resp.Fallback == "" {
+		t.Fatal("停投应返回降级 fallback")
+	}
+}
+
+func TestDecideSingle_未启用钱包不受限(t *testing.T) {
+	// 未收录进钱包表（未启用钱包的存量广告主）→ 不受总余额闸限制，照常下发。
+	snap := mkSnapshot(mkAdv("adv_normal", 1, 1.0, 1.0))
+	bud := mkBudget()
+	bud.wallet = map[string]float64{"adv_other": 0} // 仅别的广告主启用
+	req := Request{App: snap.Apps["app1"], Style: "rewarded_video",
+		DeviceID: "d1", Count: 1, Now: testNow}
+	resp := mkEngine(&fakeFreq{}, bud).Decide(snap, req)
+	if len(resp.Items) != 1 || resp.Items[0].AdvertiserID != "adv_normal" {
+		t.Fatalf("未启用钱包的广告主应照常下发，实际 %v", ids(resp.Items))
 	}
 }
 
@@ -525,9 +581,9 @@ func TestDecide_冷启动不霸榜(t *testing.T) {
 func TestDecide_冷启动批量不独吞(t *testing.T) {
 	// 冷启动新广告主 + 2 个老广告主，count=3：候选仅 3 个素材，各出现一次
 	snap := mkSnapshot(
-		mkAdv("new", 1, 1.0, 0),    // 冷启动
-		mkAdv("urg", 1, 1.0, 2.0),  // 达成率 50%，最紧急
-		mkAdv("ok", 1, 1.0, 1.0),   // 达成率 100%
+		mkAdv("new", 1, 1.0, 0),   // 冷启动
+		mkAdv("urg", 1, 1.0, 2.0), // 达成率 50%，最紧急
+		mkAdv("ok", 1, 1.0, 1.0),  // 达成率 100%
 	)
 	req := Request{App: snap.Apps["app1"], Style: "rewarded_video",
 		DeviceID: "d1", Count: 3, Now: testNow}
