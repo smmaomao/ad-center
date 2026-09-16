@@ -1,8 +1,8 @@
 // Go 管理 API 客户端（BFF 转发，ARCHITECTURE.md §4.2）：
 // 浏览器不直连 Go。Next.js 服务端持会话，以内部密钥 + 操作者邮箱调用，
 // RBAC 权威执行点在 Go 侧（requireRole 复核 admin_users 角色）。
-const GO_API_URL = process.env.GO_API_URL ?? "http://127.0.0.1:8888";
-const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY ?? "";
+export const GO_API_URL = process.env.GO_API_URL ?? "http://127.0.0.1:8888";
+export const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY ?? "";
 
 export class GoApiError extends Error {
   constructor(
@@ -640,13 +640,13 @@ export const listUsers = (actorEmail: string) =>
 
 export const createUser = (
   actorEmail: string,
-  body: { email: string; role: string; status?: string },
+  body: { email: string; role: string; status?: string; password?: string },
 ) => goSend<{ id: string }>("/v1/admin/users", actorEmail, "POST", body);
 
 export const updateUser = (
   actorEmail: string,
   id: string,
-  body: { email?: string; role?: string; status?: string },
+  body: { email?: string; role?: string; status?: string; password?: string },
 ) =>
   goSend<{ status: string }>(`/v1/admin/users/${id}`, actorEmail, "PATCH", body);
 

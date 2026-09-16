@@ -47,7 +47,7 @@ export default async function UsersPage({
       <div>
         <h1 className="text-2xl font-semibold">用户管理</h1>
         <p className="text-sm text-muted-foreground">
-          分配角色、启用或禁用后台账号；删除只解除后台授权，不影响 Supabase Auth 账号
+          分配角色、启用或禁用后台账号；删除只解除后台授权，不影响其登录凭据
         </p>
       </div>
 
@@ -63,7 +63,7 @@ export default async function UsersPage({
         <CardHeader>
           <CardTitle>新增用户</CardTitle>
           <CardDescription>
-            邮箱需已注册 Supabase Auth（让该用户先登录一次），否则无法绑定后台账号
+            创建后该账号即可用「邮箱 + 密码」登录（密码留空则暂不能登录，需超管后续设置）
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -107,6 +107,15 @@ export default async function UsersPage({
                 <option value="active">启用</option>
                 <option value="disabled">禁用</option>
               </select>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="password">密码（可选）</Label>
+              <Input
+                id="password"
+                name="password"
+                type="password"
+                placeholder="留空则不设登录密码"
+              />
             </div>
             <Button type="submit">添加</Button>
           </form>
@@ -157,6 +166,15 @@ export default async function UsersPage({
                         <option value="active">启用</option>
                         <option value="disabled">禁用</option>
                       </select>
+                      <div className="space-y-1.5">
+                        <Label htmlFor={`pw-${u.auth_user_id}`}>重置密码</Label>
+                        <Input
+                          id={`pw-${u.auth_user_id}`}
+                          name="password"
+                          type="password"
+                          placeholder="留空则不修改"
+                        />
+                      </div>
                       <Button type="submit">保存</Button>
                     </form>
                   </td>

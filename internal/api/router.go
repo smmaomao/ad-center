@@ -47,6 +47,7 @@ type Server struct {
 	Metrics       *metrics.Agg
 	Budget        budget.Ctrl
 	InternalKey   string // 管理 API 内部密钥（BFF 共享）
+	SessionSecret string // 后台登录会话令牌签名密钥（HMAC，migration 000044）
 	Log           *slog.Logger
 	Storage       *storage.Signer     // R2 预签名（nil = 未配置，下发不含 media_url）
 	Clicks        ClickResolver       // clickid 归因反查（S2S 转化用）；nil = 未接入，转化只确认不扣费
@@ -110,6 +111,10 @@ func (s *Server) NewRouter() http.Handler {
 	mux.HandleFunc("PATCH /v1/admin/products/{id}", s.handleUpdateProduct)
 	mux.HandleFunc("DELETE /v1/admin/products/{id}", s.handleDeleteProduct)
 	mux.HandleFunc("GET /v1/admin/products/{id}/rollup", s.handleRollupProductKPIs)
+
+	// 后台自管登录（migration 000044）：开放端点，签发 HMAC 会话令牌
+	mux.HandleFunc("POST /v1/admin/login", s.handleLogin)
+	mux.HandleFunc("GET /v1/admin/me", s.handleAdminMe)
 
 	// 后台 RBAC：用户 / 角色 / 菜单（仅 super_admin，见 admin_rbac.go）
 	mux.HandleFunc("GET /v1/admin/users", s.handleListUsers)

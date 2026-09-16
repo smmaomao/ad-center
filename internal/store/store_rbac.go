@@ -2,11 +2,8 @@ package store
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // ============================================================
@@ -47,19 +44,24 @@ func (s *Store) ListUsers(ctx context.Context) ([]*AdminUser, error) {
 	return out, rows.Err()
 }
 
-// CreateUser 新增后台用户。
+// CreateUser 新增后台用户（后端自管密码，migration 000044）。
 //
-// id 不能凭空编造（登录走 Supabase Auth），因此按邮箱从 auth.users 解析；
-// 该邮箱尚未在 Auth 注册时返回明确错误——需先让该用户登录一次才会出现。
-func (s *Store) CreateUser(ctx context.Context, email, role, status string) (string, error) {
+// id 用 gen_random_uuid() 生成，不再依赖 Supabase Auth；password 为空则
+// password_hash 留空（该账号暂无法登录，需由超管通过更新接口设置密码）。
+func (s *Store) CreateUser(ctx context.Context, email, role, status, password string) (string, error) {
+	var ph any = nil
+	if password != "" {
+		h, err := HashPassword(password)
+		if err != nil {
+			return "", err
+		}
+		ph = h
+	}
 	var id string
 	err := s.pool.QueryRow(ctx, `
-		INSERT INTO admin_users (code, email, role_code, status)
-		SELECT u.id, $1, $2, $3 FROM auth.users u WHERE lower(u.email) = lower($1)
-		RETURNING code::text`, email, role, status).Scan(&id)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", fmt.Errorf("邮箱 %s 尚未注册 Supabase Auth，请先让该用户登录一次", email)
-	}
+		INSERT INTO admin_users (code, email, role_code, status, password_hash)
+		VALUES (gen_random_uuid()::text, $1, $2, $3, $4)
+		RETURNING code::text`, email, role, status, ph).Scan(&id)
 	if err != nil {
 		return "", err
 	}
@@ -67,10 +69,23 @@ func (s *Store) CreateUser(ctx context.Context, email, role, status string) (str
 }
 
 // userWritable 用户可写列（id 是主键，不可改）。
-var userWritable = map[string]bool{"email": true, "role_code": true, "status": true}
+var userWritable = map[string]bool{"email": true, "role_code": true, "status": true, "password_hash": true}
 
 // UpdateUser 更新用户的角色 / 状态 / 邮箱（部分更新）。
 func (s *Store) UpdateUser(ctx context.Context, authUserID string, fields map[string]any) error {
+	// 密码走独立哈希：明文 password 转为 password_hash，不允许直接写明文。
+	if pw, ok := fields["password"].(string); ok {
+		if pw == "" {
+			delete(fields, "password")
+		} else {
+			h, err := HashPassword(pw)
+			if err != nil {
+				return err
+			}
+			fields["password_hash"] = h
+			delete(fields, "password")
+		}
+	}
 	sets, args := buildUpdate(fields, userWritable, nil)
 	if len(sets) == 0 {
 		return fmt.Errorf("no writable fields")

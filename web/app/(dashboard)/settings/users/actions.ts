@@ -39,6 +39,7 @@ export async function createUserAction(fd: FormData) {
       email,
       role,
       status: str(fd, "status") || "active",
+      password: str(fd, "password") || undefined,
     });
   } catch (e) {
     err = e instanceof GoApiError ? e.message : "添加失败";
@@ -56,6 +57,7 @@ export async function updateUserAction(fd: FormData) {
     await updateUser(await actor(), id, {
       role: str(fd, "role"),
       status: str(fd, "status"),
+      password: str(fd, "password") || undefined,
     });
   } catch (e) {
     err = e instanceof GoApiError ? e.message : "保存失败";

@@ -45,9 +45,10 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Email  string `json:"email"`
-		Role   string `json:"role"`
-		Status string `json:"status"`
+		Email    string `json:"email"`
+		Role     string `json:"role"`
+		Status   string `json:"status"`
+		Password string `json:"password"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
@@ -63,7 +64,7 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "status must be active or disabled")
 		return
 	}
-	id, err := s.Store.CreateUser(r.Context(), req.Email, req.Role, req.Status)
+	id, err := s.Store.CreateUser(r.Context(), req.Email, req.Role, req.Status, req.Password)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -81,9 +82,10 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Email  *string `json:"email"`
-		Role   *string `json:"role"`
-		Status *string `json:"status"`
+		Email    *string `json:"email"`
+		Role     *string `json:"role"`
+		Status   *string `json:"status"`
+		Password *string `json:"password"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
@@ -101,6 +103,9 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		fields["status"] = *req.Status
+	}
+	if req.Password != nil {
+		fields["password"] = *req.Password
 	}
 	if len(fields) == 0 {
 		writeError(w, http.StatusBadRequest, "no fields to update")

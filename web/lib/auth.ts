@@ -1,6 +1,7 @@
 import { cache } from "react";
 import { redirect } from "next/navigation";
-import { createClient } from "@/lib/supabase/server";
+import { cookies } from "next/headers";
+import { GO_API_URL, INTERNAL_API_KEY } from "@/lib/go-api";
 
 /**
  * 后台角色（对应 ads_center.admin_users.role）。
@@ -224,15 +225,39 @@ function buildTree(rows: MenuRow[]): NavNode[] {
  *
  * 用 React cache 包一层：同一次请求内 layout 与各页面只查一次库。
  */
-export const getNavTree = cache(async (): Promise<NavNode[]> => {
+interface MeResponse {
+  email: string;
+  role: string;
+  menu: MenuRow[];
+}
+
+/**
+ * 凭 cookie 里的会话令牌向 Go 取当前用户身份 + 菜单。
+ * Go 验签令牌（HMAC）作为权威，前端不持有密钥、不做本地验签。
+ * 用 React cache 包一层：同一次请求内 layout / 各页面只打一次 Go。
+ */
+const getMe = cache(async (): Promise<MeResponse | null> => {
+  const token = (await cookies()).get("ad_session")?.value;
+  if (!token) return null;
   try {
-    const supabase = await createClient();
-    const { data, error } = await supabase.rpc("current_admin_menus");
-    if (error || !data) return FALLBACK_TREE;
-    return buildTree(data as MenuRow[]);
+    const res = await fetch(GO_API_URL + "/v1/admin/me", {
+      headers: {
+        Authorization: "Bearer " + token,
+        "X-Internal-Key": INTERNAL_API_KEY,
+      },
+      cache: "no-store",
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as MeResponse;
   } catch {
-    return FALLBACK_TREE;
+    return null;
   }
+});
+
+export const getNavTree = cache(async (): Promise<NavNode[]> => {
+  const me = await getMe();
+  if (!me || !me.menu || me.menu.length === 0) return FALLBACK_TREE;
+  return buildTree(me.menu);
 });
 
 /** 扁平叶子（给 requireMenu 等只关心路由的场景用），从 getNavTree 提取 */
@@ -267,16 +292,8 @@ export interface Session {
  * 被禁用（status=disabled）的用户 current_admin_role 返回空 → 视为无会话。
  */
 export async function getSession(): Promise<Session | null> {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user?.email) return null;
-
-  const { data: role } = await supabase.rpc("current_admin_role");
-  if (!role) return null;
-
-  return { email: user.email, role: role as Role };
+  const me = await getMe();
+  return me ? { email: me.email, role: me.role as Role } : null;
 }
 
 /**

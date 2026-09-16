@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -26,13 +25,14 @@ export default function LoginPage() {
     setError(null);
     setLoading(true);
 
-    const supabase = createClient();
-    const { error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
+    // 只把账号密码交给后端登录接口，前端不接触任何 Supabase。
+    const res = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
     });
 
-    if (error) {
+    if (!res.ok) {
       setError("邮箱或密码错误");
       setLoading(false);
       return;

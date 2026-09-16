@@ -1,15 +1,12 @@
 "use server";
 
-// 退出登录。
-//
-// 放在独立模块而不是 layout 里内联定义：内联 server action 的 id 依赖所在组件
-// 的那次渲染，layout 被缓存/复用时容易找不到 action；独立模块导出则引用稳定。
+// 退出登录：清除 httpOnly 会话 cookie 后跳转（cookie 由服务端清除，
+// 避免 Router Cache 让用户看起来还在登录态）。
 import { redirect } from "next/navigation";
-import { createClient } from "@/lib/supabase/server";
+import { cookies } from "next/headers";
 
 export async function logoutAction() {
-  const supabase = await createClient();
-  await supabase.auth.signOut();
-  // 清掉会话后再跳转，避免 Router Cache 让用户看起来还在登录态
+  const jar = await cookies();
+  jar.delete("ad_session");
   redirect("/login");
 }

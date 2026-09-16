@@ -45,6 +45,10 @@ func main() {
 	if internalKey == "" {
 		log.Warn("INTERNAL_API_KEY not set, admin API disabled")
 	}
+	sessionSecret := os.Getenv("SESSION_SECRET")
+	if sessionSecret == "" {
+		log.Warn("SESSION_SECRET not set, admin login disabled")
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -222,7 +226,7 @@ func main() {
 	// ⑤ HTTP 装配
 	srv := &api.Server{
 		Cache: cache, Engine: eng, Store: st, Metrics: agg,
-		Budget: budgetCtrl, InternalKey: internalKey, Log: log,
+		Budget: budgetCtrl, InternalKey: internalKey, SessionSecret: sessionSecret, Log: log,
 		Storage: r2Signer, DecisionCache: decisionCache,
 		Clicks:   api.NewClickResolver(st), // clickid 归因反查（落库实现）
 		Fatigue:  fatigueStore,
