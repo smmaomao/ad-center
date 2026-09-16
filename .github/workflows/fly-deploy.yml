@@ -4,6 +4,14 @@ on:
   push:
     branches:
       - main
+    # 仅后端相关文件变化才触发后端部署，避免改前端也重启后台
+    paths:
+      - "cmd/**"
+      - "internal/**"
+      - "Dockerfile"
+      - "fly.toml"
+      - "go.mod"
+      - "go.sum"
   workflow_dispatch: # 允许在 GitHub Actions 页面手动触发
 
 jobs:
