@@ -1,0 +1,27 @@
+name: Fly Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: # 允许在 GitHub Actions 页面手动触发
+
+jobs:
+  deploy:
+    name: Deploy to Fly.io
+    runs-on: ubuntu-latest
+    # 同一分支的部署串行执行，避免互相覆盖
+    concurrency:
+      group: fly-deploy-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy
+        run: flyctl deploy --remote-only
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
