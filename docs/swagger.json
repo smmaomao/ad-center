@@ -95,7 +95,7 @@
         },
         "/v1/ad/list": {
             "post": {
-                "description": "一次请求跨全部广告样式下发，按综合得分汇总取前 count 条；每条素材生成 bid_id，供后续曝光/点击/完播埋点闭环归因。",
+                "description": "一次请求跨全部广告样式下发，按综合得分汇总取前 count 条；每条素材生成 bid_id（格式 bid_{日期}{时分秒}_{随机}，服务端缓存到 Redis），供后续曝光/点击/完播埋点闭环归因。",
                 "consumes": [
                     "application/json"
                 ],
@@ -203,7 +203,7 @@
                 },
                 "bid_id": {
                     "type": "string",
-                    "example": "bid_20260908143052_aB3xK9zQ"
+                    "example": "bid_20260908_0001"
                 },
                 "creative_id": {
                     "type": "string",
@@ -244,7 +244,7 @@
                 },
                 "bid_id": {
                     "type": "string",
-                    "example": "bid_20260908143052_aB3xK9zQ"
+                    "example": "bid_20260908_0001"
                 },
                 "creative_id": {
                     "type": "string",
@@ -276,12 +276,18 @@
             "type": "object",
             "properties": {
                 "ad_style": {
-                    "type": "string",
-                    "example": "REWARDED_VIDEO"
+                    "description": "AdStyle 广告样式列表（单条广告当前的生效样式；为兼容客户端以数组形式接收而使用数组）。",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "example": [
+                        "REWARDED_VIDEO"
+                    ]
                 },
                 "bid_id": {
                     "type": "string",
-                    "example": "bid_20260908143052_aB3xK9zQ"
+                    "example": "bid_20260908_0001"
                 },
                 "click_url": {
                     "type": "string",
@@ -304,6 +310,7 @@
                     "example": "https://cdn.example.com/creatives/abc123.mp4"
                 },
                 "required_duration": {
+                    "description": "RequiredDuration 客户端须满足的展示时长（秒），按样式取值：\nREWARDED_VIDEO=素材时长（看满才可上报 video-complete 发奖）；\nFEED=素材时长（客户端据此锁定列表滑动，满 N 秒后才可划走，图片素材兜底 3）；\nSPLASH=固定 3；其余样式为 0。",
                     "type": "integer",
                     "example": 15
                 },
@@ -376,7 +383,7 @@
                 },
                 "bid_id": {
                     "type": "string",
-                    "example": "bid_20260908143052_aB3xK9zQ"
+                    "example": "bid_20260908_0001"
                 },
                 "creative_id": {
                     "type": "string",

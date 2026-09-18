@@ -95,11 +95,11 @@ func (s *Server) handleS2SEvent(w http.ResponseWriter, r *http.Request) {
 	// 按点击登记时的广告主扣费（只有 billing_mode=cpa 且该事件有单价才扣）
 	now := time.Now()
 	snap := s.Cache.Snapshot()
-	adv := snap.Advertisers[ctx.AdvertiserID]
 	var charged float64
-	if adv != nil {
-		if amt, ok := adv.BillingAmount(eventName); ok {
-			if campID, ok := snap.CreativeCampaign[ctx.CreativeID]; ok && campID != "" {
+	// 计费执行粒度 = campaign：出价 / 计费方式 / CPA 单价均在任务级，广告主只做钱包。
+	if campID, ok := snap.CreativeCampaign[ctx.CreativeID]; ok && campID != "" {
+		if camp := snap.Campaigns[campID]; camp != nil {
+			if amt, ok := camp.BillingAmount(eventName); ok {
 				// campaign 日预算闸 + 广告主总钱包闸：任一不足即不扣费
 				if s.Budget.TryDeduct(campID, amt) && s.Budget.WalletDeduct(ctx.AdvertiserID, amt) {
 					charged = amt

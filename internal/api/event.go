@@ -185,6 +185,43 @@ func (s *Server) handleRecharge(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "balance": balance})
 }
 
+// handleAdjustWallet 广告主钱包手动调账：修正余额 + 写调账流水（不改钱包闸开关）。
+// 余额变更落在 advertisers 表，NOTIFY/对账会自动把进程内实时闸对齐。
+//
+//	POST /v1/admin/advertisers/{id}/wallet/adjust
+//	  {"mode":"set","amount":500,"note":"冲正"}   // 把余额改为 500
+//	  {"mode":"delta","amount":-50,"note":"补差"} // 余额减 50
+func (s *Server) handleAdjustWallet(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireRole(w, r, true, false)
+	if !ok {
+		return
+	}
+	var body struct {
+		Mode   string  `json:"mode"`
+		Amount float64 `json:"amount"`
+		Note   string  `json:"note"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body.Mode != "set" && body.Mode != "delta" {
+		writeError(w, http.StatusBadRequest, "mode must be set or delta")
+		return
+	}
+	id := r.PathValue("id")
+	balance, err := s.Store.AdjustWallet(r.Context(), id, store.WalletAdjustInput{
+		Mode:   body.Mode,
+		Amount: body.Amount,
+		Note:   body.Note,
+	}, actor)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	_ = s.Store.WriteAudit(r.Context(), actor, "wallet_adjust", "advertiser", id, nil)
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "balance": balance})
+}
+
 func (s *Server) handleListSlots(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireRole(w, r, false, false); !ok {
 		return

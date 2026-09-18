@@ -54,6 +54,10 @@ func (s *Store) FlushMinuteMetrics(ctx context.Context, rows []MinuteMetric) err
 type AdEvent struct {
 	AppID, Style, AdvertiserID, CreativeID, DeviceID, Country, EventType string
 	Revenue                                                              float64
+	// CallbackOK 仅 video_complete 事件有意义：是否成功转发到 App 业务后端
+	// S2S 回调（true=HTTP 2xx；false=网络错误/非 2xx/未配置 callback_url）。
+	// 其他事件为 nil（不记录）。
+	CallbackOK *bool
 }
 
 // InsertAdEvents 批量写事件（fill/impression/click/conversion 回执与下发记录）。
@@ -132,18 +136,18 @@ func buildInsertAdEvents(events []AdEvent) (string, []any, bool) {
 	}
 	var sb strings.Builder
 	sb.WriteString(`INSERT INTO ad_events
-		(app_code, style, advertiser_id, creative_id, device_id, country, event_type, revenue)
+		(app_code, style, advertiser_id, creative_id, device_id, country, event_type, revenue, callback_ok)
 		VALUES `)
-	args := make([]any, 0, len(events)*8)
+	args := make([]any, 0, len(events)*9)
 	for i, e := range events {
 		if i > 0 {
 			sb.WriteByte(',')
 		}
-		fmt.Fprintf(&sb, "($%d,$%d,$%d::bigint,$%d::bigint,$%d,$%d,$%d,$%d)",
-			i*8+1, i*8+2, i*8+3, i*8+4, i*8+5, i*8+6, i*8+7, i*8+8)
+		fmt.Fprintf(&sb, "($%d,$%d,$%d::bigint,$%d::bigint,$%d,$%d,$%d,$%d,$%d)",
+			i*9+1, i*9+2, i*9+3, i*9+4, i*9+5, i*9+6, i*9+7, i*9+8, i*9+9)
 		args = append(args, e.AppID, e.Style,
 			nilIfEmpty(e.AdvertiserID), nilIfEmpty(e.CreativeID),
-			e.DeviceID, nilIfEmpty(e.Country), e.EventType, e.Revenue)
+			e.DeviceID, nilIfEmpty(e.Country), e.EventType, e.Revenue, e.CallbackOK)
 	}
 	return sb.String(), args, true
 }
@@ -264,8 +268,10 @@ func (s *Store) LoadBudgetBalances(ctx context.Context) ([]BudgetBalance, error)
 // GetAdminRole 查后台用户角色（管理 API RBAC 校验，actor 由 BFF 传入）。
 func (s *Store) GetAdminRole(ctx context.Context, email string) (string, error) {
 	var role string
+	// 与 AuthenticateAdmin 保持一致：邮箱大小写不敏感，避免"登录能过、
+	// 但 RBAC 校验（看板 SSE 等）因大小写不一致查不到账号而 403"的坑。
 	err := s.pool.QueryRow(ctx,
-		`SELECT role_code FROM admin_users WHERE email = $1`, email).Scan(&role)
+		`SELECT role_code FROM admin_users WHERE lower(email) = lower($1)`, email).Scan(&role)
 	if errors.Is(err, context.Canceled) {
 		return "", err
 	}

@@ -84,6 +84,7 @@ func (s *Server) NewRouter() http.Handler {
 	mux.HandleFunc("GET /v1/admin/advertisers/{id}/wallet", s.handleGetWallet)
 	mux.HandleFunc("GET /v1/admin/advertisers/{id}/wallet/flow", s.handleListWalletFlow)
 	mux.HandleFunc("POST /v1/admin/advertisers/{id}/wallet/recharge", s.handleRecharge)
+	mux.HandleFunc("POST /v1/admin/advertisers/{id}/wallet/adjust", s.handleAdjustWallet)
 	mux.HandleFunc("GET /v1/admin/slots", s.handleListSlots)
 	mux.HandleFunc("POST /v1/admin/slots", s.handleCreateSlot)
 	mux.HandleFunc("GET /v1/admin/slots/{id}", s.handleGetSlot)
@@ -160,6 +161,15 @@ type statusRecorder struct {
 func (r *statusRecorder) WriteHeader(code int) {
 	r.status = code
 	r.ResponseWriter.WriteHeader(code)
+}
+
+// Flush 透传给底层 ResponseWriter（若支持），否则静默忽略。
+// statusRecorder 内嵌的是 http.ResponseWriter 接口（不含 Flush），不显式转发会导致
+// SSE 等流式端点里 w.(http.Flusher) 断言失败、返回 "streaming unsupported"（见 metrics_stream.go）。
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // loggingMiddleware 对每个请求打印耗时（毫秒）、方法、路径、状态码，

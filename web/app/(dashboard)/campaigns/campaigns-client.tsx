@@ -95,7 +95,7 @@ export function CampaignsClient({
                 <th className="px-5 py-3">产品</th>
                 <th className="px-5 py-3">状态</th>
                 <th className="px-5 py-3">出价 / KPI</th>
-                <th className="px-5 py-3">计费 / 频控</th>
+                <th className="px-5 py-3">频控</th>
                 <th className="px-5 py-3 text-right">关联素材</th>
                 <th className="px-5 py-3 text-right">操作</th>
               </tr>
@@ -125,10 +125,12 @@ export function CampaignsClient({
                   </td>
                   <td className="px-5 py-3 tabular-nums">
                     <div>
-                      {c.bidding_mode.toUpperCase()} ${c.bidding_price}
+                      出价 {c.bidding_price_min > 0 ? `$${c.bidding_price_min}~` : ""}$
+                      {c.bidding_price}
                     </div>
                     <div className="text-xs text-muted-foreground">
-                      KPI ${c.target_cpi}
+                      KPI {c.target_kpi_type ? c.target_kpi_type.toUpperCase() : "—"}
+                      {c.target_kpi_value ? ` $${c.target_kpi_value}` : ""}
                     </div>
                   </td>
                   <td className="px-5 py-3 text-xs">

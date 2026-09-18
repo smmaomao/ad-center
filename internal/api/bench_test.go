@@ -69,12 +69,11 @@ func benchAPIServer(b *testing.B) (*Server, string) {
 		id := fmt.Sprintf("adv_%03d", i)
 		snap.Advertisers[id] = &config.Advertiser{
 			ID: id, Name: id, Status: "active",
-			BiddingPrice: 0.5 + float64(i%9)*0.25,
 		}
 		campID := "cmp_" + id
 		snap.Campaigns[campID] = &config.Campaign{
 			ID: campID, AdvertiserID: id, Status: "active", DailyBudget: 1e9,
-			TargetCPI: 1 + float64(i%5)*0.2, ActualCPI: 0.3 + float64(i%7)*0.15,
+			TargetKPIValue: 1 + float64(i%5)*0.2,
 			BillingMode: "cpm", BiddingPrice: 15,
 			CreativeIDs: []string{"cr_" + id},
 		}

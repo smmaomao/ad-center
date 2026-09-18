@@ -8,7 +8,7 @@ import type {
   AdminCampaign,
   AdminProduct,
 } from "@/lib/go-api";
-import { CPA_EVENTS } from "@/lib/go-api";
+import type { BillingMode } from "@/lib/go-api";
 import { saveCampaignAction, type FormState } from "./actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -43,12 +43,19 @@ export function CampaignForm({
     saveCampaignAction,
     {},
   );
-  const [billingMode, setBillingMode] = useState<"cpm" | "cpc" | "cpa">(
+  // 扣费方式 / KPI 指标类型共用选项（两者枚举一致）
+  const billingModeOptions = [
+    { value: "cpm", label: "CPM · 千次曝光" },
+    { value: "cpc", label: "CPC · 点击" },
+    { value: "cpi", label: "CPI · 安装" },
+    { value: "cpa-activate", label: "CPA-激活" },
+    { value: "cpa-register", label: "CPA-注册" },
+    { value: "cpa-first-deposit", label: "CPA-首充" },
+    { value: "cpa-pay", label: "CPA-付费" },
+  ] as const;
+  const [billingMode, setBillingMode] = useState<BillingMode>(
     initial?.billing_mode ?? "cpm",
   );
-  const [biddingMode, setBiddingMode] = useState<
-    "cpi" | "cpa" | "revenue_share"
-  >(initial?.bidding_mode ?? "cpi");
   const isEdit = Boolean(initial);
   const [advertiserId, setAdvertiserId] = useState<string>(
     initial?.advertiser_id ?? "",
@@ -146,60 +153,82 @@ export function CampaignForm({
         <CardHeader>
           <CardTitle>出价与 KPI</CardTitle>
           <CardDescription>
-            出价口径、目标 KPI（target_cpi）、任务级日预算
+            设置扣费方式、出价区间与曝光系数
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-1.5">
-            <Label htmlFor="bidding_mode">出价口径</Label>
+            <Label htmlFor="billing_mode">扣费方式 *</Label>
             <select
-              id="bidding_mode"
-              name="bidding_mode"
+              id="billing_mode"
+              name="billing_mode"
               className={selectCls}
-              value={biddingMode}
-              onChange={(e) =>
-                setBiddingMode(
-                  e.target.value as "cpi" | "cpa" | "revenue_share",
-                )
-              }
+              value={billingMode}
+              onChange={(e) => setBillingMode(e.target.value as BillingMode)}
             >
-              <option value="cpi">按 CPI（安装）</option>
-              <option value="cpa">按 CPA（行为）</option>
-              <option value="revenue_share">按分成</option>
+              {billingModeOptions.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
             </select>
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="target_cpi">目标 KPI（target_cpi）</Label>
-            <Input
-              id="target_cpi"
-              name="target_cpi"
-              type="number"
-              step="0.01"
-              min="0"
-              defaultValue={initial?.target_cpi || ""}
-            />
+            <Label htmlFor="target_kpi_type">目标 KPI 类型</Label>
+            <select
+              id="target_kpi_type"
+              name="target_kpi_type"
+              className={selectCls}
+              defaultValue={initial?.target_kpi_type ?? billingMode}
+            >
+              {billingModeOptions.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-muted-foreground">一般与扣费方式一致</p>
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="bidding_price">出价（单价）</Label>
+            <Label htmlFor="target_kpi_value">目标 KPI 值</Label>
             <Input
-              id="bidding_price"
-              name="bidding_price"
+              id="target_kpi_value"
+              name="target_kpi_value"
               type="number"
               step="0.01"
               min="0"
-              defaultValue={initial?.bidding_price || ""}
+              defaultValue={initial?.target_kpi_value || ""}
             />
           </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="bidding_price_min">出价下限</Label>
-            <Input
-              id="bidding_price_min"
-              name="bidding_price_min"
-              type="number"
-              step="0.01"
-              min="0"
-              defaultValue={initial?.bidding_price_min || ""}
-            />
+          <div className="space-y-1.5 sm:col-span-2">
+            <Label>出价区间（单价，美元）</Label>
+            <div className="flex items-center gap-2">
+              <Input
+                id="bidding_price_min"
+                name="bidding_price_min"
+                type="number"
+                step="0.01"
+                min="0"
+                placeholder="下限"
+                className="h-8 w-28"
+                defaultValue={initial?.bidding_price_min || ""}
+              />
+              <span className="text-muted-foreground">~</span>
+              <Input
+                id="bidding_price"
+                name="bidding_price"
+                type="number"
+                step="0.01"
+                min="0"
+                placeholder="上限"
+                className="h-8 w-28"
+                defaultValue={initial?.bidding_price || ""}
+              />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              下限留空 = 按固定单价（上限）扣费；填了则在 [下限, 上限] 间随机扣费。
+              CPM=每千次曝光、CPC=每次点击、CPA=每事件。
+            </p>
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="daily_budget">任务日预算（0=跟随广告主）</Label>
@@ -213,19 +242,21 @@ export function CampaignForm({
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="consume_speed">消耗节奏</Label>
-            <select
+            <Label htmlFor="consume_speed">曝光系数</Label>
+            <Input
               id="consume_speed"
               name="consume_speed"
-              className={selectCls}
-              defaultValue={initial?.consume_speed ?? "even"}
-            >
-              <option value="even">均匀消耗</option>
-              <option value="accelerated">加速消耗</option>
-              <option value="asap">尽快花完</option>
-            </select>
+              type="number"
+              step="1"
+              min="1"
+              max="10"
+              defaultValue={initial?.consume_speed ?? 5}
+            />
+            <p className="text-xs text-muted-foreground">1-10，默认 5，影响下发节奏</p>
           </div>
-          <div className="space-y-1.5">
+          {/* 保量份额（guaranteed_min_share / guaranteed_enabled）暂未接入引擎，界面隐藏。
+              保留隐藏输入以便编辑其它字段时不清空已存的保量配置。 */}
+          <div className="hidden">
             <Label htmlFor="guaranteed_min_share">保量份额（%）</Label>
             <Input
               id="guaranteed_min_share"
@@ -240,8 +271,6 @@ export function CampaignForm({
                   : ""
               }
             />
-          </div>
-          <div className="flex items-end">
             <label className="flex items-center gap-2 text-sm">
               <input
                 type="checkbox"
@@ -255,29 +284,13 @@ export function CampaignForm({
         </CardContent>
       </Card>
 
-      {/* ③ 计费与频控 */}
+      {/* ③ 频控 */}
       <Card>
         <CardHeader>
-          <CardTitle>计费与频控</CardTitle>
-          <CardDescription>扣费方式、CPA 单价区间、任务级频控</CardDescription>
+          <CardTitle>频控</CardTitle>
+          <CardDescription>任务级频控：限制同一用户下发同一任务的次数</CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4 sm:grid-cols-2">
-          <div className="space-y-1.5">
-            <Label htmlFor="billing_mode">扣费方式 *</Label>
-            <select
-              id="billing_mode"
-              name="billing_mode"
-              className={selectCls}
-              value={billingMode}
-              onChange={(e) =>
-                setBillingMode(e.target.value as "cpm" | "cpc" | "cpa")
-              }
-            >
-              <option value="cpm">CPM · 千次曝光</option>
-              <option value="cpc">CPC · 点击</option>
-              <option value="cpa">CPA · 行为</option>
-            </select>
-          </div>
           <div className="space-y-1.5">
             <Label htmlFor="freq_interval_minutes">时间窗（分钟）</Label>
             <Input
@@ -317,43 +330,6 @@ export function CampaignForm({
               控制 2：每日（滚动 24h）同一用户最多下发同一任务的次数。0 表示不限。
             </p>
           </div>
-          {billingMode === "cpa" && (
-            <div className="space-y-2 sm:col-span-2">
-              <Label>CPA 事件单价区间 [min, max]（美元）</Label>
-              <div className="space-y-2">
-                {CPA_EVENTS.map((ev) => {
-                  const pair = initial?.cpa_event_prices?.[ev.key];
-                  return (
-                    <div
-                      key={ev.key}
-                      className="flex items-center gap-2 text-sm"
-                    >
-                      <span className="w-16">{ev.label}</span>
-                      <Input
-                        name={`cpa_min_${ev.key}`}
-                        type="number"
-                        step="0.01"
-                        min="0"
-                        placeholder="min"
-                        className="h-8 w-28"
-                        defaultValue={pair?.[0] ?? ""}
-                      />
-                      <span className="text-muted-foreground">~</span>
-                      <Input
-                        name={`cpa_max_${ev.key}`}
-                        type="number"
-                        step="0.01"
-                        min="0"
-                        placeholder="max"
-                        className="h-8 w-28"
-                        defaultValue={pair?.[1] ?? ""}
-                      />
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
         </CardContent>
       </Card>
 

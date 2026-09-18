@@ -59,7 +59,7 @@
 ## 阶段 3：监控看板 + 联调收尾
 
 - [x] 3.1 页面 `/dashboard`：KPI 卡片、广告主 KPI 监控表（预警标识）、广告位状态表（SSE 实时刷新）
-- [x] 3.2 事件聚合定时任务：回写 actualCpi / 填充率 / eCPM
+- [x] 3.2 事件聚合定时任务：回写 填充率 / eCPM（actualCpi 回写已移除，见迁移 000052；KPI 实时达成率/自动优化推迟至下方 P1 待办）
 - [ ] 3.3 App 客户端联调：决策请求、事件上报、兜底链验证（服务端不可用 → MAX）
 - [ ] 3.4 业务告警（日志规则）：预算 ≥95%、KPI <85%
 - [ ] 3.5 部署演练：低峰发版流程 + 崩溃自动恢复验证（kill 进程观察拉起）
@@ -79,6 +79,33 @@
 
 ## P1 待办（V1.0 完善项，MVP 后启动）
 
+- **KPI 自动优化（实时出价策略）【已推迟，本期不实现】**：基于 `target_kpi_type` / `target_kpi_value`
+  （迁移 000051 已落库并可后台配置）与**运行时实测 CPI** 计算真实达成率（= target_kpi_value / 实测值），
+  并据此自适应调整出价与下发紧急度（FR-06/07 自动优化）。
+  - 当前状态：`actual_cpi` 已不落库（迁移 000052）；`Campaign.Achievement()` 恒返中性 1.0；
+    `engine.go` 的 `urgency` 分支保持「已接入但中立」（常数 ~0.99），现有排序（价格得分 × 优先级 × 消耗节奏）不受影响。
+  - 待接入：引入运行时实测值（消耗/转化按 `target_kpi_type` 口径归集）→ 在 `Achievement()` 用
+    `target_kpi_value / 实测值` 计算真实达成率 → `engine.urgency` 自动恢复按达成率区分。接口已预留，无需改签名。
+- **保量 / 保底份额【已推迟，本期未接入引擎、界面已隐藏】**：`campaign.guaranteed_enabled` /
+  `guaranteed_min_share`（保量份额）与 `fill_priorities.guaranteed_share`（保底份额）字段已落库、
+  后台可配置，但当前 `internal/engine` 决策排序填充**不读取**这两个字段做强制换入（PLAN 1.4 所标
+  「保底份额 + 排序填充」在去 slot 模型重构后实际未接回引擎）；前端也已隐藏入口
+  （`campaign-form` 两个字段、`campaign-view-modal`、`advertisers/[id]` 汇总卡片、`slots/priority-editor`
+  保量份额列，均为 `hidden` 保留值以免编辑时清空）。
+  - 待接入：① 确认保量按 campaign 级 `guaranteed_min_share` 还是 slot 级 `guaranteed_share`
+    （去 slot 后后者可能应废弃）；② 在 `engine.go` 排序填充环节实现强制换入
+    （PRD 514：保底条目数 ≥ ceil(占比 × count)，未入选则替换得分最低的非保底条目）。
+- **指标计数 `internal/metrics` 保持进程内、不迁 Redis【已确认设计决策】**：
+  它是进程内**分钟级聚合缓冲**（键 `app×style×advertiser×分钟`，计数 requests/fills/
+  impressions/clicks/conversions/revenue），真相源是 Postgres `metrics_minute`
+  （`FlushMinuteMetrics` 用 `ON CONFLICT ... DO UPDATE SET x = x + EXCLUDED.x` **累加 UPSERT**）。
+  - 不迁理由：非跨实例需共识的状态（不像预算/频控是扣费闸），只是攒批缓冲；迁 Redis 只增
+    写延迟、无正确性收益，落库仍须刷 Postgres。累加 UPSERT 本身已多实例/重试安全。
+  - 多实例影响：① 落库数据**完全正确**（多实例同分钟行自动加总，不重不漏）；
+    ② 实时 SSE 看板会变成「单实例视角」——推的是本实例当分钟未刷库的内存计数，
+    看板连接被 fly 路由到哪台就只看到那台，进行中的分钟数偏少，刷库后完整（仅实时性瑕疵，非数据错）。
+  - 当前 `min_machines_running=1`（单实例），上述影响均不存在；若未来多实例且需看板实时准确，
+    可把 SSE 数据源改为直读 `metrics_minute` 的本分钟聚合，而非读单实例内存。
 - AI Agent 规则引擎（FR-05/06/07）、预算平滑自动化（PRD 5.2）
 - 路线 B：Redis（Upstash SG）外置 BudgetCtrl/FrequencyStore → 双实例零停机
   - **必须按 ARCHITECTURE.md §5.3.1 迁移手册执行**（先外移状态后扩容；契约测试是前置条件，P0 阶段 1.5/1.6 就要写好）

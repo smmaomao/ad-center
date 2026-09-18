@@ -87,7 +87,7 @@ type Response struct {
 type candidate struct {
 	adv         *config.Advertiser
 	creative    *config.Creative
-	achievement float64 // KPI 达成率（campaign.targetCPI/campaign.actualCPI）
+	achievement float64 // KPI 达成率（campaign.Achievement()，目前无实测值返回中性 1.0）
 	urgency     float64 // (达成率+0.01) 的倒数，越未达标越紧急
 	pacing      float64 // 消耗节奏系数
 	priceScore  float64 // 出价基准分（Price_Score）
@@ -230,23 +230,22 @@ func (e *Engine) scoreCreative(
 	bm *config.PricingBenchmark, now time.Time, spent, budget float64,
 ) candidate {
 	// KPI 达成率来自广告任务（campaign）；未归属任务的素材按中性 1.0 参与排序。
+	// 注意：当前 Campaign.Achievement() 恒返中性 1.0（实时出价/自动优化策略尚未实现，
+	// 见 config/types.go 注释与 docs/PLAN.md），故 urgency 目前是常数 ~0.99，
+	// KPI 紧急度分支处于「已接入但中立」状态；策略落地后此处自动恢复按真实达成率区分。
 	achievement := 1.0
 	if camp != nil {
 		achievement = camp.Achievement()
 	}
-	urgency := 1.0 / (achievement + 0.01) // 彻底去掉 Tier 层权重，纯成就率驱动
+	urgency := 1.0 / (achievement + 0.01) // 纯达成率驱动（Tier 层权重已移除）；当前因达成率中性而恒为常数
 	pacing := e.pacingFactor(adv, now, spent, budget)
 
 	// 出价基准分：计费方式 / 出价来自投放计划（campaign），用平台标准线拉平到 100 分制比较。
-	// cpa 模式无单一事件时回落 CPAInstall 标准线；未挂 campaign 的素材按 cpm 中性基准。
+	// 计费方式 → 标准线由 BenchmarkFor 按 billing_mode 取；未挂 campaign 的素材按 cpm 中性基准。
 	var benchmark float64
 	price := 0.0
 	if camp != nil {
-		if camp.BillingMode == "cpa" && camp.TargetCPI > 0 {
-			price = camp.TargetCPI
-		} else {
-			price = camp.BiddingPrice
-		}
+		price = camp.BiddingPrice
 		benchmark = bm.BenchmarkFor(camp.BillingMode, "")
 	} else {
 		benchmark = bm.BenchmarkFor("cpm", "")

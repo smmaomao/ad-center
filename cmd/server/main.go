@@ -288,25 +288,6 @@ func main() {
 
 	go agg.RunFlushLoop(ctx, st, log)
 
-	// ⑥ 阶段 3.2：事件聚合回写（每 60s）—— 用今日 metrics_minute 回算各 campaign 的 actual_cpi。
-	// spent_today 由预算同步器维护，本任务只补 actual_cpi（见 store.SyncCampaignKPIs 注释）。
-	go func() {
-		t := time.NewTicker(60 * time.Second)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				c, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				if err := st.SyncCampaignKPIs(c); err != nil {
-					log.Warn("sync campaign kpis failed", "err", err)
-				}
-				cancel()
-			}
-		}
-	}()
-
 	// ⑥ 频控过期清理（每 10 分钟）
 	//
 	// 仅内存版需要：Redis 版状态带 TTL（maxWindow），过期由 Redis 承担。

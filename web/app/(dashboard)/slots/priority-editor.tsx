@@ -168,7 +168,7 @@ export function PriorityEditor({
                   <th className="px-3 py-2 font-medium">来源类型</th>
                   <th className="px-3 py-2 font-medium">广告主</th>
                   <th className="px-3 py-2 font-medium">预期 eCPM</th>
-                  <th className="px-3 py-2 font-medium">保量份额</th>
+                  <th className="hidden px-3 py-2 font-medium">保量份额</th>
                   <th className="px-3 py-2 font-medium">权重</th>
                   <th className="px-3 py-2 font-medium">启用</th>
                   <th className="w-12 px-3 py-2 font-medium"></th>
@@ -280,7 +280,7 @@ export function PriorityEditor({
                         disabled={r.source_type !== "advertiser"}
                       />
                     </td>
-                    <td className="px-3 py-2">
+                    <td className="hidden px-3 py-2">
                       <Input
                         type="number"
                         step="0.01"
@@ -331,7 +331,7 @@ export function PriorityEditor({
             + 添加来源
           </Button>
           <span
-            className={`text-xs tabular-nums ${sumExceeded ? "font-medium text-red-600" : "text-muted-foreground"}`}
+            className={`hidden text-xs tabular-nums ${sumExceeded ? "font-medium text-red-600" : "text-muted-foreground"}`}
           >
             保量份额总和：{guaranteedSum.toFixed(2)} / 1.00
           </span>

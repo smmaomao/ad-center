@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math"
 	"strings"
 )
 
@@ -24,16 +23,15 @@ type AdminCampaign struct {
 	AdvertiserName     string                `json:"advertiser_name"`
 	Name               string                `json:"name"`
 	Status             string                `json:"status"`
-	BiddingMode        string                `json:"bidding_mode"`
 	BiddingPrice       float64               `json:"bidding_price"`
 	BiddingPriceMin    float64               `json:"bidding_price_min"`
 	BillingMode        string                `json:"billing_mode"`
 	CPAEventPrices     map[string][2]float64 `json:"cpa_event_prices"`
-	TargetCPI          float64               `json:"target_cpi"`
+	TargetKPIType      string                `json:"target_kpi_type"`
+	TargetKPIValue     float64               `json:"target_kpi_value"`
 	DailyBudget        float64               `json:"daily_budget"`
-	ActualCPI          float64               `json:"actual_cpi"`
 	SpentToday         float64               `json:"spent_today"`
-	ConsumeSpeed       string                `json:"consume_speed"`
+	ConsumeSpeed       int                   `json:"consume_speed"`
 	DeliverTTLMinutes  int                   `json:"deliver_ttl_minutes"`
 	GuaranteedEnabled  bool                  `json:"guaranteed_enabled"`
 	GuaranteedMinShare float64               `json:"guaranteed_min_share"`
@@ -51,10 +49,10 @@ type AdminCampaign struct {
 
 const campaignCols = `
 	c.id::text, c.advertiser_id::text, a.name, c.name, c.status,
-	c.bidding_mode, c.bidding_price::float8, c.bidding_price_min::float8,
-	c.billing_mode, c.cpa_event_prices::text, c.target_cpi::float8,
+	c.bidding_price::float8, c.bidding_price_min::float8,
+	c.billing_mode, c.cpa_event_prices::text, c.target_kpi_type, c.target_kpi_value::float8,
 	c.daily_budget::float8,
-	c.actual_cpi::float8, c.spent_today::float8, c.consume_speed,
+	c.spent_today::float8, c.consume_speed,
 	COALESCE(c.deliver_ttl_minutes, 10)::int,
 	c.guaranteed_enabled, c.guaranteed_min_share::float8, c.priority_score::float8,
 	c.freq_daily_limit, c.freq_interval_minutes,
@@ -66,9 +64,9 @@ func scanCampaign(scan func(...any) error) (*AdminCampaign, error) {
 	c := &AdminCampaign{}
 	var cpaPrices []byte
 	if err := scan(&c.ID, &c.AdvertiserID, &c.AdvertiserName, &c.Name, &c.Status,
-		&c.BiddingMode, &c.BiddingPrice, &c.BiddingPriceMin,
-		&c.BillingMode, &cpaPrices, &c.TargetCPI,
-		&c.DailyBudget, &c.ActualCPI, &c.SpentToday, &c.ConsumeSpeed,
+		&c.BiddingPrice, &c.BiddingPriceMin,
+		&c.BillingMode, &cpaPrices, &c.TargetKPIType, &c.TargetKPIValue,
+		&c.DailyBudget, &c.SpentToday, &c.ConsumeSpeed,
 		&c.DeliverTTLMinutes,
 		&c.GuaranteedEnabled, &c.GuaranteedMinShare, &c.PriorityScore,
 		&c.FreqDailyLimit, &c.FreqIntervalMinute, &c.FreqFatigueWindow,
@@ -118,11 +116,11 @@ func (s *Store) GetCampaign(ctx context.Context, id string) (*AdminCampaign, err
 
 var campaignWritable = map[string]bool{
 	"advertiser_id": true, "name": true, "status": true,
-	"bidding_mode": true, "bidding_price": true, "bidding_price_min": true,
-	"billing_mode": true, "cpa_event_prices": true, "target_cpi": true,
-	"daily_budget": true, "actual_cpi": true, "spent_today": true,
+	"bidding_price": true, "bidding_price_min": true,
+	"billing_mode": true, "cpa_event_prices": true, "target_kpi_type": true, "target_kpi_value": true,
+	"daily_budget": true, "spent_today": true,
 	"consume_speed": true, "deliver_ttl_minutes": true, "guaranteed_enabled": true, "guaranteed_min_share": true,
-	"priority_score": true, 	"freq_daily_limit": true, "freq_interval_minutes": true,
+	"priority_score": true, "freq_daily_limit": true, "freq_interval_minutes": true,
 	"freq_fatigue_window": true, "creative_ids": true,
 	"start_at": true, "end_at": true, "product_id": true, "landing_url": true, "created_by": true, "updated_by": true,
 }
@@ -182,11 +180,11 @@ func (s *Store) CreateCampaign(ctx context.Context, fields map[string]any) (stri
 
 var campaignUpdatable = map[string]bool{
 	"name": true, "status": true,
-	"bidding_mode": true, "bidding_price": true, "bidding_price_min": true,
-	"billing_mode": true, "cpa_event_prices": true, "target_cpi": true,
-	"daily_budget": true, "actual_cpi": true, "spent_today": true,
+	"bidding_price": true, "bidding_price_min": true,
+	"billing_mode": true, "cpa_event_prices": true, "target_kpi_type": true, "target_kpi_value": true,
+	"daily_budget": true, "spent_today": true,
 	"consume_speed": true, "deliver_ttl_minutes": true, "guaranteed_enabled": true, "guaranteed_min_share": true,
-	"priority_score": true, 	"freq_daily_limit": true, "freq_interval_minutes": true,
+	"priority_score": true, "freq_daily_limit": true, "freq_interval_minutes": true,
 	"freq_fatigue_window": true, "creative_ids": true,
 	"start_at": true, "end_at": true, "product_id": true, "landing_url": true, "updated_by": true,
 }
@@ -242,13 +240,12 @@ func (s *Store) SoftDeleteCampaign(ctx context.Context, id string) error {
 // CampaignRollup 按广告主 / 产品归集的 KPI 汇总。
 // 达成率口径与 adminAdvertiserCols 保持一致（target/actual、actual≤0 取 1、clamp[0.25,4]）。
 type CampaignRollup struct {
-	CampaignCount    int     `json:"campaign_count"`
-	DailyBudget      float64 `json:"daily_budget"`       // 各 campaign 日预算之和
-	SpentToday       float64 `json:"spent_today"`        // 今日消耗之和
-	TargetCPI        float64 `json:"target_cpi"`         // 按花费加权的目标 CPI
-	ActualCPI        float64 `json:"actual_cpi"`         // 按花费加权的实际 CPI
-	Achievement      float64 `json:"achievement"`        // 汇总达成率
-	GuaranteedMin    float64 `json:"guaranteed_min_share"` // 旗下最大保量份额
+	CampaignCount int     `json:"campaign_count"`
+	DailyBudget   float64 `json:"daily_budget"`         // 各 campaign 日预算之和
+	SpentToday    float64 `json:"spent_today"`          // 今日消耗之和
+	TargetKPIValue float64 `json:"target_kpi_value"`    // 按花费加权的目标 KPI 值
+	Achievement   float64 `json:"achievement"`          // 汇总达成率
+	GuaranteedMin float64 `json:"guaranteed_min_share"` // 旗下最大保量份额
 }
 
 // RollupAdvertiserKPIs 广告主维度 KPI 汇总（旗下所有 campaign）。
@@ -266,24 +263,18 @@ func (s *Store) campaignRollup(ctx context.Context, where, arg string) (*Campaig
 		SELECT COUNT(*),
 		       COALESCE(SUM(daily_budget), 0)::float8,
 		       COALESCE(SUM(spent_today), 0)::float8,
-		       CASE WHEN SUM(spent_today) > 0 AND SUM(spent_today / NULLIF(actual_cpi, 0)) > 0
-		            THEN SUM(spent_today) / SUM(spent_today / NULLIF(actual_cpi, 0))
-		            ELSE 0 END,
-		       CASE WHEN SUM(spent_today) > 0 AND SUM(spent_today / NULLIF(target_cpi, 0)) > 0
-		            THEN SUM(spent_today) / SUM(spent_today / NULLIF(target_cpi, 0))
+		       CASE WHEN SUM(spent_today) > 0 AND SUM(spent_today / NULLIF(target_kpi_value, 0)) > 0
+		            THEN SUM(spent_today) / SUM(spent_today / NULLIF(target_kpi_value, 0))
 		            ELSE 0 END,
 		       COALESCE(MAX(guaranteed_min_share), 0)::float8
 		FROM campaigns WHERE deleted_at IS NULL AND `+where, arg)
 	r := &CampaignRollup{}
 	var cnt int
-	if err := row.Scan(&cnt, &r.DailyBudget, &r.SpentToday, &r.ActualCPI, &r.TargetCPI, &r.GuaranteedMin); err != nil {
+	if err := row.Scan(&cnt, &r.DailyBudget, &r.SpentToday, &r.TargetKPIValue, &r.GuaranteedMin); err != nil {
 		return nil, err
 	}
 	r.CampaignCount = cnt
-	if r.TargetCPI > 0 && r.ActualCPI > 0 {
-		r.Achievement = math.Min(math.Max(r.TargetCPI/r.ActualCPI, 0.25), 4.0)
-	} else {
-		r.Achievement = 1
-	}
+	// 实测 CPI 不再落库，汇总达成率暂置中性 1.0（后期引入运行时实测值再计算）。
+	r.Achievement = 1
 	return r, nil
 }

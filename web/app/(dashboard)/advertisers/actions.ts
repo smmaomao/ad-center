@@ -14,6 +14,7 @@ import {
   updateCreative,
   deleteCreative,
   rechargeWallet,
+  adjustWallet,
   GoApiError,
 } from "@/lib/go-api";
 
@@ -84,6 +85,28 @@ export async function saveAdvertiserAction(
   // 弹窗内提交时（带 no_redirect）不跳转，由前端关闭弹窗并刷新
   if (fd.get("no_redirect")) return { ok: true, id: newId };
   redirect(`/advertisers/${newId}`);
+}
+
+/**
+ * 启用/关闭广告主总钱包闸。
+ * - true：余额作为投放硬顶（余额耗尽停投其下全部广告）
+ * - false：不启用，存量广告主不受总余额限制
+ * 只翻转 advertisers.wallet_enabled；进程内实时闸由 NOTIFY/60s 对账自动对齐。
+ */
+export async function setWalletGateAction(
+  id: string,
+  enabled: boolean,
+): Promise<FormState> {
+  const session = await getSession();
+  if (!session) return { error: "会话已过期，请重新登录" };
+  try {
+    await updateAdvertiser(session.email, id, { wallet_enabled: enabled });
+  } catch (e) {
+    return { error: errMsg(e, enabled ? "启用钱包闸失败" : "关闭钱包闸失败") };
+  }
+  revalidatePath("/advertisers");
+  revalidatePath(`/advertisers/${id}`);
+  return { ok: true };
 }
 
 export async function deleteAdvertiserAction(id: string): Promise<FormState> {
@@ -186,5 +209,34 @@ export async function rechargeWalletAction(
     return { error: errMsg(e, "充值失败") };
   }
   revalidatePath(`/advertisers/${advertiserId}`);
+  return { ok: true };
+}
+
+/** 手动调账：修正余额 + 写调账流水（不改钱包闸开关）。 */
+export async function adjustWalletAction(
+  _prev: FormState,
+  fd: FormData,
+): Promise<FormState> {
+  const session = await getSession();
+  if (!session) return { error: "会话已过期，请重新登录" };
+
+  const advertiserId = str(fd, "advertiser_id");
+  if (!advertiserId) return { error: "缺少广告主" };
+  const mode = str(fd, "mode") === "set" ? "set" : "delta";
+  const amount = num(fd, "amount");
+  if (mode === "delta" && amount === 0) return { error: "增减金额不能为 0" };
+  if (mode === "set" && amount < 0) return { error: "目标余额不能为负" };
+
+  try {
+    await adjustWallet(session.email, advertiserId, {
+      mode,
+      amount,
+      note: str(fd, "note"),
+    });
+  } catch (e) {
+    return { error: errMsg(e, "调账失败") };
+  }
+  revalidatePath(`/advertisers/${advertiserId}`);
+  revalidatePath("/advertisers");
   return { ok: true };
 }

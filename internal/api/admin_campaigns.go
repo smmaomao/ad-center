@@ -14,23 +14,25 @@ import (
 // ============================================================
 
 var campaignStatuses = map[string]bool{"active": true, "paused": true}
-var campaignBiddingModes = map[string]bool{"cpi": true, "cpa": true, "revenue_share": true}
-var campaignBillingModes = map[string]bool{"cpm": true, "cpc": true, "cpa": true}
-var campaignConsumeSpeeds = map[string]bool{"even": true, "accelerated": true, "asap": true}
+var campaignBillingModes = map[string]bool{
+	"cpm": true, "cpc": true, "cpi": true,
+	"cpa-activate": true, "cpa-register": true,
+	"cpa-first-deposit": true, "cpa-pay": true,
+}
 
 // campaignRequest 广告任务创建/更新请求体。
 type campaignRequest struct {
 	AdvertiserID        string                `json:"advertiser_id"`
 	Name                string                `json:"name"`
 	Status              string                `json:"status"`
-	BiddingMode         string                `json:"bidding_mode"`
 	BiddingPrice        float64               `json:"bidding_price"`
 	BiddingPriceMin     float64               `json:"bidding_price_min"`
 	BillingMode         string                `json:"billing_mode"`
 	CPAEventPrices      map[string][2]float64 `json:"cpa_event_prices"`
-	TargetCPI           float64               `json:"target_cpi"`
+	TargetKPIType       string                `json:"target_kpi_type"`
+	TargetKPIValue      float64               `json:"target_kpi_value"`
 	DailyBudget         float64               `json:"daily_budget"`
-	ConsumeSpeed        string                `json:"consume_speed"`
+	ConsumeSpeed        int                   `json:"consume_speed"`
 	GuaranteedEnabled   bool                  `json:"guaranteed_enabled"`
 	GuaranteedMinShare  float64               `json:"guaranteed_min_share"`
 	CreativeIDs         []string              `json:"creative_ids"`
@@ -40,7 +42,7 @@ type campaignRequest struct {
 	FreqFatigueWindow   int                   `json:"freq_fatigue_window"`
 	StartAt             *string               `json:"start_at"`
 	EndAt               *string               `json:"end_at"`
-	DeliverTTLMinutes  int                   `json:"deliver_ttl_minutes"`
+	DeliverTTLMinutes   int                   `json:"deliver_ttl_minutes"`
 }
 
 // validateCampaign 校验并打印可用的枚举默认值；返回用于落库的字段。
@@ -54,34 +56,34 @@ func (r campaignRequest) validate() error {
 	if r.Status != "" && !campaignStatuses[r.Status] {
 		return errInvalid("status")
 	}
-	if r.BiddingMode != "" && !campaignBiddingModes[r.BiddingMode] {
-		return errInvalid("bidding_mode")
-	}
 	if r.BillingMode != "" && !campaignBillingModes[r.BillingMode] {
 		return errInvalid("billing_mode")
 	}
-	if r.ConsumeSpeed != "" && !campaignConsumeSpeeds[r.ConsumeSpeed] {
-		return errInvalid("consume_speed")
+	if r.TargetKPIType != "" && !campaignBillingModes[r.TargetKPIType] {
+		return errInvalid("target_kpi_type")
+	}
+	if r.ConsumeSpeed != 0 && (r.ConsumeSpeed < 1 || r.ConsumeSpeed > 10) {
+		return errInvalid("consume_speed (1-10)")
 	}
 	return nil
 }
 
 func (r campaignRequest) fields() map[string]any {
 	f := map[string]any{
-		"advertiser_id":          r.AdvertiserID,
-		"name":                   r.Name,
-		"bidding_mode":           orDefault(r.BiddingMode, "cpi"),
-		"bidding_price":          r.BiddingPrice,
-		"bidding_price_min":      r.BiddingPriceMin,
-		"billing_mode":           orDefault(r.BillingMode, "cpm"),
-		"target_cpi":             r.TargetCPI,
-		"daily_budget":           r.DailyBudget,
-		"consume_speed":          orDefault(r.ConsumeSpeed, "even"),
-		"deliver_ttl_minutes":    r.DeliverTTLMinutes,
-		"guaranteed_enabled":     r.GuaranteedEnabled,
-		"guaranteed_min_share":   r.GuaranteedMinShare,
-		"creative_ids":           r.CreativeIDs,
-		"status":                 orDefault(r.Status, "active"),
+		"advertiser_id":        r.AdvertiserID,
+		"name":                 r.Name,
+		"bidding_price":        r.BiddingPrice,
+		"bidding_price_min":    r.BiddingPriceMin,
+		"billing_mode":         orDefault(r.BillingMode, "cpm"),
+		"target_kpi_type":      r.TargetKPIType,
+		"target_kpi_value":     r.TargetKPIValue,
+		"daily_budget":         r.DailyBudget,
+		"consume_speed":        orDefaultInt(r.ConsumeSpeed, 5),
+		"deliver_ttl_minutes":  r.DeliverTTLMinutes,
+		"guaranteed_enabled":   r.GuaranteedEnabled,
+		"guaranteed_min_share": r.GuaranteedMinShare,
+		"creative_ids":         r.CreativeIDs,
+		"status":               orDefault(r.Status, "active"),
 	}
 	if r.CPAEventPrices != nil {
 		f["cpa_event_prices"] = r.CPAEventPrices
@@ -106,9 +108,6 @@ func (r campaignRequest) updateFields() map[string]any {
 	if r.Status != "" {
 		f["status"] = r.Status
 	}
-	if r.BiddingMode != "" {
-		f["bidding_mode"] = r.BiddingMode
-	}
 	if r.BiddingPrice != 0 {
 		f["bidding_price"] = r.BiddingPrice
 	}
@@ -121,13 +120,16 @@ func (r campaignRequest) updateFields() map[string]any {
 	if r.CPAEventPrices != nil {
 		f["cpa_event_prices"] = r.CPAEventPrices
 	}
-	if r.TargetCPI != 0 {
-		f["target_cpi"] = r.TargetCPI
+	if r.TargetKPIType != "" {
+		f["target_kpi_type"] = r.TargetKPIType
+	}
+	if r.TargetKPIValue != 0 {
+		f["target_kpi_value"] = r.TargetKPIValue
 	}
 	if r.DailyBudget != 0 {
 		f["daily_budget"] = r.DailyBudget
 	}
-	if r.ConsumeSpeed != "" {
+	if r.ConsumeSpeed != 0 {
 		f["consume_speed"] = r.ConsumeSpeed
 	}
 	if r.DeliverTTLMinutes != 0 {
@@ -163,6 +165,13 @@ func (r campaignRequest) updateFields() map[string]any {
 
 func orDefault(v, def string) string {
 	if v == "" {
+		return def
+	}
+	return v
+}
+
+func orDefaultInt(v, def int) int {
+	if v == 0 {
 		return def
 	}
 	return v

@@ -222,11 +222,11 @@ func (s *Server) handleAdEvent(w http.ResponseWriter, r *http.Request) {
 	// 按计费方式确认扣费；余额不足时事件照记（真实曝光/点击已发生），本次不扣——
 	// 接受少量在途超发，req 路径的只读闸会在 spent >= budget 后停止下发。
 	var charged float64
-	if adv := snap.Advertisers[req.AdvertiserID]; adv != nil {
-		if amt, ok := adv.BillingAmount(req.Event); ok {
-			// 预算闸按 campaign 各自控制：创意归属的 campaign 为扣费单元；
-			// 未挂到任何 campaign 的素材不扣费（也不参与预算封顶）。
-			if campID, ok := snap.CreativeCampaign[req.CreativeID]; ok && campID != "" {
+	// 计费执行粒度 = campaign：出价 / 计费方式 / CPA 单价均在任务级，广告主只做钱包。
+	// 未挂到任何 campaign 的素材不扣费（也不参与预算封顶）。
+	if campID, ok := snap.CreativeCampaign[req.CreativeID]; ok && campID != "" {
+		if camp := snap.Campaigns[campID]; camp != nil {
+			if amt, ok := camp.BillingAmount(req.Event); ok {
 				// campaign 日预算闸 + 广告主总钱包闸：任一不足即不扣费
 				if s.Budget.TryDeduct(campID, amt) && s.Budget.WalletDeduct(req.AdvertiserID, amt) {
 					charged = amt

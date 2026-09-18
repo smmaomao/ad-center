@@ -55,8 +55,8 @@ func (s *Store) LoadSnapshot(ctx context.Context) (*config.Snapshot, error) {
 		Slots:                 map[string]*config.Slot{},
 		SlotsByKey:            map[string]*config.Slot{},
 		CreativesByAdvertiser: map[string][]*config.Creative{},
-		Campaigns:            map[string]*config.Campaign{},
-		CreativeCampaign:     map[string]string{},
+		Campaigns:             map[string]*config.Campaign{},
+		CreativeCampaign:      map[string]string{},
 		Settings:              map[string]json.RawMessage{},
 		// 先给兜底标准线，settings 里有配置再覆盖（避免除零）
 		PricingBenchmark: config.DefaultPricingBenchmark(),
@@ -79,22 +79,19 @@ func (s *Store) LoadSnapshot(ctx context.Context) (*config.Snapshot, error) {
 	}
 	rows.Close()
 
+	// 广告主只加载「身份 + 状态 + 定向」；计费相关（出价/计费方式/CPA 单价）
+	// 一律在 campaign 级加载——广告主不参与任何排序或扣费计算。
 	rows, err = s.pool.Query(ctx, `
-		SELECT id::text, name, status,
-		       bidding_price::float8, bidding_price_min::float8,
-		       billing_mode, cpa_event_prices,
-		       targeting, freq_windows
+		SELECT id::text, name, status, targeting
 		FROM advertisers WHERE deleted_at IS NULL`)
 	if err != nil {
 		return nil, fmt.Errorf("load advertisers: %w", err)
 	}
 	for rows.Next() {
 		a := &config.Advertiser{}
-		var targeting, freqWindows, cpaPrices []byte
+		var targeting []byte
 		if err := rows.Scan(&a.ID, &a.Name, &a.Status,
-			&a.BiddingPrice, &a.BiddingPriceMin,
-			&a.BillingMode, &cpaPrices,
-			&targeting, &freqWindows); err != nil {
+			&targeting); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -102,14 +99,6 @@ func (s *Store) LoadSnapshot(ctx context.Context) (*config.Snapshot, error) {
 		if a.Targeting, err = config.ParseTargeting(targeting); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("advertiser %s targeting: %w", a.ID, err)
-		}
-		if a.FreqWindows, err = config.ParseFreqWindows(freqWindows); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("advertiser %s freq_windows: %w", a.ID, err)
-		}
-		if a.CPAEventPrices, err = config.ParseCPAEventPrices(cpaPrices); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("advertiser %s cpa_event_prices: %w", a.ID, err)
 		}
 		snap.Advertisers[a.ID] = a
 	}
@@ -182,8 +171,9 @@ func (s *Store) LoadSnapshot(ctx context.Context) (*config.Snapshot, error) {
 	rows, err = s.pool.Query(ctx, `
 		SELECT id::text, advertiser_id::text, name, status,
 		       daily_budget::float8, spent_today::float8, consume_speed,
-		       target_cpi::float8, actual_cpi::float8,
-		       billing_mode, bidding_price::float8, priority_score::float8, bidding_mode,
+		       target_kpi_type, target_kpi_value::float8,
+		       billing_mode, bidding_price::float8, bidding_price_min::float8,
+		       cpa_event_prices, priority_score::float8,
 		       COALESCE(deliver_ttl_minutes, 10)::int,
 		       COALESCE(creative_ids, '{}')::text[], start_at, end_at,
 		       COALESCE(landing_url, ''),
@@ -197,15 +187,21 @@ func (s *Store) LoadSnapshot(ctx context.Context) (*config.Snapshot, error) {
 	for rows.Next() {
 		c := &config.Campaign{}
 		var creativeIDs []string
+		var cpaPrices []byte
 		if err := rows.Scan(&c.ID, &c.AdvertiserID, &c.Name, &c.Status,
 			&c.DailyBudget, &c.SpentToday, &c.ConsumeSpeed,
-			&c.TargetCPI, &c.ActualCPI,
-			&c.BillingMode, &c.BiddingPrice, &c.PriorityScore, &c.BiddingMode,
+			&c.TargetKPIType, &c.TargetKPIValue,
+			&c.BillingMode, &c.BiddingPrice, &c.BiddingPriceMin, &cpaPrices,
+			&c.PriorityScore,
 			&c.DeliverTTLMinutes,
 			&creativeIDs, &c.StartAt, &c.EndAt, &c.LandingURL,
 			&c.FreqDailyLimit, &c.FreqIntervalMinute, &c.FreqFatigueWindow); err != nil {
 			rows.Close()
 			return nil, err
+		}
+		if c.CPAEventPrices, err = config.ParseCPAEventPrices(cpaPrices); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("campaign %s cpa_event_prices: %w", c.ID, err)
 		}
 		snap.Campaigns[c.ID] = c
 		for _, crID := range creativeIDs {

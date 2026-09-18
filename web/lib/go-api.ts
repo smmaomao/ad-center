@@ -49,14 +49,9 @@ export interface AdminAdvertiser {
   id: string;
   name: string;
   status: "active" | "paused" | "budget_exhausted";
-  // 计费锚点（migration 000008/000010）：出价与计费方式仍按广告主配置，
-  // KPI / 排期 / 消耗节奏 / 下发有效期已下沉到广告任务（campaign）维度。
-  bidding_price: number;
-  bidding_price_min: number;
-  // 计费方式（扣费锚点，migration 000008）：cpm=曝光回执、cpc=点击回执、cpa=S2S 转化回调
-  billing_mode: "cpm" | "cpc" | "cpa";
-  // cpa 计费时各转化事件单价区间 [min,max]（美元），migration 000010 起为区间
-  cpa_event_prices?: Record<string, [number, number]> | null;
+  // 钱包：总余额是投放硬顶（累计充值 - 累计扣费），首次充值自动启用
+  wallet_enabled: boolean;
+  wallet_balance: number;
   contact: string;
   notes: string;
   created_at: string | null;
@@ -254,10 +249,10 @@ export interface AdminWallet {
   currency: string;
 }
 
-/** 钱包流水一行（充值 + 扣费合并，时间倒序） */
+/** 钱包流水一行（充值 + 调账 + 扣费合并，时间倒序） */
 export interface WalletFlowRow {
-  kind: "recharge" | "deduct";
-  amount: number; // 恒为正，方向由 kind 区分
+  kind: "recharge" | "deduct" | "adjust";
+  amount: number; // recharge/deduct 恒为正（方向由 kind 区分）；adjust 为带符号变动额
   currency: string;
   op_type?: string; // 扣费细分：deduct / deduct_agg
   note?: string;
@@ -288,6 +283,24 @@ export async function rechargeWallet(
 ) {
   return goSend<{ status: string; balance: number }>(
     `/v1/admin/advertisers/${id}/wallet/recharge`,
+    actorEmail,
+    "POST",
+    body,
+  );
+}
+
+/**
+ * 手动调账：修正余额 + 写调账流水（不改钱包闸开关）。
+ * - mode="set"：把余额改为 amount
+ * - mode="delta"：在现有余额上增减 amount（可正可负）
+ */
+export async function adjustWallet(
+  actorEmail: string,
+  id: string,
+  body: { mode: "set" | "delta"; amount: number; note?: string },
+) {
+  return goSend<{ status: string; balance: number }>(
+    `/v1/admin/advertisers/${id}/wallet/adjust`,
     actorEmail,
     "POST",
     body,
@@ -470,23 +483,35 @@ export async function getCreativePlayUrl(actorEmail: string, id: string) {
 // 广告任务（Campaign）：广告主下的出价 / KPI / 单价 / 频控 + 关联素材
 // ============================================================
 
+// 计费方式 / KPI 指标类型共用枚举（出价方式 = 唯一扣费锚点；KPI 类型通常与其一致）
+export type BillingMode =
+  | "cpm"
+  | "cpc"
+  | "cpi"
+  | "cpa-activate"
+  | "cpa-register"
+  | "cpa-first-deposit"
+  | "cpa-pay";
+
 export interface AdminCampaign {
   id: string;
   advertiser_id: string;
   advertiser_name: string;
   name: string;
   status: "active" | "paused";
-  bidding_mode: "cpi" | "cpa" | "revenue_share";
-  bidding_price: number;
-  bidding_price_min: number;
-  billing_mode: "cpm" | "cpc" | "cpa";
+  // 出价 = 计费方式维度的单价，且是区间：不填 min = 固定单价；填了则在 [min,max] 随机
+  bidding_price: number; // 上限
+  bidding_price_min: number; // 下限（0 = 不启用区间）
+  // 计费方式（唯一扣费锚点）：决定按哪个事件扣费 + 出价即该事件单价
+  billing_mode: BillingMode;
   cpa_event_prices?: Record<string, [number, number]> | null;
-  target_cpi: number;
+  // 目标 KPI：类型通常 = 计费方式；值即目标（如目标 CPI=$1.80）
+  target_kpi_type: BillingMode;
+  target_kpi_value: number;
   daily_budget: number;
-  // 运行期 KPI（campaign 为执行粒度，由事件聚合回写，详见 migration 000031）
-  actual_cpi: number;
   spent_today: number;
-  consume_speed: "even" | "accelerated" | "asap";
+  // 曝光系数 1-10（默认 5）：影响下发节奏
+  consume_speed: number;
   guaranteed_enabled: boolean;
   guaranteed_min_share: number;
   priority_score: number;
@@ -509,8 +534,8 @@ export interface CampaignRollup {
   campaign_count: number;
   daily_budget: number;
   spent_today: number;
-  target_cpi: number;
-  actual_cpi: number;
+  target_kpi_type: BillingMode;
+  target_kpi_value: number;
   achievement: number;
   guaranteed_min_share: number;
 }

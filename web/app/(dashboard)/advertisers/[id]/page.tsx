@@ -121,15 +121,8 @@ export default async function AdvertiserDetailPage({
         {kpiCard(
           "KPI 达成率（任务汇总）",
           `${((rollup?.achievement ?? 1) * 100).toFixed(0)}%`,
-          `实际 CPI $${(rollup?.actual_cpi ?? 0).toFixed(2)} / 目标 $${(rollup?.target_cpi ?? 0).toFixed(2)}`,
+          `目标 $${(rollup?.target_kpi_value ?? 0).toFixed(2)}`,
           (rollup?.achievement ?? 1) < 0.85,
-        )}
-        {kpiCard(
-          "保量份额（任务最大）",
-          rollup && rollup.guaranteed_min_share > 0
-            ? `${(rollup.guaranteed_min_share * 100).toFixed(0)}%`
-            : "未启用",
-          "旗下任务中最大的保量填充份额",
         )}
         {kpiCard(
           "旗下任务",

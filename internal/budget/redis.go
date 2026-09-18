@@ -73,8 +73,17 @@ func (r *Redis) today() string { return r.now().In(jakarta).Format("2006-01-02")
 // resetBlock 跨日重置的 Lua 片段（deduct / stats 共用）：
 // 全局 day 与今日不符时，把已知广告主的 spent 全部归零并回传被重置的金额，
 // 由 Go 侧补记 daily_reset 流水。多实例并发执行一次是幂等的（第二次读到 spent=0）。
+// stateKeyTTL 预算/钱包/跨日标记等状态键的过期上限（用户要求：所有 Redis key ≤7 天）。
+// 数据真相在 DB，SyncBalances/SyncWallets 每 60s 重建并刷新此 TTL，故活跃广告主
+// 永不过期；停投/删除的广告主在 ≤7 天后自动清理，无需 sweep。
+const stateKeyTTL = 7 * 24 * time.Hour
+
+// resetBlock 跨日重置的 Lua 片段（deduct / stats 共用）：
+// 全局 day 与今日不符时，把已知广告主的 spent 全部归零并回传被重置的金额，
+// 由 Go 侧补记 daily_reset 流水。多实例并发执行一次是幂等的（第二次读到 spent=0）。
 const resetBlock = `
 local resets = {}
+local ttl = 604800
 if redis.call('GET', KEYS[2]) ~= ARGV[1] then
   local ids = redis.call('SMEMBERS', KEYS[3])
   for _, id in ipairs(ids) do
@@ -85,8 +94,10 @@ if redis.call('GET', KEYS[2]) ~= ARGV[1] then
       resets[#resets + 1] = tostring(sp)
     end
     redis.call('HSET', k, 'day', ARGV[1], 'spent', '0')
+    redis.call('EXPIRE', k, ttl)
   end
   redis.call('SET', KEYS[2], ARGV[1])
+  redis.call('EXPIRE', KEYS[2], ttl)
 end
 `
 
@@ -184,17 +195,20 @@ func (r *Redis) SyncBalances(balances map[string][2]float64) {
 
 	today := r.today()
 	pipe = r.client.Pipeline()
-	pipe.SetNX(ctx, r.dayKey(), today, 0) // 确立当日（已存在则不动）
+	pipe.SetNX(ctx, r.dayKey(), today, stateKeyTTL) // 确立当日（已存在则不动），并刷 7d TTL
 	for i, id := range ids {
 		b := balances[id]
 		k := r.key(id)
 		pipe.SAdd(ctx, r.idsKey(), id) // 纳入跨日重置集合
 		if exists[i].Val() > 0 {
 			pipe.HSet(ctx, k, "budget", formatFloat(b[0])) // 已存在：只刷新上限，不动 spent
+			pipe.Expire(ctx, k, stateKeyTTL)               // 刷 7d TTL，活跃广告主永不过期
 			continue
 		}
 		pipe.HSet(ctx, k, "budget", formatFloat(b[0]), "spent", formatFloat(b[1]), "day", today)
+		pipe.Expire(ctx, k, stateKeyTTL)
 	}
+	pipe.Expire(ctx, r.idsKey(), stateKeyTTL) // 刷 7d TTL
 	if _, err := pipe.Exec(ctx); err != nil {
 		return
 	}
@@ -311,6 +325,7 @@ local bal = tonumber(redis.call('HGET', KEYS[1], 'balance')) or 0
 local amount = tonumber(ARGV[1])
 if amount < 0 or bal < amount then return 0 end
 redis.call('HSET', KEYS[1], 'balance', tostring(bal - amount))
+redis.call('EXPIRE', KEYS[1], 604800)
 return 1
 `)
 
@@ -351,6 +366,7 @@ func (r *Redis) WalletCredit(advertiserID string, amount float64) {
 	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
 	defer cancel()
 	_ = r.client.HIncrByFloat(ctx, r.walletKey(advertiserID), "balance", amount).Err()
+	_ = r.client.Expire(ctx, r.walletKey(advertiserID), stateKeyTTL).Err() // 刷 7d TTL
 }
 
 // SyncWallets 用 DB 快照覆盖钱包余额，并清理不再启用的钱包键。
@@ -360,6 +376,7 @@ func (r *Redis) SyncWallets(balances map[string]float64) {
 	pipe := r.client.Pipeline()
 	for id, b := range balances {
 		pipe.HSet(ctx, r.walletKey(id), "balance", formatFloat(b))
+		pipe.Expire(ctx, r.walletKey(id), stateKeyTTL) // 刷 7d TTL
 	}
 	if _, err := pipe.Exec(ctx); err != nil {
 		return

@@ -136,7 +136,7 @@ func mkAdv(id string, _ int, target, actual float64) advSpec {
 		adv: &config.Advertiser{ID: id, Name: id, Status: "active"},
 		camp: &config.Campaign{
 			ID: "cmp_" + id, AdvertiserID: id, Status: "active",
-			DailyBudget: 1000, TargetCPI: target, ActualCPI: actual,
+			DailyBudget: 1000, TargetKPIValue: target,
 		},
 	}
 }
@@ -159,21 +159,8 @@ func ids(items []Item) []string {
 
 // ===== 用例 =====
 
-func TestDecideSingle_KPI紧急度排序(t *testing.T) {
-	// adv_urgent 实际 CPI 2.0 > 目标 1.0 → 达成率 50%（成本超标，紧急）
-	// adv_ok     实际 CPI 1.0 = 目标 1.0 → 达成率 100%（达标）
-	// 两者出价/样式/权重相同 → 紧急者 score 更高（PRD 2.2 第一优先级）
-	snap := mkSnapshot(
-		mkAdv("adv_urgent", 1, 1.0, 2.0),
-		mkAdv("adv_ok", 1, 1.0, 1.0),
-	)
-	req := Request{App: snap.Apps["app1"], Style: "rewarded_video",
-		DeviceID: "d1", Count: 1, Now: testNow}
-	resp := mkEngine(&fakeFreq{}, mkBudget()).Decide(snap, req)
-	if len(resp.Items) != 1 || resp.Items[0].AdvertiserID != "adv_urgent" {
-		t.Fatalf("KPI 紧急广告主应胜出，实际 %v", ids(resp.Items))
-	}
-}
+// TestDecideSingle_KPI紧急度排序 已移除：实测 CPI 不再落库，达成率暂置中性 1.0，
+// KPI 紧急度区分（urgent 应胜过 ok）待后期引入运行时实测值后再恢复。
 
 func TestDecideSingle_无Tier层权重(t *testing.T) {
 	// 彻底去掉 Tier 后，顺序完全由 KPI 达成率（紧急度）决定，不再有层级起跑权重。
@@ -518,37 +505,32 @@ func TestDecide_请求内可复现(t *testing.T) {
 	}
 }
 
-// ===== A1 / A2：KPI 达成率方向 + 冷启动保护 =====
+// ===== A1 / A2：KPI 达成率（实测 CPI 不再落库，暂置中性） =====
 
-func TestAchievement_公式与冷启动(t *testing.T) {
+func TestAchievement_中性(t *testing.T) {
+	// 实测 CPI 不再落库，Achievement 暂返回中性 1.0（见 Campaign.Achievement()）；
+	// 后期自动优化引入运行时实测值后再恢复 target/实测 公式。
 	cases := []struct {
-		name           string
-		target, actual float64
-		want           float64
+		name string
+		camp *config.Campaign
+		want float64
 	}{
-		{"达标_刚好等于目标", 2.0, 2.0, 1.0},
-		{"未达标_成本超标一倍", 1.0, 2.0, 0.5},
-		{"超额完成_成本减半", 1.0, 0.5, 2.0},
-		{"冷启动_无转化数据", 1.0, 0, 1.0},
-		{"无目标成本_按中性", 0, 1.0, 1.0},
-		{"钳制下限_极端超支", 1.0, 100, 0.25},
-		{"钳制上限_极端便宜", 1.0, 0.01, 4.0},
+		{"有目标", &config.Campaign{TargetKPIValue: 1.8}, 1.0},
+		{"无目标", &config.Campaign{}, 1.0},
+		{"零目标", &config.Campaign{TargetKPIValue: 0}, 1.0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			a := &config.Campaign{TargetCPI: tc.target, ActualCPI: tc.actual}
-			got := a.Achievement()
-			if math.Abs(got-tc.want) > 1e-9 {
-				t.Fatalf("Achievement(target=%v, actual=%v) = %v，期望 %v",
-					tc.target, tc.actual, got, tc.want)
+			if got := tc.camp.Achievement(); got != tc.want {
+				t.Fatalf("Achievement() = %v，期望 %v", got, tc.want)
 			}
 		})
 	}
 }
 
 func TestDecide_冷启动不霸榜(t *testing.T) {
-	// 修复前：actual_cpi=0 会让 urgency = 1/0.01 = 100，比正常广告主高两个数量级。
-	// 修复后：冷启动按中性达成率 1.0，与"刚好达标"的广告主同分档。
+	// 实测 CPI 不再落库，达成率暂置中性 1.0（见 Campaign.Achievement()），
+	// 因此冷启动广告主与"刚好达标"者同分档；KPI 紧急度区分待后期引入运行时实测值。
 	bud := mkBudget()
 	e := &Engine{Freq: &fakeFreq{}, Budget: bud}
 
@@ -558,23 +540,15 @@ func TestDecide_冷启动不霸榜(t *testing.T) {
 	}
 	newC := e.scoreCreative(mkCr(&config.Advertiser{ID: "new"}),
 		&config.Advertiser{ID: "new"},
-		&config.Campaign{BillingMode: "cpm", BiddingPrice: 15, TargetCPI: 1.0, ActualCPI: 0},
+		&config.Campaign{BillingMode: "cpm", BiddingPrice: 15, TargetKPIValue: 1.0},
 		config.DefaultPricingBenchmark(), testNow, 0, 100)
 	okC := e.scoreCreative(mkCr(&config.Advertiser{ID: "ok"}),
 		&config.Advertiser{ID: "ok"},
-		&config.Campaign{BillingMode: "cpm", BiddingPrice: 15, TargetCPI: 1.0, ActualCPI: 1.0},
+		&config.Campaign{BillingMode: "cpm", BiddingPrice: 15, TargetKPIValue: 1.0},
 		config.DefaultPricingBenchmark(), testNow, 0, 100)
 
 	if math.Abs(newC.score-okC.score) > 1e-9 {
 		t.Fatalf("冷启动广告主应与达标者同分（中性处理），实际 new=%v ok=%v", newC.score, okC.score)
-	}
-	// 且必须显著低于真正紧急的广告主（达成率 50%）
-	urgC := e.scoreCreative(mkCr(&config.Advertiser{ID: "urg"}),
-		&config.Advertiser{ID: "urg"},
-		&config.Campaign{BillingMode: "cpm", BiddingPrice: 15, TargetCPI: 1.0, ActualCPI: 2.0},
-		config.DefaultPricingBenchmark(), testNow, 0, 100)
-	if newC.score >= urgC.score {
-		t.Fatalf("冷启动(%v) 不应压过真正紧急的广告主(%v)", newC.score, urgC.score)
 	}
 }
 

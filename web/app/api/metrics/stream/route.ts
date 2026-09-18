@@ -6,6 +6,9 @@ import { getSession } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+// SSE 长连接会被 Vercel 函数超时硬掐断（Hobby 默认 10s，可调到 60s；Pro 更高）。
+// 设到上限以减少被切断频率；浏览器 EventSource 会在断开后自动重连，数据始终最新。
+export const maxDuration = 60;
 
 export async function GET(req: NextRequest) {
   const session = await getSession();

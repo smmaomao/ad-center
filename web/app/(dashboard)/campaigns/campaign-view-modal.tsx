@@ -58,44 +58,33 @@ export function CampaignViewModal({
             出价与 KPI
           </h3>
           <dl className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
-            <Field label="出价口径" value={campaign.bidding_mode.toUpperCase()} />
-            <Field label="目标 KPI（target_cpi）" value={`$${campaign.target_cpi}`} />
-            <Field label="出价（单价）" value={`$${campaign.bidding_price}`} />
             <Field
-              label="出价下限"
-              value={campaign.bidding_price_min ? `$${campaign.bidding_price_min}` : "—"}
+              label="目标 KPI 类型"
+              value={campaign.target_kpi_type ? String(campaign.target_kpi_type).toUpperCase() : "—"}
+            />
+            <Field
+              label="目标 KPI 值"
+              value={campaign.target_kpi_value ? `$${campaign.target_kpi_value}` : "—"}
+            />
+            <Field
+              label="出价区间（美元）"
+              value={
+                campaign.bidding_price_min > 0
+                  ? `$${campaign.bidding_price_min} ~ $${campaign.bidding_price}`
+                  : `$${campaign.bidding_price}（固定单价）`
+              }
             />
             <Field
               label="任务日预算"
               value={campaign.daily_budget ? `$${campaign.daily_budget}` : "跟随广告主"}
             />
             <Field
-              label="实际 CPI（事件回写）"
-              value={campaign.actual_cpi ? `$${campaign.actual_cpi.toFixed(2)}` : "—"}
-            />
-            <Field
               label="今日消耗"
               value={campaign.spent_today ? `$${campaign.spent_today.toFixed(2)}` : "$0.00"}
             />
             <Field
-              label="消耗节奏"
-              value={
-                (
-                  {
-                    even: "均匀消耗",
-                    accelerated: "加速消耗",
-                    asap: "尽快花完",
-                  } as Record<string, string>
-                )[campaign.consume_speed] ?? campaign.consume_speed ?? "—"
-              }
-            />
-            <Field
-              label="保量份额"
-              value={
-                campaign.guaranteed_enabled
-                  ? `${((campaign.guaranteed_min_share ?? 0) * 100).toFixed(0)}%`
-                  : "未启用"
-              }
+              label="曝光系数"
+              value={campaign.consume_speed ? String(campaign.consume_speed) : "5"}
             />
           </dl>
         </section>

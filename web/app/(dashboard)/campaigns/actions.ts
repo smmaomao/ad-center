@@ -10,7 +10,6 @@ import {
   updateCampaign,
   deleteCampaign,
   GoApiError,
-  CPA_EVENTS,
 } from "@/lib/go-api";
 
 export interface FormState {
@@ -28,6 +27,12 @@ function num(fd: FormData, key: string): number {
   return Number.isFinite(v) ? v : 0;
 }
 
+// 曝光系数：整数 1-10，默认 5（非法/缺省回落默认）
+function clampConsume(v: number): number {
+  if (!Number.isFinite(v) || v <= 0) return 5;
+  return Math.min(10, Math.max(1, Math.round(v)));
+}
+
 /** 新建 / 编辑广告任务（隐藏 id 存在时为更新） */
 export async function saveCampaignAction(
   _prev: FormState,
@@ -43,40 +48,26 @@ export async function saveCampaignAction(
   if (!advertiserId) return { error: "必须选择所属广告主" };
 
   const billingMode = str(fd, "billing_mode") || "cpm";
-  const biddingMode = str(fd, "bidding_mode") || "cpi";
-
-  // CPA 计费事件单价区间
-  const cpa: Record<string, [number, number]> = {};
-  if (billingMode === "cpa") {
-    for (const ev of CPA_EVENTS) {
-      const mn = num(fd, `cpa_min_${ev.key}`);
-      const mx = num(fd, `cpa_max_${ev.key}`);
-      if (mn > 0 || mx > 0) cpa[ev.key] = [mn, mx];
-    }
-  }
 
   const fields: Record<string, unknown> = {
     advertiser_id: advertiserId,
     name,
     ...(productId ? { product_id: productId } : {}),
     status: str(fd, "status") || "active",
-    bidding_mode: biddingMode,
     bidding_price: num(fd, "bidding_price"),
     bidding_price_min: num(fd, "bidding_price_min"),
     billing_mode: billingMode,
-    target_cpi: num(fd, "target_cpi"),
+    target_kpi_type: str(fd, "target_kpi_type") || billingMode,
+    target_kpi_value: num(fd, "target_kpi_value"),
     daily_budget: num(fd, "daily_budget"),
     freq_daily_limit: Math.round(num(fd, "freq_daily_limit")) || 8,
     freq_interval_minutes: Math.round(num(fd, "freq_interval_minutes")) || 20,
     freq_fatigue_window: Math.round(num(fd, "freq_fatigue_window")) || 3,
     creative_ids: fd.getAll("creative_ids").map(String).filter(Boolean),
-    consume_speed: str(fd, "consume_speed") || "even",
+    consume_speed: clampConsume(num(fd, "consume_speed")),
     guaranteed_enabled: fd.get("guaranteed_enabled") === "on",
     guaranteed_min_share: Math.round(num(fd, "guaranteed_min_share")) / 100,
   };
-  if (billingMode === "cpa" && Object.keys(cpa).length > 0) {
-    fields.cpa_event_prices = cpa;
-  }
   const startAt = str(fd, "start_at");
   const endAt = str(fd, "end_at");
   if (startAt) fields.start_at = startAt;

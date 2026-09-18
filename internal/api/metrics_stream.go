@@ -46,7 +46,7 @@ func (s *Server) handleMetricsStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no") // 关掉反代缓冲（nginx/fly proxy）
 	w.WriteHeader(http.StatusOK)
 
-	tick := time.NewTicker(2 * time.Second)
+	tick := time.NewTicker(10 * time.Second)
 	defer tick.Stop()
 
 	send := func() {

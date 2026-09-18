@@ -25,12 +25,17 @@ type AdListRequest struct {
 type AdListItem struct {
 	BidID            string   `json:"bid_id" example:"bid_20260908_0001"`
 	CreativeID       string   `json:"creative_id" example:"cr_90002"`
-	AdStyle          string   `json:"ad_style" example:"REWARDED_VIDEO"`
+	// AdStyle 广告样式列表（单条广告当前的生效样式；为兼容客户端以数组形式接收而使用数组）。
+	AdStyle          []string `json:"ad_style" example:"REWARDED_VIDEO"`
 	MaterialType     string   `json:"material_type" example:"VIDEO"`
 	MaterialURL      string   `json:"material_url" example:"https://cdn.example.com/creatives/abc123.mp4"`
 	Width            int      `json:"width" example:"1080"`
 	Height           int      `json:"height" example:"1920"`
 	TargetScene      []string `json:"target_scene" example:"APP_LAUNCH"`
+	// RequiredDuration 客户端须满足的展示时长（秒），按样式取值：
+	// REWARDED_VIDEO=素材时长（看满才可上报 video-complete 发奖）；
+	// FEED=素材时长（客户端据此锁定列表滑动，满 N 秒后才可划走，图片素材兜底 3）；
+	// SPLASH=固定 3；其余样式为 0。
 	RequiredDuration int      `json:"required_duration" example:"15"`
 	ClickURL         string   `json:"click_url" example:"https://landing.com?clk={CLICK_ID}"`
 }

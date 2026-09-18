@@ -140,26 +140,33 @@ export function WalletPanel({
                           className={`rounded-full px-2 py-0.5 text-xs font-medium ${
                             row.kind === "recharge"
                               ? "bg-emerald-50 text-emerald-700"
-                              : "bg-amber-50 text-amber-700"
+                              : row.kind === "adjust"
+                                ? "bg-sky-50 text-sky-700"
+                                : "bg-amber-50 text-amber-700"
                           }`}
                         >
-                          {row.kind === "recharge" ? "充值" : "扣费"}
+                          {row.kind === "recharge" ? "充值" : row.kind === "adjust" ? "调账" : "扣费"}
                         </span>
                       </td>
                       <td
                         className={`py-2 pr-4 tabular-nums ${
                           row.kind === "recharge"
                             ? "text-emerald-700"
-                            : "text-foreground"
+                            : row.kind === "adjust" && row.amount >= 0
+                              ? "text-sky-700"
+                              : "text-foreground"
                         }`}
                       >
-                        {row.kind === "recharge" ? "+" : "-"}$
-                        {row.amount.toFixed(4)}
+                        {row.kind === "adjust"
+                          ? `${row.amount >= 0 ? "+" : "-"}$${Math.abs(row.amount).toFixed(4)}`
+                          : `${row.kind === "recharge" ? "+" : "-"}$${row.amount.toFixed(4)}`}
                       </td>
                       <td className="py-2 pr-4 text-muted-foreground">
                         {row.kind === "recharge"
                           ? row.note || "—"
-                          : "计费扣费"}
+                          : row.kind === "adjust"
+                            ? row.note || "手动调账"
+                            : "计费扣费"}
                       </td>
                     </tr>
                   ))}

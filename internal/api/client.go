@@ -207,6 +207,36 @@ func sceneForStyle(s string) []string {
 	}
 }
 
+// required_duration（秒）按样式取值：
+//   - rewarded_video：素材时长。客户端看满后才允许上报「视频播放完毕」（触发发奖）。
+//   - feed：素材时长。客户端据此锁定信息流滑动，满 N 秒后才可划走；图片素材
+//     （无时长）用 feedDefaultSeconds 兜底，保证始终有锁定值。
+//   - splash：开屏固定 3 秒（客户端也会本地固定同一值，此处保证字段有值）。
+//   - 其余样式（interstitial / banner）：不需要，返回 0。
+const (
+	splashRequiredSeconds  = 3
+	feedDefaultRequiredSec = 3
+)
+
+func requiredDurationFor(style string, durationMS int) int {
+	switch style {
+	case "rewarded_video":
+		if durationMS > 0 {
+			return durationMS / 1000
+		}
+		return 0
+	case "feed":
+		if durationMS > 0 {
+			return durationMS / 1000
+		}
+		return feedDefaultRequiredSec
+	case "splash":
+		return splashRequiredSeconds
+	default:
+		return 0
+	}
+}
+
 // handleAdList POST /v1/ad/list 批量获取广告（文档接口 1）。
 //
 // 文档请求不带 style：跨全部样式下发，按得分汇总取前 count 条。
@@ -324,10 +354,7 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 			landingURL = camp.LandingURL
 			clickURL = camp.LandingURL + sep + "clk={CLICK_ID}"
 		}
-		reqDur := 0
-		if t.style == "rewarded_video" && cr.DurationMS > 0 {
-			reqDur = cr.DurationMS / 1000
-		}
+		reqDur := requiredDurationFor(t.style, cr.DurationMS)
 		bid := s.Bids.Put(r.Context(), &BidContext{
 			AppID: app.ID, AdvertiserID: it.AdvertiserID, CreativeID: cr.ID, CampaignID: campID,
 			Style: t.style, DeviceID: deviceID, UserID: req.UserID, AdjustAdid: req.AdjustAdid,
@@ -342,7 +369,7 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 		adList = append(adList, map[string]any{
 			"bid_id":            bid,
 			"creative_id":       cr.ID,
-			"ad_style":          styleToDoc(t.style),
+			"ad_style":          []string{styleToDoc(t.style)},
 			"material_type":     mediaToDoc(cr.MediaType),
 			"material_url":      materialURL,
 			"width":             cr.Width,
@@ -453,12 +480,18 @@ func (s *Server) handleAdVideoComplete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"code": 200, "msg": "success"})
 }
 
+// rewardCallbackClient 用于激励视频完播 S2S 回调（带超时，避免 goroutine 永久挂起）。
+var rewardCallbackClient = &http.Client{Timeout: 5 * time.Second}
+
 // fireRewardCallback 异步向 App 的业务后端回调地址发送激励视频完播通知。
-// callback_url 未配置时仅记日志（不发网络请求）。失败只告警，不影响本次响应。
+// 无论转发成功与否，都会落一条 video_complete 事件（callback_ok 记录转发结果），
+// 用于完播率统计与"是否成功通知业务后端发奖"的对账。callback_url 未配置时
+// callback_ok=false 且只记日志、不发网络请求。
 func (s *Server) fireRewardCallback(app *config.App, bid *BidContext, bidID, userID string, ts int64) {
 	if app.CallbackURL == "" {
 		s.Log.Info("video complete: no callback_url configured, skip S2S",
 			"app_code", app.ID, "user_id", userID, "bid_id", bidID)
+		s.enqueueVideoComplete(bid, app.ID, false)
 		return
 	}
 	payload := map[string]any{
@@ -473,18 +506,40 @@ func (s *Server) fireRewardCallback(app *config.App, bid *BidContext, bidID, use
 	b, err := json.Marshal(payload)
 	if err != nil {
 		s.Log.Error("marshal reward callback failed", "err", err)
+		s.enqueueVideoComplete(bid, app.ID, false)
 		return
 	}
 	url := app.CallbackURL
 	go func() {
-		resp, err := http.Post(url, "application/json", bytes.NewReader(b))
+		ok := false
+		resp, err := rewardCallbackClient.Post(url, "application/json", bytes.NewReader(b))
 		if err != nil {
 			s.Log.Warn("reward callback failed", "url", url, "err", err)
-			return
+		} else {
+			resp.Body.Close()
+			ok = resp.StatusCode >= 200 && resp.StatusCode < 300
+			if ok {
+				s.Log.Info("reward callback sent", "url", url, "user_id", userID, "bid_id", bidID)
+			} else {
+				s.Log.Warn("reward callback non-2xx", "url", url, "status", resp.StatusCode)
+			}
 		}
-		resp.Body.Close()
-		s.Log.Info("reward callback sent", "url", url, "user_id", userID, "bid_id", bidID)
+		s.enqueueVideoComplete(bid, app.ID, ok)
 	}()
+}
+
+// enqueueVideoComplete 落一条 video_complete 事件明细（仅记录/审计，不计费、不累加频控）。
+func (s *Server) enqueueVideoComplete(bid *BidContext, appID string, callbackOK bool) {
+	s.enqueueEvent(store.AdEvent{
+		AppID:        appID,
+		Style:        bid.Style,
+		AdvertiserID: bid.AdvertiserID,
+		CreativeID:   bid.CreativeID,
+		DeviceID:     bid.DeviceID,
+		EventType:    "video_complete",
+		Revenue:      0,
+		CallbackOK:   &callbackOK,
+	})
 }
 
 // chargeClientEvent 按计费方式确认扣费并记指标/事件（供客户端埋点复用）。
@@ -492,9 +547,10 @@ func (s *Server) fireRewardCallback(app *config.App, bid *BidContext, bidID, use
 func (s *Server) chargeClientEvent(app *config.App, advID, creativeID, campaignID, style, deviceID, event string, now time.Time) float64 {
 	snap := s.Cache.Snapshot()
 	var charged float64
-	if adv := snap.Advertisers[advID]; adv != nil {
-		if amt, ok := adv.BillingAmount(event); ok {
-			if campID, ok := snap.CreativeCampaign[creativeID]; ok && campID != "" {
+	// 计费执行粒度 = campaign：出价 / 计费方式 / CPA 单价均在任务级，广告主只做钱包。
+	if campID, ok := snap.CreativeCampaign[creativeID]; ok && campID != "" {
+		if camp := snap.Campaigns[campID]; camp != nil {
+			if amt, ok := camp.BillingAmount(event); ok {
 				// campaign 日预算闸 + 广告主总钱包闸：任一不足即不扣费
 				if s.Budget.TryDeduct(campID, amt) && s.Budget.WalletDeduct(advID, amt) {
 					charged = amt

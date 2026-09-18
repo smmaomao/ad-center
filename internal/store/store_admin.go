@@ -15,51 +15,37 @@ import (
 // 管理 API 数据访问（Next.js BFF 调用，写操作触发 NOTIFY 自动刷新缓存）
 // ============================================================
 
-// AdminAdvertiser 管理 API 的广告主视图（身份 + 计费锚点；KPI/排期在广告任务维度）。
+// AdminAdvertiser 管理 API 的广告主视图（身份 + 钱包；出价/计费/KPI/排期全在广告任务维度）。
 type AdminAdvertiser struct {
-	ID              string                `json:"id"`
-	Name            string                `json:"name"`
-	Status          string                `json:"status"`
-	BiddingPrice    float64               `json:"bidding_price"`
-	BiddingPriceMin float64               `json:"bidding_price_min"` // 单价下限；0=未配置→固定 BiddingPrice
-	BillingMode     string                `json:"billing_mode"`      // 计费方式（cpm/cpc/cpa），扣费锚点
-	CPAEventPrices  map[string][2]float64 `json:"cpa_event_prices"`  // 事件→[min,max] 区间
-	WalletEnabled   bool                  `json:"wallet_enabled"`    // 是否启用总钱包闸（首次充值置 true）
-	WalletBalance   float64               `json:"wallet_balance"`    // 总余额 = 累计充值 - 累计扣费
-	Contact         string                `json:"contact"`
-	Notes           string                `json:"notes"`
-	CreatedAt       string                `json:"created_at"` // 创建日期（YYYY-MM-DD）
+	ID            string  `json:"id"`
+	Name          string  `json:"name"`
+	Status        string  `json:"status"`
+	WalletEnabled bool    `json:"wallet_enabled"` // 是否启用总钱包闸（首次充值置 true）
+	WalletBalance float64 `json:"wallet_balance"` // 总余额 = 累计充值 - 累计扣费
+	Contact       string  `json:"contact"`
+	Notes         string  `json:"notes"`
+	CreatedAt     string  `json:"created_at"` // 创建日期（YYYY-MM-DD）
 }
 
 // adminAdvertiserCols 管理端广告主列。
 //
-// 广告主只承载身份 + 计费锚点；KPI/排期/消耗节奏/下发有效期已下沉到 campaign。
-// 广告主维度达成率由旗下 campaign 汇总（handleRollupAdvertiserKPIs →
+// 广告主只承载「身份 + 钱包」；出价/计费方式/KPI/排期/消耗节奏/下发有效期全在
+// campaign 级。广告主维度达成率由旗下 campaign 汇总（handleRollupAdvertiserKPIs →
 // CampaignRollup），其口径与 config.Campaign.Achievement() 一致
 // （target/actual、actual≤0 取 1、clamp [0.25, 4.0]）。改
 // config.minAchievement/maxAchievement 时同步改 store_campaigns.go 的 SQL。
 const adminAdvertiserCols = `
 	id::text, name, status,
-	bidding_price::float8, bidding_price_min::float8,
-	billing_mode, cpa_event_prices::text,
 	wallet_enabled, wallet_balance::float8,
 	COALESCE(contact, ''),
 	COALESCE(notes, ''), to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')`
 
 func scanAdminAdvertiser(scan func(...any) error) (*AdminAdvertiser, error) {
 	a := &AdminAdvertiser{}
-	var cpaPrices []byte
 	if err := scan(&a.ID, &a.Name, &a.Status,
-		&a.BiddingPrice, &a.BiddingPriceMin,
-		&a.BillingMode, &cpaPrices,
 		&a.WalletEnabled, &a.WalletBalance,
 		&a.Contact, &a.Notes, &a.CreatedAt); err != nil {
 		return nil, err
-	}
-	if len(cpaPrices) > 0 {
-		if err := json.Unmarshal(cpaPrices, &a.CPAEventPrices); err != nil {
-			return nil, err
-		}
 	}
 	return a, nil
 }
@@ -96,9 +82,9 @@ func (s *Store) GetAdvertiser(ctx context.Context, id string) (*AdminAdvertiser,
 // advertiserCols 管理端可写列（更新白名单，防注入）。
 var advertiserWritable = map[string]bool{
 	"name": true, "status": true,
-	"bidding_price": true, "bidding_price_min": true,
-	"billing_mode": true, "cpa_event_prices": true,
 	"contact": true, "notes": true, "updated_by": true,
+	// 总钱包闸开关：true=余额作为投放硬顶（余额耗尽停投）；false=存量广告主不受限。
+	"wallet_enabled": true,
 }
 
 // normalizeJSONFields 把 map/slice 形式的 JSON 列值显式序列化为 []byte。
@@ -130,9 +116,6 @@ func (s *Store) CreateAdvertiser(ctx context.Context, fields map[string]any) (st
 	if _, ok := fields["name"]; !ok {
 		return "", fmt.Errorf("name required")
 	}
-	if err := normalizeJSONFields(fields, "cpa_event_prices"); err != nil {
-		return "", err
-	}
 	cols, placeholders, args := buildInsert(fields, advertiserWritable, nil)
 	var id string
 	err := s.pool.QueryRow(ctx, fmt.Sprintf(
@@ -143,9 +126,6 @@ func (s *Store) CreateAdvertiser(ctx context.Context, fields map[string]any) (st
 
 // UpdateAdvertiser 部分更新（白名单列）。
 func (s *Store) UpdateAdvertiser(ctx context.Context, id string, fields map[string]any) error {
-	if err := normalizeJSONFields(fields, "cpa_event_prices"); err != nil {
-		return err
-	}
 	sets, args := buildUpdate(fields, advertiserWritable, nil)
 	if len(sets) == 0 {
 		return fmt.Errorf("no writable fields")

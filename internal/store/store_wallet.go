@@ -112,10 +112,69 @@ func (s *Store) Recharge(ctx context.Context, advertiserID string, amount float6
 	return newBalance, nil
 }
 
-// WalletFlowRow 钱包流水一行（充值 + 扣费合并视图）。
+// WalletAdjustInput 手动调账入参。
+type WalletAdjustInput struct {
+	Mode   string  // "set"=把余额改为 Amount；"delta"=在现有余额上增减 Amount
+	Amount float64 // 目标余额或增减额（delta 可正可负）
+	Note   string
+}
+
+// AdjustWallet 手动调账：修正余额并写一条调账流水（amount = 实际变动额，可正可负）。
+// 不改变 wallet_enabled（闸门开关由列表页单独控制）；不并入"累计充值"。
+// 返回调整后的余额。
+func (s *Store) AdjustWallet(ctx context.Context, advertiserID string, in WalletAdjustInput, actor string) (float64, error) {
+	if in.Mode != "set" && in.Mode != "delta" {
+		return 0, fmt.Errorf("invalid mode: %s", in.Mode)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// 行锁读出当前余额，保证 delta 计算与写入原子（并发调账不丢更新）。
+	var old float64
+	if err := tx.QueryRow(ctx, `
+		SELECT wallet_balance::float8 FROM advertisers
+		 WHERE id = $1::bigint AND deleted_at IS NULL
+		 FOR UPDATE`, advertiserID).Scan(&old); err != nil {
+		return 0, fmt.Errorf("advertiser not found: %s", advertiserID)
+	}
+
+	delta := in.Amount
+	if in.Mode == "set" {
+		delta = in.Amount - old
+	}
+	if delta == 0 {
+		return 0, fmt.Errorf("调整后余额无变化")
+	}
+	newBalance := old + delta
+	if newBalance < 0 {
+		return 0, fmt.Errorf("调整后余额不能为负（当前 $%.2f）", old)
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE advertisers
+		   SET wallet_balance = $2::float8, updated_at = now()
+		 WHERE id = $1::bigint AND deleted_at IS NULL`, advertiserID, newBalance); err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO advertiser_wallet_adjustments (advertiser_id, amount, note, created_by)
+		VALUES ($1::bigint, $2::float8, $3, $4)`,
+		advertiserID, delta, nilIfEmpty(in.Note), nilIfEmpty(actor)); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return newBalance, nil
+}
+
+// WalletFlowRow 钱包流水一行（充值 + 扣费 + 调账合并视图）。
 type WalletFlowRow struct {
-	Kind      string  `json:"kind"`   // recharge=充值 / deduct=扣费
-	Amount    float64 `json:"amount"` // 金额（恒为正，方向由 kind 区分）
+	Kind      string  `json:"kind"`   // recharge=充值 / deduct=扣费 / adjust=调账
+	Amount    float64 `json:"amount"` // 金额（recharge/deduct 恒为正，方向由 kind 区分；adjust 为带符号变动额）
 	Currency  string  `json:"currency"`
 	OpType    string  `json:"op_type,omitempty"` // 扣费细分：deduct / deduct_agg
 	Note      string  `json:"note,omitempty"`
@@ -123,7 +182,8 @@ type WalletFlowRow struct {
 	At        string  `json:"at"` // YYYY-MM-DD HH24:MI:SS
 }
 
-// ListWalletFlow 合并充值流水与扣费流水（budget_ledger），按时间倒序。
+// ListWalletFlow 合并充值（advertiser_recharges）、调账（advertiser_wallet_adjustments）
+// 与扣费流水（budget_ledger），按时间倒序。
 // 不依赖 budget_ledger.count（部分库该聚合列缺失），只取金额与时间。
 func (s *Store) ListWalletFlow(ctx context.Context, advertiserID string, limit int) ([]*WalletFlowRow, error) {
 	if limit <= 0 || limit > 500 {
@@ -135,6 +195,11 @@ func (s *Store) ListWalletFlow(ctx context.Context, advertiserID string, limit i
 			       ''::text AS op_type, COALESCE(note, '') AS note,
 			       COALESCE(created_by, '') AS created_by, created_at AS at
 			FROM advertiser_recharges WHERE advertiser_id = $1::bigint
+			UNION ALL
+			SELECT 'adjust'::text, amount::float8, 'USD'::text,
+			       ''::text, COALESCE(note, ''), COALESCE(created_by, ''),
+			       created_at
+			FROM advertiser_wallet_adjustments WHERE advertiser_id = $1::bigint
 			UNION ALL
 			SELECT 'deduct'::text, amount::float8, 'USD'::text, op_type,
 			       ''::text, ''::text,

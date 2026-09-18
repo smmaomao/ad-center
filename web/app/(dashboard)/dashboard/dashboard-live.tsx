@@ -24,8 +24,8 @@ interface Advertiser {
   status: string;
   daily_budget: number;
   spent_today: number;
-  target_cpi: number;
-  actual_cpi: number;
+  target_kpi_type: string;
+  target_kpi_value: number;
   achievement: number;
   warning: string;
 }
@@ -111,7 +111,7 @@ export function DashboardLive() {
           className={`inline-block h-2 w-2 rounded-full ${connected ? "bg-emerald-400" : "bg-zinc-500"}`}
         />
         <span className="text-muted-foreground">
-          {connected ? "实时连接中（每 2 秒刷新）" : "连接中断，正在重连…"}
+          {connected ? "实时连接中（每 10 秒刷新）" : "连接中断，正在重连…"}
         </span>
       </div>
 
@@ -143,7 +143,6 @@ export function DashboardLive() {
                 <th className="py-2 pr-4 font-medium">日预算</th>
                 <th className="py-2 pr-4 font-medium">今日消耗</th>
                 <th className="py-2 pr-4 font-medium">目标CPI</th>
-                <th className="py-2 pr-4 font-medium">实际CPI</th>
                 <th className="py-2 pr-4 font-medium">达成率</th>
                 <th className="py-2 font-medium">预警</th>
               </tr>
@@ -164,8 +163,7 @@ export function DashboardLive() {
                     <td className="py-2 pr-4 text-muted-foreground">{a.status}</td>
                     <td className="py-2 pr-4">{fmtMoney(a.daily_budget)}</td>
                     <td className="py-2 pr-4">{fmtMoney(a.spent_today)}</td>
-                    <td className="py-2 pr-4">{a.target_cpi ? fmtMoney(a.target_cpi) : "—"}</td>
-                    <td className="py-2 pr-4">{a.actual_cpi ? fmtMoney(a.actual_cpi) : "—"}</td>
+                    <td className="py-2 pr-4">{a.target_kpi_value ? fmtMoney(a.target_kpi_value) : "—"}</td>
                     <td className="py-2 pr-4">{fmtPct(a.achievement)}</td>
                     <td className="py-2">
                       {w ? (

@@ -57,7 +57,7 @@ func benchSnapshot(nAdv int) *config.Snapshot {
 		campID := "cmp_" + id
 		camp := &config.Campaign{
 			ID: campID, AdvertiserID: id, Status: "active", DailyBudget: 1e9,
-			TargetCPI: 1 + float64(i%5)*0.2, ActualCPI: 0.3 + float64(i%7)*0.15,
+			TargetKPIValue: 1 + float64(i%5)*0.2,
 			BillingMode: "cpm", BiddingPrice: 15,
 			CreativeIDs: []string{},
 		}

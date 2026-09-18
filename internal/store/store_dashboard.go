@@ -35,8 +35,7 @@ type DashboardAdvertiser struct {
 	Status       string  `json:"status"`
 	DailyBudget  float64 `json:"daily_budget"`
 	SpentToday   float64 `json:"spent_today"`
-	TargetCPI    float64 `json:"target_cpi"`
-	ActualCPI    float64 `json:"actual_cpi"`
+	TargetKPIValue float64 `json:"target_kpi_value"`
 	Achievement  float64 `json:"achievement"`
 	Warning      string  `json:"warning"` // "" / "paused" / "budget" / "kpi"
 }
@@ -64,22 +63,21 @@ func clampAchievement(target, actual float64) float64 {
 // DashboardOverview 拉取看板总览 KPI（今日）。
 func (s *Store) DashboardOverview(ctx context.Context) (*DashboardOverview, error) {
 	o := &DashboardOverview{}
-	var tgt, act float64
+	var tgt float64
 	if err := s.pool.QueryRow(ctx, `
 		SELECT
 			COALESCE(SUM(daily_budget), 0)::float8,
 			COALESCE(SUM(spent_today), 0)::float8,
-			CASE WHEN SUM(spent_today) > 0 AND SUM(spent_today / NULLIF(actual_cpi, 0)) > 0
-			     THEN SUM(spent_today) / SUM(spent_today / NULLIF(actual_cpi, 0)) ELSE 0 END,
-			CASE WHEN SUM(spent_today) > 0 AND SUM(spent_today / NULLIF(target_cpi, 0)) > 0
-			     THEN SUM(spent_today) / SUM(spent_today / NULLIF(target_cpi, 0)) ELSE 0 END,
+			CASE WHEN SUM(spent_today) > 0 AND SUM(spent_today / NULLIF(target_kpi_value, 0)) > 0
+			     THEN SUM(spent_today) / SUM(spent_today / NULLIF(target_kpi_value, 0)) ELSE 0 END,
 			COUNT(*) FILTER (WHERE status = 'active'),
 			COUNT(DISTINCT advertiser_id) FILTER (WHERE status = 'active')
 		FROM campaigns WHERE deleted_at IS NULL`).
-		Scan(&o.DailyBudget, &o.SpentToday, &act, &tgt, &o.ActiveCampaigns, &o.ActiveAdvertisers); err != nil {
+		Scan(&o.DailyBudget, &o.SpentToday, &tgt, &o.ActiveCampaigns, &o.ActiveAdvertisers); err != nil {
 		return nil, err
 	}
-	o.Achievement = clampAchievement(tgt, act)
+	// 实测 CPI 不再落库，总体达成率暂置中性 1.0（后期引入运行时实测值再计算）。
+	o.Achievement = clampAchievement(tgt, 0)
 
 	if err := s.pool.QueryRow(ctx, `
 		SELECT COALESCE(SUM(requests), 0)::bigint, COALESCE(SUM(fills), 0)::bigint,
@@ -104,12 +102,9 @@ func (s *Store) DashboardAdvertisers(ctx context.Context) ([]DashboardAdvertiser
 		SELECT a.id::text, a.name, a.status,
 			COALESCE(SUM(c.daily_budget), 0)::float8,
 			COALESCE(SUM(c.spent_today), 0)::float8,
-			COALESCE(SUM(c.target_cpi), 0)::float8,
-			COALESCE(SUM(c.actual_cpi), 0)::float8,
-			CASE WHEN SUM(c.spent_today) > 0 AND SUM(c.spent_today / NULLIF(c.actual_cpi, 0)) > 0
-			     THEN SUM(c.spent_today) / SUM(c.spent_today / NULLIF(c.actual_cpi, 0)) ELSE 0 END,
-			CASE WHEN SUM(c.spent_today) > 0 AND SUM(c.spent_today / NULLIF(c.target_cpi, 0)) > 0
-			     THEN SUM(c.spent_today) / SUM(c.spent_today / NULLIF(c.target_cpi, 0)) ELSE 0 END
+			COALESCE(SUM(c.target_kpi_value), 0)::float8,
+			CASE WHEN SUM(c.spent_today) > 0 AND SUM(c.spent_today / NULLIF(c.target_kpi_value, 0)) > 0
+			     THEN SUM(c.spent_today) / SUM(c.spent_today / NULLIF(c.target_kpi_value, 0)) ELSE 0 END
 		FROM advertisers a
 		LEFT JOIN campaigns c ON c.advertiser_id = a.id AND c.deleted_at IS NULL
 		WHERE a.deleted_at IS NULL
@@ -122,12 +117,13 @@ func (s *Store) DashboardAdvertisers(ctx context.Context) ([]DashboardAdvertiser
 	out := make([]DashboardAdvertiser, 0)
 	for rows.Next() {
 		var a DashboardAdvertiser
-		var tgt, act float64
+		var tgt float64
 		if err := rows.Scan(&a.ID, &a.Name, &a.Status, &a.DailyBudget, &a.SpentToday,
-			&a.TargetCPI, &a.ActualCPI, &act, &tgt); err != nil {
+			&a.TargetKPIValue, &tgt); err != nil {
 			return nil, err
 		}
-		a.Achievement = clampAchievement(tgt, act)
+		// 实测 CPI 不再落库，达成率暂置中性 1.0（后期引入运行时实测值再计算）。
+		a.Achievement = clampAchievement(tgt, 0)
 		switch {
 		case a.Status != "active":
 			a.Warning = "paused"
@@ -146,14 +142,17 @@ func (s *Store) DashboardSlots(ctx context.Context) ([]DashboardSlot, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT s.id::text, s.slot_key, s.name, s.type, s.status,
 		       COALESCE(app.name, ''),
-		       COALESCE(s.fill_count, 0)::int,
+		       COALESCE((SELECT COUNT(*) FROM fill_priorities fp
+		                 WHERE fp.slot_code = s.slot_key AND fp.enabled = true), 0)::int,
 		       COALESCE(SUM(m.requests), 0)::bigint,
 		       COALESCE(SUM(m.fills), 0)::bigint
 		FROM ad_slots s
 		JOIN apps app ON app.code = s.app_code
-		LEFT JOIN metrics_minute m ON m.slot_id = s.id AND m.minute_ts >= date_trunc('day', now())
+		-- 000022 起指标按「展现样式 style」聚合（metrics_minute.slot_id 已改名为 style），
+		-- 广告位监控按 ad_slots.type（=样式）关联当日分钟指标；多广告主同样式会汇总到该样式。
+		LEFT JOIN metrics_minute m ON m.style = s.type AND m.minute_ts >= date_trunc('day', now())
 		WHERE s.deleted_at IS NULL
-		GROUP BY s.id, s.slot_key, s.name, s.type, s.status, app.name, s.fill_count
+		GROUP BY s.id, s.slot_key, s.name, s.type, s.status, app.name
 		ORDER BY s.name`)
 	if err != nil {
 		return nil, err
@@ -171,35 +170,4 @@ func (s *Store) DashboardSlots(ctx context.Context) ([]DashboardSlot, error) {
 	return out, rows.Err()
 }
 
-// ============================================================
-// 阶段 3.2：事件聚合回写
-// 用今日 metrics_minute 回算各 campaign 的 actual_cpi（实际 CPI = 今日消耗 / 今日转化数）。
-//
-// 数据归属说明（重要）：metrics_minute 以 slot+advertiser 粒度记录，不直接带 campaign_id，
-// 因此转化数按「该 campaign 所属广告主的今日转化」近似归集到 campaign。这是已知近似——
-// 单广告主多 campaign 时会把转化均摊到各 campaign 的分母，actual_cpi 在同一广告主内趋同。
-// 若后续需要 campaign 级精确 CPI，须在事件流/metrics_minute 增加 campaign_id 维度。
-// ============================================================
 
-// SyncCampaignKPIs 回写 campaigns.actual_cpi（每约 60s 由后台定时任务调用）。
-// spent_today 由预算控制器同步器单独维护，本函数只算 actual_cpi。
-func (s *Store) SyncCampaignKPIs(ctx context.Context) error {
-	_, err := s.pool.Exec(ctx, `
-		UPDATE campaigns c
-		SET actual_cpi = CASE
-			WHEN conv.conversions > 0 THEN c.spent_today / conv.conversions
-			ELSE 0
-		END
-		FROM (
-			SELECT c2.id AS cid,
-			       COALESCE(SUM(mm.conversions), 0)::float8 AS conversions
-			FROM campaigns c2
-			LEFT JOIN metrics_minute mm
-			       ON mm.advertiser_id = c2.advertiser_id
-			      AND mm.minute_ts >= date_trunc('day', now())
-			WHERE c2.deleted_at IS NULL
-			GROUP BY c2.id
-		) conv
-		WHERE c.id = conv.cid AND c.deleted_at IS NULL`)
-	return err
-}

@@ -14,22 +14,15 @@ import (
 
 // App 客户端 App 注册信息（多租户隔离锚点）。
 type App struct {
-	ID         string `json:"id"`
+	ID          string `json:"id"`
 	Name        string `json:"name"`
-	APIKeyHash  string `json:"-"`      // sha256 hex，用于 X-Api-Key 匹配
-	Status      string `json:"status"` // active / paused
+	APIKeyHash  string `json:"-"`                      // sha256 hex，用于 X-Api-Key 匹配
+	Status      string `json:"status"`                 // active / paused
 	CallbackURL string `json:"callback_url,omitempty"` // 业务后端 S2S 接收地址（激励视频完播回调用）
 }
 
 // Active 报告该 App 是否可服务。
 func (a *App) Active() bool { return a.Status == "active" }
-
-// FreqWindow 广告主级滑动频控窗口（advertisers.freq_windows jsonb 数组元素）。
-// 字段名与 migration 000003 默认值一致：{"window_minutes":180,"max":3}。
-type FreqWindow struct {
-	WindowMinutes int `json:"window_minutes"`
-	MaxCount      int `json:"max"`
-}
 
 // Targeting 定向条件（advertisers.targeting jsonb）。空切片 = 不限。
 type Targeting struct {
@@ -50,22 +43,16 @@ func (t Targeting) Match(country, language string) bool {
 
 func contains(list []string, s string) bool { return slices.Contains(list, s) }
 
-// Advertiser 广告主（全局共享：计费锚点 / 素材跨 App 一份）。
+// Advertiser 广告主（投放主体，全局共享：素材跨 App 一份）。
 //
-// 运营期 KPI（目标/实际 CPI）、投放结束日期、消耗节奏、KPI 考核口径、下发有效期
-// 均已下沉到广告任务（campaign，见 Campaign）——campaign 是 KPI / 预算 / 排期的
-// 执行粒度，广告主只承担「身份 + 计费锚点」（bidding_price / billing_mode /
-// cpa_event_prices / freq_windows）。
+// 职责收敛：广告主只承载「身份 + 状态 + 定向 + 钱包（余额 / 充值扣费流水）」。
+// 出价 / 计费方式 / CPA 单价 / KPI / 排期 / 频控 / 下发有效期等**所有投放与计费
+// 公式一律在广告任务（campaign）级**，广告主不参与任何排序或扣费计算。
 type Advertiser struct {
-	ID                 string                `json:"id"`
-	Name               string                `json:"name"`
-	Status             string                `json:"status"` // active / paused / budget_exhausted
-	BiddingPrice       float64               `json:"bidding_price"` // 计费单价上限（cpm=每千次、cpc/cpa=每事件）
-	BiddingPriceMin    float64               `json:"bidding_price_min,omitempty"` // 单价下限；0=未配置→退化为固定 BiddingPrice
-	BillingMode        string                `json:"billing_mode"`  // cpm / cpc / cpa（扣费锚点，migration 000008）
-	CPAEventPrices     map[string][2]float64 `json:"cpa_event_prices,omitempty"` // 事件→[min,max] 区间
-	Targeting          Targeting             `json:"targeting"`
-	FreqWindows        []FreqWindow          `json:"freq_windows"`
+	ID          string       `json:"id"`
+	Name        string       `json:"name"`
+	Status      string       `json:"status"` // active / paused / budget_exhausted
+	Targeting Targeting `json:"targeting"`
 }
 
 // Active 报告广告主账户当前是否可参排（状态活跃）。投放结束日期 / 排期由广告任务
@@ -78,9 +65,9 @@ func (a *Advertiser) Active(now time.Time) bool {
 // campaign 未配置 deliver_ttl_minutes（<=0）时采用此兜底值。
 const DefaultDeliverTTLMinutes = 10
 
-// KPI 达成率口径（PRD 6.1 / FR-02 / FR-08）：达成率 = targetCPI / actualCPI；
-// 冷启动（actualCPI≤0）按中性 1.0；钳制到 [minAchievement, maxAchievement]。
-// 该口径现由广告任务（campaign，KPI 执行粒度）持有，见 Campaign.Achievement()；
+// KPI 达成率口径（PRD 6.1 / FR-02 / FR-08）：达成率 = target_kpi_value / 实测值。
+// 实测 CPI 不再落库，目前无实测值可比对 → 中性 1.0；后期自动优化时按需以运行时实测值替换。
+// 该口径由广告任务（campaign，KPI 执行粒度）持有，见 Campaign.Achievement()；
 // 归集层（广告主/产品）的达成率由 store_campaigns.go 的 Rollup 用同一口径计算。
 const (
 	minAchievement = 0.25
@@ -127,17 +114,17 @@ type FillPriority struct {
 
 // Creative 素材（纯资产：尺寸 / 时长 / 样式 / 定向；商业与策略在 campaign 维度）。
 type Creative struct {
-	ID           string  `json:"id"`
-	AdvertiserID string  `json:"advertiser_id"`
-	Name         string  `json:"name"`
-	MediaType    string  `json:"media_type"`   // video / image / html
-	StoragePath  string  `json:"storage_path"` // R2 对象 key 或完整 URL（html）
-	Orientation  string  `json:"orientation"`  // portrait / landscape / square / any
-	Width        int     `json:"width,omitempty"`
-	Height       int     `json:"height,omitempty"`
-	DurationMS   int     `json:"duration_ms,omitempty"`
-	Status       string  `json:"status"` // testing / active / paused
-	ABGroup      string  `json:"ab_group,omitempty"`
+	ID           string `json:"id"`
+	AdvertiserID string `json:"advertiser_id"`
+	Name         string `json:"name"`
+	MediaType    string `json:"media_type"`   // video / image / html
+	StoragePath  string `json:"storage_path"` // R2 对象 key 或完整 URL（html）
+	Orientation  string `json:"orientation"`  // portrait / landscape / square / any
+	Width        int    `json:"width,omitempty"`
+	Height       int    `json:"height,omitempty"`
+	DurationMS   int    `json:"duration_ms,omitempty"`
+	Status       string `json:"status"` // testing / active / paused
+	ABGroup      string `json:"ab_group,omitempty"`
 
 	// 展现样式（多选）：splash 开屏 / rewarded_video 激励视频 / interstitial 插屏
 	// / feed 信息流 / banner 横幅。素材直接声明支持哪些样式，不再依赖 slot。
@@ -161,13 +148,14 @@ type PricingBenchmark struct {
 	CPAActivate      float64 `json:"cpa_activate"`
 	CPARegister      float64 `json:"cpa_register"`
 	CPAFirstPurchase float64 `json:"cpa_first_purchase"`
+	CPAPurchase      float64 `json:"cpa_purchase"`
 }
 
 // DefaultPricingBenchmark 标准线未配置时的兜底值（避免除零导致基准分爆炸）。
 func DefaultPricingBenchmark() *PricingBenchmark {
 	return &PricingBenchmark{
 		CPM: 15, CPC: 5,
-		CPAInstall: 10, CPAActivate: 12, CPARegister: 15, CPAFirstPurchase: 20,
+		CPAInstall: 10, CPAActivate: 12, CPARegister: 15, CPAFirstPurchase: 20, CPAPurchase: 25,
 	}
 }
 
@@ -183,17 +171,16 @@ func (b *PricingBenchmark) BenchmarkFor(billingMode, cpaEvent string) float64 {
 		v = b.CPM
 	case "cpc":
 		v = b.CPC
-	case "cpa":
-		switch cpaEvent {
-		case "install":
-			v = b.CPAInstall
-		case "activate":
-			v = b.CPAActivate
-		case "register":
-			v = b.CPARegister
-		case "first_purchase":
-			v = b.CPAFirstPurchase
-		}
+	case "cpi":
+		v = b.CPAInstall
+	case "cpa-activate":
+		v = b.CPAActivate
+	case "cpa-register":
+		v = b.CPARegister
+	case "cpa-first-deposit":
+		v = b.CPAFirstPurchase
+	case "cpa-pay":
+		v = b.CPAPurchase
 	}
 	if v <= 0 {
 		// 该项没配 → 用兜底，避免除零
@@ -203,19 +190,16 @@ func (b *PricingBenchmark) BenchmarkFor(billingMode, cpaEvent string) float64 {
 			return d.CPM
 		case "cpc":
 			return d.CPC
-		case "cpa":
-			switch cpaEvent {
-			case "install":
-				return d.CPAInstall
-			case "activate":
-				return d.CPAActivate
-			case "register":
-				return d.CPARegister
-			case "first_purchase":
-				return d.CPAFirstPurchase
-			default:
-				return d.CPAInstall
-			}
+		case "cpi":
+			return d.CPAInstall
+		case "cpa-activate":
+			return d.CPAActivate
+		case "cpa-register":
+			return d.CPARegister
+		case "cpa-first-deposit":
+			return d.CPAFirstPurchase
+		case "cpa-pay":
+			return d.CPAPurchase
 		default:
 			return d.CPC
 		}
@@ -226,27 +210,28 @@ func (b *PricingBenchmark) BenchmarkFor(billingMode, cpaEvent string) float64 {
 // Campaign 广告任务（投放执行粒度）。预算闸与扣费按 campaign 各自控制，
 // 因此 snapshot 同时持有 Campaigns 与 creative→campaign 归属映射。
 type Campaign struct {
-	ID                string     `json:"id"`
-	AdvertiserID      string     `json:"advertiser_id"`
-	Name              string     `json:"name"`
-	Status            string     `json:"status"` // active / paused
-	DailyBudget       float64    `json:"daily_budget"`
-	SpentToday        float64    `json:"spent_today"`
-	ConsumeSpeed      string     `json:"consume_speed"`
-	TargetCPI         float64    `json:"target_cpi"`
-	ActualCPI         float64    `json:"actual_cpi"`
-	BillingMode       string     `json:"billing_mode"`   // cpm / cpc / cpa（计费方式，引擎排序取数）
-	BiddingPrice      float64    `json:"bidding_price"`  // 出价（引擎出价基准分取数）
-	PriorityScore     float64    `json:"priority_score"` // 优先级系数（替代原素材 weight）
-	BiddingMode       string     `json:"bidding_mode"` // cpi / cpa / revenue_share（KPI 考核口径）
-	DeliverTTLMinutes int        `json:"deliver_ttl_minutes"`
-	CreativeIDs       []string   `json:"creative_ids"`
-	StartAt           *time.Time `json:"start_at,omitempty"`
-	EndAt             *time.Time `json:"end_at,omitempty"`
-	LandingURL        string     `json:"landing_url,omitempty"` // 落地页 URL（click_url 来源）
-	FreqDailyLimit     int        `json:"freq_daily_limit"`      // 每日上限（滚动 24h 内最多下发次数，0 = 不限）
-	FreqIntervalMinute int        `json:"freq_interval_minutes"` // 滑动窗口长度（分钟，0 = 不启用该窗口）
-	FreqFatigueWindow  int        `json:"freq_fatigue_window"`   // 窗口内上限（该窗口内最多下发同一任务的次数，0 = 不限）
+	ID                 string                `json:"id"`
+	AdvertiserID       string                `json:"advertiser_id"`
+	Name               string                `json:"name"`
+	Status             string                `json:"status"` // active / paused
+	DailyBudget        float64               `json:"daily_budget"`
+	SpentToday         float64               `json:"spent_today"`
+	ConsumeSpeed       int                   `json:"consume_speed"` // 曝光系数 1-10（默认 5）：影响下发节奏
+	TargetKPIType      string                `json:"target_kpi_type"` // KPI 指标类型（与 billing_mode 同枚举，通常与其一致）
+	TargetKPIValue     float64               `json:"target_kpi_value"` // 目标 KPI 值（如目标 CPI=$1.80）
+	BillingMode        string                `json:"billing_mode"`                // cpm / cpc / cpa（唯一计费方式：决定按什么事件扣费 + 打分标准线）
+	BiddingPrice       float64               `json:"bidding_price"`               // 出价（该计费方式的单价上限；cpm=每千次、cpc/cpa=每事件）
+	BiddingPriceMin    float64               `json:"bidding_price_min,omitempty"` // 出价下限：0=固定单价(=BiddingPrice)，>0 则在 [min,max] 随机
+	CPAEventPrices     map[string][2]float64 `json:"cpa_event_prices,omitempty"`  // cpa 计费：事件→[min,max] 单价区间（按 S2S 回调事件扣费）
+	PriorityScore      float64               `json:"priority_score"`              // 优先级系数（替代原素材 weight）
+	DeliverTTLMinutes  int                   `json:"deliver_ttl_minutes"`
+	CreativeIDs        []string              `json:"creative_ids"`
+	StartAt            *time.Time            `json:"start_at,omitempty"`
+	EndAt              *time.Time            `json:"end_at,omitempty"`
+	LandingURL         string                `json:"landing_url,omitempty"` // 落地页 URL（click_url 来源）
+	FreqDailyLimit     int                   `json:"freq_daily_limit"`      // 每日上限（滚动 24h 内最多下发次数，0 = 不限）
+	FreqIntervalMinute int                   `json:"freq_interval_minutes"` // 滑动窗口长度（分钟，0 = 不启用该窗口）
+	FreqFatigueWindow  int                   `json:"freq_fatigue_window"`   // 窗口内上限（该窗口内最多下发同一任务的次数，0 = 不限）
 }
 
 // Active 报告广告任务当前是否可参排：状态活跃且在投放排期内。
@@ -263,13 +248,19 @@ func (c *Campaign) Active(now time.Time) bool {
 	return true
 }
 
-// Achievement 计算 KPI 达成率（与旧 Advertiser 口径一致：target/actual、
-// actual≤0 取中性 1、钳制 [minAchievement, maxAchievement]）。campaign 是 KPI 执行粒度。
+// Achievement 计算 KPI 达成率（PRD 6.1 / FR-02 / FR-08）：达成率 = target_kpi_value / 实测值。
+//
+// 字段状态：target_kpi_type / target_kpi_value 已落库（迁移 000051）并可在后台配置，
+// 但「基于实测 CPI 的实时出价 / 自动优化策略」本期【不实现】，推迟到后期（见 docs/PLAN.md
+// 「P1 待办 · KPI 自动优化」）。因此此处不持有任何运行时实测值（actual_cpi 已不落库，迁移 000052），
+// 达成率一律返回中性 1.0 —— 引擎的 KPI 紧急度分支也随之中立，不影响现有排序
+// （价格得分 × 优先级系数 × 消耗节奏 仍正常生效）。
+//
+// 后期接入时：在此引入运行时实测值（消耗/转化按 target_kpi_type 口径归集），
+// 用 target_kpi_value / 实测值 计算真实达成率，再驱动 engine.urgency；
+// 届时本函数与 engine.go 的 urgency 分支会自动恢复为按真实达成率区分。
 func (c *Campaign) Achievement() float64 {
-	if c.TargetCPI <= 0 || c.ActualCPI <= 0 {
-		return 1 // 无目标成本或尚无转化数据 → 中性
-	}
-	return clampAchievement(c.TargetCPI / c.ActualCPI)
+	return 1 // 中性：实时出价/自动优化策略尚未实现（见上注释与 docs/PLAN.md）
 }
 
 // DeliverTTL 返回有效的客户端展示有效期（分钟）；未配置（<=0）时兜底 DefaultDeliverTTLMinutes。
@@ -288,9 +279,9 @@ type Snapshot struct {
 	Slots                 map[string]*Slot       // slot_code → Slot
 	SlotsByKey            map[string]*Slot       // slot_key → Slot
 	CreativesByAdvertiser map[string][]*Creative // advertiser_id → 活跃素材（weight 降序）
-	Campaigns            map[string]*Campaign   // campaign_id → Campaign（预算闸执行粒度）
-	CreativeCampaign     map[string]string      // creative_id → campaign_id（创意归属，预算闸/扣费按 campaign）
-	PricingBenchmark     *PricingBenchmark      // 平台计费标准线（系统设置，全局一份）
+	Campaigns             map[string]*Campaign   // campaign_id → Campaign（预算闸执行粒度）
+	CreativeCampaign      map[string]string      // creative_id → campaign_id（创意归属，预算闸/扣费按 campaign）
+	PricingBenchmark      *PricingBenchmark      // 平台计费标准线（系统设置，全局一份）
 	// Settings 运行时设置（settings 表），key → 原始 JSON；缺失时为 nil。
 	// 决策缓存配置等后台可配置项在此读取，随快照热更新。
 	Settings map[string]json.RawMessage // key → value(json.RawMessage)
@@ -319,6 +310,11 @@ func (s *Snapshot) DecisionCacheConfig() DecisionCacheConfig {
 	if c.TTLSeconds <= 0 {
 		c.TTLSeconds = DefaultDecisionCacheConfig.TTLSeconds
 	}
+	// 用户要求：所有 Redis key 过期 ≤ 7 天，决策缓存 TTL 上限收紧到 7 天（604800s）。
+	const maxTTLSeconds = 7 * 24 * 3600
+	if c.TTLSeconds > maxTTLSeconds {
+		c.TTLSeconds = maxTTLSeconds
+	}
 	return c
 }
 
@@ -332,18 +328,6 @@ func ParseTargeting(b []byte) (Targeting, error) {
 		return Targeting{}, err
 	}
 	return t, nil
-}
-
-// ParseFreqWindows 解析 freq_windows jsonb。
-func ParseFreqWindows(b []byte) ([]FreqWindow, error) {
-	if len(b) == 0 {
-		return nil, nil
-	}
-	var w []FreqWindow
-	if err := json.Unmarshal(b, &w); err != nil {
-		return nil, err
-	}
-	return w, nil
 }
 
 // ConversionEvents 归因方 S2S 回调（/v1/s2s/event 的 event_name）支持的转化动作
@@ -366,44 +350,54 @@ func ParseCPAEventPrices(b []byte) (map[string][2]float64, error) {
 	return m, nil
 }
 
-// BillingAmount 按计费方式返回"该事件到达时应扣的金额"：
+// BillingAmount 按计费方式返回"该事件到达时应扣的金额"（计费执行粒度 = campaign）：
 //
-//	cpm → 仅 impression 计费，单次 = randPrice([min,max])/1000（千次价区间折算）
-//	cpc → 仅 click 计费，单次 = randPrice([min,max])
-//	cpa → 仅 S2S 转化事件计费，金额 = randPrice(CPAEventPrices[event] 区间)
+//	cpm               → impression 到达即扣 BiddingPrice/1000（真实曝光才花钱）
+//	cpc               → click 到达即扣 BiddingPrice
+//	cpi               → S2S install 转化即扣 BiddingPrice
+//	cpa-activate      → S2S activate 转化即扣 BiddingPrice
+//	cpa-register      → S2S register 转化即扣 BiddingPrice
+//	cpa-first-deposit → S2S first_purchase 转化即扣 BiddingPrice
+//	cpa-pay           → S2S purchase 转化即扣 BiddingPrice
 //
-// 区间在 [min,max] 内均匀随机（migration 000010）；未配置下限（min≤0 或 min≥max）
-// 时退化为固定 BiddingPrice / 单值，与旧行为一致。每次扣费独立随机，实际金额以
-// budget_ledger 落账为准。
+// 单价语义（与后台表单一致）：BiddingPrice 是该计费方式的单价上限，BiddingPriceMin
+// 是下限；填了下限就在 [min,max] 内均匀随机，不填（min≤0 或 min≥max）则退化为固定
+// BiddingPrice。每次扣费独立随机，实际金额以 budget_ledger 落账为准。
 //
-// 返回 (金额, 是否计费)。非本模式的计费事件或金额未配置返回 (0, false)——
-// 例如 cpa 广告主的 impression/click 只是过程指标，不产生扣费；
-// 未配置单价的事件（如 map 缺 key）同样不扣，防止垃圾回调白白花钱。
-func (a *Advertiser) BillingAmount(event string) (float64, bool) {
-	if a.BiddingPrice <= 0 {
+// 返回 (金额, 是否计费)。非本模式的计费事件（如 cpm 任务的 click）返回 (0, false)，
+// 防止垃圾回调白白花钱；camp 为 nil（素材未挂任务）时不计费。
+func (c *Campaign) BillingAmount(event string) (float64, bool) {
+	if c == nil || c.BiddingPrice <= 0 {
 		return 0, false
 	}
-	switch a.BillingMode {
+	// 计费方式 → 计费事件：cpm/cpc 是客户端回执，cpi/cpa-* 是 S2S 转化事件。
+	var bill string
+	switch c.BillingMode {
 	case "cpm":
-		if event != "impression" {
-			return 0, false
-		}
-		return randPrice(a.BiddingPriceMin, a.BiddingPrice) / 1000, true
+		bill = "impression"
 	case "cpc":
-		if event != "click" {
-			return 0, false
-		}
-		return randPrice(a.BiddingPriceMin, a.BiddingPrice), true
-	case "cpa":
-		p, ok := a.CPAEventPrices[event]
-		if !ok || p[1] <= 0 {
-			return 0, false
-		}
-		// 区间 [min,max] 内均匀随机；min≤0 或 min≥max 时 randPrice 退化为固定 max。
-		return randPrice(p[0], p[1]), true
+		bill = "click"
+	case "cpi":
+		bill = "install"
+	case "cpa-activate":
+		bill = "activate"
+	case "cpa-register":
+		bill = "register"
+	case "cpa-first-deposit":
+		bill = "first_purchase"
+	case "cpa-pay":
+		bill = "purchase"
 	default:
 		return 0, false
 	}
+	if event != bill {
+		return 0, false
+	}
+	amt := randPrice(c.BiddingPriceMin, c.BiddingPrice)
+	if c.BillingMode == "cpm" {
+		amt /= 1000 // 千次曝光价折算到单次
+	}
+	return amt, true
 }
 
 // randPrice 在 [min,max] 均匀随机；min≤0 或 min≥max 时退化为固定 max
