@@ -141,6 +141,9 @@ func (s *Server) NewRouter() http.Handler {
 	mux.HandleFunc("GET /v1/admin/settings/{key}", s.handleGetSetting)
 	mux.HandleFunc("PATCH /v1/admin/settings/{key}", s.handleUpdateSetting)
 
+	// 看板实时流（已暂停使用，暂不推送 SSE）
+	mux.HandleFunc("GET /v1/admin/metrics/stream", s.handleMetricsStream)
+
 	// 健康检查（Fly health check）
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 
