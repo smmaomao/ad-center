@@ -173,7 +173,7 @@ func (r *statusRecorder) Flush() {
 }
 
 // loggingMiddleware 对每个请求打印耗时（毫秒）、方法、路径、状态码，
-// 便于通过 fly logs 观察哪些接口慢。/healthz 健康检查每 15s 一次，跳过以免刷屏。
+// 便于通过 fly logs 观察哪些接口慢。/healthz 健康检查每 60s 一次，跳过以免刷屏。
 func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 	skip := map[string]bool{"/healthz": true, "/swagger/": true}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -202,11 +202,7 @@ type healthzResponse struct {
 	ConfigLoaded  bool      `json:"config_loaded"`
 	ConfigApps    int       `json:"config_apps"`
 	ConfigAdv     int       `json:"config_advertisers"`
-	MetricsBuffer int       `json:"metrics_buffer"`
-	// 队列指标（M2；M3 面板数据源：Pending 持续增长 = 消费卡住）
-	QueueBuffered int64 `json:"queue_buffered"`
-	QueuePending  int64 `json:"queue_pending"`
-	QueueDropped  int64 `json:"queue_dropped"`
+	MetricsBuffer int `json:"metrics_buffer"`
 }
 
 var startTime = time.Now().UTC()
@@ -224,10 +220,6 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	if snap != nil {
 		resp.ConfigApps = len(snap.Apps)
 		resp.ConfigAdv = len(snap.Advertisers)
-	}
-	if s.Queue != nil {
-		qs := s.Queue.Stats()
-		resp.QueueBuffered, resp.QueuePending, resp.QueueDropped = qs.Buffered, qs.Pending, qs.Dropped
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

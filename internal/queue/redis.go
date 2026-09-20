@@ -56,7 +56,7 @@ func NewRedis(redisURL, prefix, group string, batchSize int) (*Redis, error) {
 		consumer:  host + "-" + strconv.Itoa(os.Getpid()),
 		maxLen:    200000, // ≈ 数小时的事件量，足够吸收峰值
 		batchSize: batchSize,
-		block:     300 * time.Millisecond,
+		block:     5 * time.Second, // 空闲最长阻塞 5s；Upstash 若不真正阻塞，由下方退避兜底
 		buf:       make([]store.AdEvent, 0, batchSize),
 	}
 	// 幂等建组：已存在返回 BUSYGROUP，忽略
@@ -138,8 +138,17 @@ func (r *Redis) Run(ctx context.Context, h Handler) {
 			Block:    r.block,
 		}).Result()
 		if err != nil {
-			if errors.Is(err, redis.Nil) || ctx.Err() != nil {
-				continue // 无新消息 / 退出中
+			if ctx.Err() != nil {
+				return // 退出中
+			}
+			if errors.Is(err, redis.Nil) {
+				// 空闲（部分服务端不真正阻塞 BLOCK，会立即返回空）：退避，
+				// 避免空转狂发 XREADGROUP 刷爆 Upstash 命令数。
+				select {
+				case <-time.After(200 * time.Millisecond):
+				case <-ctx.Done():
+				}
+				continue
 			}
 			// 连接类错误：短暂退避后重试，避免打满日志
 			select {
