@@ -1,9 +1,14 @@
 name: Fly Deploy
 
+# 双分支自动部署：
+#   - preview 分支 -> ad-center-test（测试环境）
+#   - main    分支 -> ad-center-prod（正式环境）
+# 通过 --app 显式指定目标 app，即使 fly.toml 的 app 字段写错也不会误部署。
 on:
   push:
     branches:
       - main
+      - preview
     # 仅后端相关文件变化才触发后端部署，避免改前端也重启后台
     paths:
       - "cmd/**"
@@ -14,10 +19,15 @@ on:
       - "go.sum"
   workflow_dispatch: # 允许在 GitHub Actions 页面手动触发
 
+permissions:
+  contents: read
+
 jobs:
   deploy:
     name: Deploy to Fly.io
     runs-on: ubuntu-latest
+    # main 走 production 环境（可在 GitHub 设置里加审批保护），其余走 preview
+    environment: ${{ github.ref == 'refs/heads/main' && 'production' || 'preview' }}
     # 同一分支的部署串行执行，避免互相覆盖
     concurrency:
       group: fly-deploy-${{ github.ref }}
@@ -29,7 +39,16 @@ jobs:
       - name: Setup flyctl
         uses: superfly/flyctl-actions/setup-flyctl@master
 
+      - name: Determine target app
+        id: target
+        run: |
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "app=ad-center-prod" >> "$GITHUB_OUTPUT"
+          else
+            echo "app=ad-center-test" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Deploy
-        run: flyctl deploy --remote-only
+        run: flyctl deploy --remote-only --app ${{ steps.target.outputs.app }}
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
