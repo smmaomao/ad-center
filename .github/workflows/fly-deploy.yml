@@ -3,7 +3,7 @@ name: Fly Deploy
 # 双分支自动部署：
 #   - preview 分支 -> ad-center-test（测试环境）
 #   - main    分支 -> ad-center-prod（正式环境）
-# 通过 --app 显式指定目标 app，即使 fly.toml 的 app 字段写错也不会误部署。
+# 通过 --app 显式指定目标 app，fly.toml 不再硬编码 app，部署目标完全由分支通过 --app 决定。
 on:
   push:
     branches:
