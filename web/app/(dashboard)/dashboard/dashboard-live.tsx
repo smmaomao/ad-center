@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 
 interface Overview {
   daily_budget: number;
@@ -82,37 +82,15 @@ const WARNING_LABEL: Record<string, { text: string; cls: string }> = {
 };
 
 export function DashboardLive() {
-  const [snap, setSnap] = useState<Snapshot>(EMPTY);
-  const [connected, setConnected] = useState(false);
-  const esRef = useRef<EventSource | null>(null);
-
-  useEffect(() => {
-    const es = new EventSource("/api/metrics/stream");
-    esRef.current = es;
-    es.onopen = () => setConnected(true);
-    es.onmessage = (e) => {
-      try {
-        setSnap(JSON.parse(e.data) as Snapshot);
-        setConnected(true);
-      } catch {
-        /* 忽略非法帧 */
-      }
-    };
-    es.onerror = () => setConnected(false);
-    return () => es.close();
-  }, []);
+  const [snap] = useState<Snapshot>(EMPTY);
 
   const ov = snap.overview;
 
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-2 text-sm">
-        <span
-          className={`inline-block h-2 w-2 rounded-full ${connected ? "bg-emerald-400" : "bg-zinc-500"}`}
-        />
-        <span className="text-muted-foreground">
-          {connected ? "实时连接中（每 10 秒刷新）" : "连接中断，正在重连…"}
-        </span>
+        <span className="inline-block h-2 w-2 rounded-full bg-zinc-500" />
+        <span className="text-muted-foreground">实时看板已暂停（暂不刷新）</span>
       </div>
 
       {/* KPI 卡片 */}
