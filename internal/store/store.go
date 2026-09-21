@@ -84,7 +84,7 @@ func (s *Store) LoadSnapshot(ctx context.Context) (*config.Snapshot, error) {
 	// 一律在 campaign 级加载——广告主不参与任何排序或扣费计算。
 	rows, err = s.pool.Query(ctx, `
 		SELECT id::text, name, status, targeting
-		FROM advertisers WHERE deleted_at IS NULL`)
+		FROM advertisers WHERE status = 'active' AND deleted_at IS NULL`)
 	if err != nil {
 		return nil, fmt.Errorf("load advertisers: %w", err)
 	}
@@ -182,7 +182,7 @@ func (s *Store) LoadSnapshot(ctx context.Context) (*config.Snapshot, error) {
 		       COALESCE(freq_daily_limit, 0)::int,
 		       COALESCE(freq_interval_minutes, 0)::int,
 		       COALESCE(freq_fatigue_window, 0)::int
-		FROM campaigns WHERE deleted_at IS NULL`)
+		FROM campaigns WHERE status = 'active' AND deleted_at IS NULL`)
 	if err != nil {
 		return nil, fmt.Errorf("load campaigns: %w", err)
 	}
