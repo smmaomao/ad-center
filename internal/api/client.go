@@ -299,12 +299,10 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 	snap := s.Cache.Snapshot()
 	now := time.Now()
 
-	// 跨全部样式决策，按素材+样式去重，汇总后按得分取前 count 条。
-	type tagged struct {
-		item  engine.Item
-		style string
-	}
-	collected := make([]tagged, 0)
+	// 跨全部样式决策，按素材(creative)去重汇总，取前 count 条。
+	// 一个 creative 对应一条广告：ad_style / target_scene 合并该素材支持的全部样式，
+	// required_duration 取各样式最大值；bid/指标以素材首个样式作为归因代表。
+	collected := make([]engine.Item, 0)
 	seen := map[string]bool{}
 	for _, style := range engine.Styles {
 		resp := s.Engine.Decide(snap, engine.Request{
@@ -314,16 +312,15 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 			if it.Creative == nil {
 				continue
 			}
-			key := it.Creative.ID + "|" + style
-			if seen[key] {
+			if seen[it.Creative.ID] {
 				continue
 			}
-			seen[key] = true
-			collected = append(collected, tagged{it, style})
+			seen[it.Creative.ID] = true
+			collected = append(collected, it)
 		}
 	}
 	sort.SliceStable(collected, func(i, j int) bool {
-		return collected[i].item.Score > collected[j].item.Score
+		return collected[i].Score > collected[j].Score
 	})
 	if len(collected) > count {
 		collected = collected[:count]
@@ -331,8 +328,7 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 
 	adList := make([]map[string]any, 0, len(collected))
 	allLoopable := true
-	for _, t := range collected {
-		it := t.item
+	for _, it := range collected {
 		cr := it.Creative
 		materialURL := it.MediaURL
 		if materialURL == "" && s.Storage != nil {
@@ -354,10 +350,30 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 			landingURL = camp.LandingURL
 			clickURL = camp.LandingURL + sep + "clk={CLICK_ID}"
 		}
-		reqDur := requiredDurationFor(t.style, cr.DurationMS)
+		// 合并该素材支持的全部样式：ad_style / target_scene 取并集，required_duration 取最大值。
+		adStyles := make([]string, 0, len(cr.Styles))
+		sceneSet := map[string]bool{}
+		repStyle := ""
+		maxDur := 0
+		for _, st := range cr.Styles {
+			adStyles = append(adStyles, styleToDoc(st))
+			for _, sc := range sceneForStyle(st) {
+				sceneSet[sc] = true
+			}
+			if d := requiredDurationFor(st, cr.DurationMS); d > maxDur {
+				maxDur = d
+			}
+			if repStyle == "" {
+				repStyle = st
+			}
+		}
+		scenes := make([]string, 0, len(sceneSet))
+		for sc := range sceneSet {
+			scenes = append(scenes, sc)
+		}
 		bid := s.Bids.Put(r.Context(), &BidContext{
 			AppID: app.ID, AdvertiserID: it.AdvertiserID, CreativeID: cr.ID, CampaignID: campID,
-			Style: t.style, DeviceID: deviceID, UserID: req.UserID, AdjustAdid: req.AdjustAdid,
+			Style: repStyle, DeviceID: deviceID, UserID: req.UserID, AdjustAdid: req.AdjustAdid,
 			LandingURL: landingURL,
 		})
 		// loopable：客户端在缓存期内能否循环播放。当前由素材类型推导：
@@ -369,19 +385,19 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 		adList = append(adList, map[string]any{
 			"bid_id":            bid,
 			"creative_id":       cr.ID,
-			"ad_style":          []string{styleToDoc(t.style)},
+			"ad_style":          adStyles,
 			"material_type":     mediaToDoc(cr.MediaType),
 			"material_url":      materialURL,
 			"width":             cr.Width,
 			"height":            cr.Height,
-			"target_scene":      sceneForStyle(t.style),
-			"required_duration": reqDur,
+			"target_scene":      scenes,
+			"required_duration": maxDur,
 			"click_url":         clickURL,
 		})
-		// fill 指标 + 事件（仅记日志/填充率，不计费）。
-		s.Metrics.Record(app.ID, t.style, it.AdvertiserID, 1, 0, now)
+		// fill 指标 + 事件（仅记日志/填充率，不计费）。repStyle 取素材首个样式作为归因代表。
+		s.Metrics.Record(app.ID, repStyle, it.AdvertiserID, 1, 0, now)
 		s.enqueueEvent(store.AdEvent{
-			AppID: app.ID, Style: t.style, AdvertiserID: it.AdvertiserID,
+			AppID: app.ID, Style: repStyle, AdvertiserID: it.AdvertiserID,
 			CreativeID: cr.ID, DeviceID: deviceID, EventType: "fill",
 		})
 	}
