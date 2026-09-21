@@ -12,6 +12,7 @@
 package engine
 
 import (
+	"log/slog"
 	"sort"
 	"time"
 
@@ -115,6 +116,7 @@ func (e *Engine) Decide(snap *config.Snapshot, req Request) Response {
 	// ① 筛选（活跃/上下架/定向/样式/投放 App）+ ② 打分
 	cands := e.buildCandidates(snap, req)
 	if len(cands) == 0 {
+		e.diagnose(snap, req, nil)
 		return Response{Fallback: "self_promo"}
 	}
 
@@ -128,15 +130,19 @@ func (e *Engine) Decide(snap *config.Snapshot, req Request) Response {
 
 	// ④ 逐条物化：频控 / 预算闸挡住的跳过，至多取 count 条
 	var items []Item
+	matReasons := map[string]int{}
 	for _, c := range cands {
 		if len(items) >= req.Count {
 			break
 		}
 		if item, ok := e.materialize(req, c); ok {
 			items = append(items, item)
+		} else {
+			matReasons[materializeBlockedReason(e, req, c)]++
 		}
 	}
 	if len(items) == 0 {
+		e.diagnose(snap, req, matReasons)
 		return Response{Fallback: "self_promo"}
 	}
 	return Response{Items: items}
@@ -337,4 +343,78 @@ func (e *Engine) materialize(req Request, c candidate) (Item, bool) {
 		Score:        c.score,
 		ExpireAt:     req.Now.Add(time.Duration(c.ttl) * time.Minute).Unix(),
 	}, true
+}
+
+// diagnose 在决策落空（无填充）时打印各阶段过滤计数，定位空列表根因。
+// 仅在 Decide 返回 fallback 时调用，正常填充不产生日志。
+func (e *Engine) diagnose(snap *config.Snapshot, req Request, mat map[string]int) {
+	reasons := map[string]int{}
+	campTotal := len(snap.Campaigns)
+	crTotal := len(snap.CreativesByID)
+	advTotal := len(snap.Advertisers)
+	for _, camp := range snap.Campaigns {
+		if !camp.Active(req.Now) {
+			reasons["campaign_inactive_or_schedule"]++
+			continue
+		}
+		adv := snap.Advertisers[camp.AdvertiserID]
+		if adv == nil {
+			reasons["advertiser_nil"]++
+			continue
+		}
+		if !adv.Active(req.Now) {
+			reasons["advertiser_inactive"]++
+			continue
+		}
+		if !adv.Targeting.Match(req.Country, req.Language) {
+			reasons["targeting_miss"]++
+			continue
+		}
+		for _, crID := range camp.CreativeIDs {
+			cr := snap.CreativesByID[crID]
+			if cr == nil {
+				reasons["creative_nil"]++
+				continue
+			}
+			if !creativeActive(cr) {
+				reasons["creative_inactive"]++
+				continue
+			}
+			if !styleIn(cr.Styles, req.Style) {
+				reasons["style_miss"]++
+				continue
+			}
+			if !targetsApp(cr.TargetApps, req.App.ID) {
+				reasons["app_miss"]++
+				continue
+			}
+			reasons["passed"]++
+		}
+	}
+	slog.Info("ad/list diagnose: no fill",
+		"app", req.App.ID, "style", req.Style, "app_active", req.App.Active(),
+		"country", req.Country, "language", req.Language,
+		"campaigns_total", campTotal, "creatives_total", crTotal, "advertisers_total", advTotal,
+		"build_reasons", reasons, "materialize_reasons", mat,
+	)
+}
+
+// materializeBlockedReason 返回某候选在物化阶段被挡的原因（只读，不影响状态）。
+func materializeBlockedReason(e *Engine, req Request, c candidate) string {
+	if c.camp != nil {
+		windows := CampaignFreqWindows(c.camp)
+		if len(windows) > 0 {
+			if !e.Freq.Check(req.App.ID, req.DeviceID, c.creative.ID, c.camp.ID,
+				frequency.AdvPolicy{Windows: windows}, req.Now) {
+				return "freq"
+			}
+		}
+	}
+	if c.adv != nil && e.Budget.WalletBalance(c.adv.ID) <= 0 {
+		return "wallet_zero"
+	}
+	if c.budget > 0 && c.spent >= c.budget {
+		return "budget_exhausted"
+	}
+	return "other"
 }
