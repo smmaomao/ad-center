@@ -97,7 +97,7 @@ func (s *Server) handleAdClick(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(bid.LandingURL, "?") {
 			sep = "&"
 		}
-		jumpURL = bid.LandingURL + sep + "clk=" + clickID
+		jumpURL = bid.LandingURL + sep + "click_id=" + clickID
 	}
 
 	s.Log.Info("ad click", "click_id", clickID, "bid_id", req.BidID,

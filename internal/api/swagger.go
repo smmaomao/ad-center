@@ -37,7 +37,7 @@ type AdListItem struct {
 	// FEED=素材时长（客户端据此锁定列表滑动，满 N 秒后才可划走，图片素材兜底 3）；
 	// SPLASH=固定 3；其余样式为 0。
 	RequiredDuration int      `json:"required_duration" example:"15"`
-	ClickURL         string   `json:"click_url" example:"https://landing.com?clk={CLICK_ID}"`
+	ClickURL         string   `json:"click_url" example:"https://landing.com?click_id={CLICK_ID}"`
 }
 
 // AdListData ad_list 包装。
@@ -76,7 +76,7 @@ type AdClickRequest struct {
 // AdClickData click_id / jump_url 包装。
 type AdClickData struct {
 	ClickID string `json:"click_id" example:"clk_7788992233"`
-	JumpURL string `json:"jump_url" example:"https://landing.com?clk=clk_7788992233"`
+	JumpURL string `json:"jump_url" example:"https://landing.com?click_id=clk_7788992233"`
 }
 
 // AdClickResponse 点击埋点响应。

@@ -348,7 +348,7 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 				sep = "&"
 			}
 			landingURL = camp.LandingURL
-			clickURL = camp.LandingURL + sep + "clk={CLICK_ID}"
+			clickURL = camp.LandingURL + sep + "click_id={CLICK_ID}"
 		}
 		// 合并该素材支持的全部样式：ad_style / target_scene 取并集，required_duration 取最大值。
 		adStyles := make([]string, 0, len(cr.Styles))

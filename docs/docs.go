@@ -190,7 +190,7 @@ const docTemplate = `{
                 },
                 "jump_url": {
                     "type": "string",
-                    "example": "https://landing.com?clk=clk_7788992233"
+                    "example": "https://landing.com?click_id=clk_7788992233"
                 }
             }
         },
@@ -295,7 +295,7 @@ const docTemplate = `{
                 },
                 "click_url": {
                     "type": "string",
-                    "example": "https://landing.com?clk={CLICK_ID}"
+                    "example": "https://landing.com?click_id={CLICK_ID}"
                 },
                 "creative_id": {
                     "type": "string",
