@@ -465,7 +465,17 @@ func (s *Server) handleAdImpression(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "creative_id mismatch")
 		return
 	}
-	s.chargeClientEvent(app, bid.AdvertiserID, bid.CreativeID, bid.CampaignID, bid.Style, bid.DeviceID, "impression", time.Now())
+	charged := s.chargeClientEvent(app, bid.AdvertiserID, bid.CreativeID, bid.CampaignID, bid.Style, bid.DeviceID, "impression", time.Now())
+	s.Log.Info("ad impression",
+		"app", app.ID,
+		"bid_id", req.BidID,
+		"creative_id", req.CreativeID,
+		"user_id", req.UserID,
+		"adjust_adid", req.AdjustAdid,
+		"device_id", bid.DeviceID,
+		"style", bid.Style,
+		"charged", charged,
+	)
 	writeJSON(w, http.StatusOK, map[string]any{"code": 200, "msg": "success"})
 }
 
@@ -514,6 +524,16 @@ func (s *Server) handleAdVideoComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.fireRewardCallback(app, bid, req.BidID, req.UserID, req.Timestamp)
+	s.Log.Info("ad video-complete",
+		"app", app.ID,
+		"bid_id", req.BidID,
+		"creative_id", req.CreativeID,
+		"user_id", req.UserID,
+		"adjust_adid", req.AdjustAdid,
+		"device_id", bid.DeviceID,
+		"style", bid.Style,
+		"callback_url", app.CallbackURL != "",
+	)
 	writeJSON(w, http.StatusOK, map[string]any{"code": 200, "msg": "success"})
 }
 

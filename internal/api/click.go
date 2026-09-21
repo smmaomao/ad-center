@@ -100,8 +100,19 @@ func (s *Server) handleAdClick(w http.ResponseWriter, r *http.Request) {
 		jumpURL = bid.LandingURL + sep + "click_id=" + clickID
 	}
 
-	s.Log.Info("ad click", "click_id", clickID, "bid_id", req.BidID,
-		"advertiser_id", bid.AdvertiserID, "charged", charged, "jump_url", jumpURL)
+	s.Log.Info("ad click",
+		"click_id", clickID,
+		"bid_id", req.BidID,
+		"ad_app_id", req.AdAppID,
+		"creative_id", req.CreativeID,
+		"user_id", req.UserID,
+		"adjust_adid", req.AdjustAdid,
+		"ip", req.IP,
+		"os", req.OS,
+		"advertiser_id", bid.AdvertiserID,
+		"charged", charged,
+		"jump_url", jumpURL,
+	)
 	resp := map[string]any{
 		"code": 200, "msg": "success",
 		"data": map[string]string{"click_id": clickID},
