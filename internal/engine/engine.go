@@ -366,7 +366,14 @@ func (e *Engine) diagnose(snap *config.Snapshot, req Request, mat map[string]int
 	campTotal := len(snap.Campaigns)
 	crTotal := len(snap.CreativesByID)
 	advTotal := len(snap.Advertisers)
+	campSum := []map[string]any{}
 	for _, camp := range snap.Campaigns {
+		campSum = append(campSum, map[string]any{
+			"id":            camp.ID,
+			"status":        camp.Status,
+			"advertiser_id": camp.AdvertiserID,
+			"creative_ids":  camp.CreativeIDs,
+		})
 		if !camp.Active(req.Now) {
 			reasons["campaign_inactive_or_schedule"]++
 			continue
@@ -437,6 +444,7 @@ func (e *Engine) diagnose(snap *config.Snapshot, req Request, mat map[string]int
 		"campaigns_total", campTotal, "creatives_total", crTotal, "advertisers_total", advTotal,
 		"build_reasons", reasons, "materialize_reasons", mat,
 		"creative_detail", creativeDetail,
+		"campaigns", campSum,
 	)
 }
 
