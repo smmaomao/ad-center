@@ -8,7 +8,7 @@ import { CREATIVE_STYLES } from "@/lib/go-api";
 import { deleteCreativeAction } from "./actions";
 import { CreativeFormModal } from "./creative-form-modal";
 import { CreativeViewModal } from "./creative-view-modal";
-import type { AdminAdvertiser, AdminApp, AdminCreative } from "@/lib/go-api";
+import type { AdminApp, AdminCreative } from "@/lib/go-api";
 
 const STATUS_LABEL: Record<string, string> = {
   active: "上架",
@@ -48,13 +48,11 @@ function StatusBadge({ status }: { status: AdminCreative["status"] }) {
 
 export function CreativesClient({
   creatives,
-  advertisers,
   apps,
   error,
   canWrite,
 }: {
   creatives: AdminCreative[];
-  advertisers: AdminAdvertiser[];
   apps: AdminApp[];
   error: string | null;
   canWrite: boolean;
@@ -66,8 +64,6 @@ export function CreativesClient({
   const [isPending, startTransition] = useTransition();
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
-  const advName = (id: string) =>
-    id ? advertisers.find((a) => a.id === id)?.name ?? "—" : "公共库";
   const appName = (id: string) => apps.find((a) => a.id === id)?.name ?? id;
   const styleLabel = (k: string) =>
     CREATIVE_STYLES.find((s) => s.key === k)?.label ?? k;
@@ -98,7 +94,7 @@ export function CreativesClient({
     <div className="space-y-6">
       <PageHeader
         title="素材管理"
-        description={`公共素材库 · 共 ${creatives.length} 个素材`}
+        description={`共 ${creatives.length} 个素材`}
         actions={
           canWrite ? (
             <Button onClick={() => setCreateOpen(true)}>新建素材</Button>
@@ -143,7 +139,6 @@ export function CreativesClient({
                       {c.name}
                     </button>
                     <div className="text-xs text-muted-foreground">
-                      {advName(c.advertiser_id)}
                       {mediaMeta(c)}
                     </div>
                   </td>
@@ -218,7 +213,6 @@ export function CreativesClient({
 
       {createOpen && (
         <CreativeFormModal
-          advertisers={advertisers}
           apps={apps}
           canWrite={canWrite}
           onClose={() => setCreateOpen(false)}
@@ -226,7 +220,6 @@ export function CreativesClient({
       )}
       {editing && (
         <CreativeFormModal
-          advertisers={advertisers}
           apps={apps}
           initial={editing}
           canWrite={canWrite}
@@ -236,7 +229,6 @@ export function CreativesClient({
       {viewing && (
         <CreativeViewModal
           creative={viewing}
-          advertiserName={advName(viewing.advertiser_id)}
           appName={appName}
           onClose={() => setViewing(null)}
         />

@@ -129,10 +129,13 @@ export async function resetAppKey(actorEmail: string, id: string) {
 
 export interface AdminCreative {
   id: string;
-  advertiser_id: string;
+  /** @deprecated 素材不再绑定广告主 */
+  advertiser_id?: string;
   name: string;
   media_type: "video" | "image" | "html";
   storage_path: string;
+  /** 可直接访问的完整素材 URL（CDN / R2 预签名） */
+  storage_url?: string;
   file_size_bytes: number;
   orientation: string;
   width: number;

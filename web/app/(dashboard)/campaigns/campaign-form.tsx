@@ -57,6 +57,10 @@ export function CampaignForm({
     initial?.billing_mode ?? "cpm",
   );
   const isEdit = Boolean(initial);
+  const [selectedCreatives, setSelectedCreatives] = useState<string[]>(
+    initial?.creative_ids ?? [],
+  );
+  const [selErr, setSelErr] = useState("");
   const [advertiserId, setAdvertiserId] = useState<string>(
     initial?.advertiser_id ?? "",
   );
@@ -67,7 +71,18 @@ export function CampaignForm({
   }, [state, onSaved]);
 
   return (
-    <form action={formAction} className="space-y-6">
+    <form
+      action={formAction}
+      onSubmit={(e) => {
+        if (selectedCreatives.length === 0) {
+          e.preventDefault();
+          setSelErr("请至少选择一个关联素材");
+        } else {
+          setSelErr("");
+        }
+      }}
+      className="space-y-6"
+    >
       {initial && <input type="hidden" name="id" value={initial.id} />}
       {modal && <input type="hidden" name="no_redirect" value="1" />}
 
@@ -148,7 +163,49 @@ export function CampaignForm({
         </CardContent>
       </Card>
 
-      {/* ② 出价与 KPI */}
+      {/* ② 关联素材（公共创意库） */}
+      <Card>
+        <CardHeader>
+          <CardTitle>关联素材</CardTitle>
+          <CardDescription>
+            从公共素材库勾选本任务使用的素材（不勾 = 库内全部可用）
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {creatives.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              素材库为空，请先到「素材管理」上传素材
+            </p>
+          ) : (
+            <div className="flex flex-wrap gap-4">
+              {creatives.map((c) => (
+                <label
+                  key={c.id}
+                  className="flex items-center gap-2 text-sm"
+                >
+                  <input
+                    type="checkbox"
+                    name="creative_ids"
+                    value={c.id}
+                    checked={selectedCreatives.includes(c.id)}
+                    onChange={(e) =>
+                      setSelectedCreatives((prev) =>
+                        e.target.checked
+                          ? [...prev, c.id]
+                          : prev.filter((x) => x !== c.id),
+                      )
+                    }
+                    className="size-4"
+                  />
+                  {c.name}
+                </label>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* ③ 出价与 KPI */}
       <Card>
         <CardHeader>
           <CardTitle>出价与 KPI</CardTitle>
@@ -284,7 +341,7 @@ export function CampaignForm({
         </CardContent>
       </Card>
 
-      {/* ③ 频控 */}
+      {/* ④ 频控 */}
       <Card>
         <CardHeader>
           <CardTitle>频控</CardTitle>
@@ -333,41 +390,6 @@ export function CampaignForm({
         </CardContent>
       </Card>
 
-      {/* ④ 关联素材（公共创意库） */}
-      <Card>
-        <CardHeader>
-          <CardTitle>关联素材</CardTitle>
-          <CardDescription>
-            从公共素材库勾选本任务使用的素材（不勾 = 库内全部可用）
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          {creatives.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              素材库为空，请先到「素材管理」上传素材
-            </p>
-          ) : (
-            <div className="flex flex-wrap gap-4">
-              {creatives.map((c) => (
-                <label
-                  key={c.id}
-                  className="flex items-center gap-2 text-sm"
-                >
-                  <input
-                    type="checkbox"
-                    name="creative_ids"
-                    value={c.id}
-                    defaultChecked={initial?.creative_ids?.includes(c.id)}
-                    className="size-4"
-                  />
-                  {c.name}
-                </label>
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
       {/* ⑤ 排期 */}
       <Card>
         <CardHeader>
@@ -409,6 +431,9 @@ export function CampaignForm({
 
       {state.error && (
         <p className="text-sm font-medium text-destructive">{state.error}</p>
+      )}
+      {selErr && (
+        <p className="text-sm font-medium text-destructive">{selErr}</p>
       )}
       {state.ok && (
         <p className="text-sm font-medium text-green-600">已保存</p>

@@ -3,16 +3,14 @@
 import { useRouter } from "next/navigation";
 import { Modal } from "@/components/modal";
 import { CreativeForm } from "./creative-form";
-import type { AdminAdvertiser, AdminApp, AdminCreative } from "@/lib/go-api";
+import type { AdminApp, AdminCreative } from "@/lib/go-api";
 
 export function CreativeFormModal({
-  advertisers,
   apps,
   initial,
   canWrite,
   onClose,
 }: {
-  advertisers: AdminAdvertiser[];
   apps: AdminApp[];
   initial?: AdminCreative;
   canWrite: boolean;
@@ -32,13 +30,12 @@ export function CreativeFormModal({
       description={
         initial
           ? `素材 ID：${initial.id}`
-          : "注册到公共素材库，再在广告任务中按需绑定"
+          : "注册素材后，在广告任务中按需绑定"
       }
       onClose={onClose}
       footer={null}
     >
       <CreativeForm
-        advertisers={advertisers}
         apps={apps}
         initial={initial}
         modal

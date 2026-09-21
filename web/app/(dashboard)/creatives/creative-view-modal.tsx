@@ -111,12 +111,10 @@ function Preview({ play, storagePath }: { play: PlayState; storagePath: string }
 
 export function CreativeViewModal({
   creative,
-  advertiserName,
   appName,
   onClose,
 }: {
   creative: AdminCreative;
-  advertiserName?: string;
   appName: (id: string) => string;
   onClose: () => void;
 }) {
@@ -162,9 +160,6 @@ export function CreativeViewModal({
             }`}
           >
             {STATUS_LABEL[status] ?? status}
-          </span>
-          <span className="text-sm text-muted-foreground">
-            归属：{advertiserName ?? "公共素材库"}
           </span>
         </div>
 

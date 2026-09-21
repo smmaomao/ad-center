@@ -3,7 +3,7 @@
 // 广告素材表单（三大板块）：
 //   ① 基础信息 ② 定向配置（样式 / 投放 App）③ 商业与策略（扣费 / 单价 / 优先级系数）
 import { useActionState, useEffect, useState } from "react";
-import type { AdminAdvertiser, AdminApp, AdminCreative } from "@/lib/go-api";
+import type { AdminApp, AdminCreative } from "@/lib/go-api";
 import { CREATIVE_STYLES } from "@/lib/go-api";
 import { saveCreativeAction, type FormState } from "./actions";
 import { Button } from "@/components/ui/button";
@@ -54,13 +54,11 @@ function formatBytes(n: number): string {
 }
 
 export function CreativeForm({
-  advertisers,
   apps,
   initial,
   modal,
   onSaved,
 }: {
-  advertisers: AdminAdvertiser[];
   apps: AdminApp[];
   initial?: AdminCreative;
   modal?: boolean;
@@ -77,7 +75,6 @@ export function CreativeForm({
     video: ["mp4"],
     image: ["png", "jpg", "jpeg", "webp", "gif"],
   };
-  const [advertiserId, setAdvertiserId] = useState<string>(initial?.advertiser_id ?? "");
   const [mediaType, setMediaType] = useState<"video" | "image" | "html">(
     (initial?.media_type as "video" | "image" | "html") ?? "video",
   );
@@ -85,7 +82,10 @@ export function CreativeForm({
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadedName, setUploadedName] = useState<string | null>(null);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  // 编辑时直接展示后端返回的 storage_url；新上传时临时用本地 object URL
+  const [previewUrl, setPreviewUrl] = useState<string | null>(
+    initial?.storage_url ?? null,
+  );
   const [meta, setMeta] = useState<{
     fileSizeBytes: number;
     width: number;
@@ -96,7 +96,7 @@ export function CreativeForm({
   // 卸载时释放预览用 object URL，避免内存泄漏
   useEffect(() => {
     return () => {
-      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      if (previewUrl?.startsWith("blob:")) URL.revokeObjectURL(previewUrl);
     };
   }, [previewUrl]);
 
@@ -108,7 +108,7 @@ export function CreativeForm({
     // 本地预览（立即可见，不依赖 R2）
     const localUrl = URL.createObjectURL(file);
     setPreviewUrl((prev) => {
-      if (prev) URL.revokeObjectURL(prev);
+      if (prev?.startsWith("blob:")) URL.revokeObjectURL(prev);
       return localUrl;
     });
     try {
@@ -127,7 +127,6 @@ export function CreativeForm({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          advertiser_id: advertiserId,
           media_type: mediaType,
           ext,
           file_size_bytes: file.size,
@@ -177,29 +176,12 @@ export function CreativeForm({
       <Card>
         <CardHeader>
           <CardTitle>基础信息</CardTitle>
-          <CardDescription>素材名称、所属广告主与素材内容地址</CardDescription>
+          <CardDescription>素材名称与素材内容地址（编辑时可直接预览）</CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-1.5">
             <Label htmlFor="name">素材名称 *</Label>
             <Input id="name" name="name" required defaultValue={initial?.name} />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="advertiser_id">所属广告主（可空 = 公共素材库）</Label>
-            <select
-              id="advertiser_id"
-              name="advertiser_id"
-              className={selectCls}
-              value={advertiserId}
-              onChange={(e) => setAdvertiserId(e.target.value)}
-            >
-              <option value="">公共素材库（不绑定广告主）</option>
-              {advertisers.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.name}
-                </option>
-              ))}
-            </select>
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="media_type">媒体类型</Label>

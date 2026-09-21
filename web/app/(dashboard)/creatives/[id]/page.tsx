@@ -1,5 +1,5 @@
 import { requireMenu } from "@/lib/auth";
-import { listCreatives, listAdvertisers, listApps } from "@/lib/go-api";
+import { listCreatives, listApps } from "@/lib/go-api";
 import { CreativeForm } from "../creative-form";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
@@ -11,9 +11,8 @@ export default async function EditCreativePage({
   const session = await requireMenu("/creatives");
   const { id } = await params;
 
-  const [creatives, advertisers, apps] = await Promise.all([
+  const [creatives, apps] = await Promise.all([
     listCreatives(session.email).catch(() => []),
-    listAdvertisers(session.email).catch(() => []),
     listApps(session.email).catch(() => []),
   ]);
   const initial = creatives.find((c) => c.id === id);
@@ -35,7 +34,7 @@ export default async function EditCreativePage({
         <h1 className="text-2xl font-semibold">{initial.name}</h1>
         <p className="text-sm text-muted-foreground">编辑素材配置</p>
       </div>
-      <CreativeForm advertisers={advertisers} apps={apps} initial={initial} />
+      <CreativeForm apps={apps} initial={initial} />
     </div>
   );
 }

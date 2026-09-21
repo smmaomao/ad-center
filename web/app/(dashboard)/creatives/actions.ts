@@ -32,9 +32,8 @@ export async function saveCreativeAction(
   if (!session) return { error: "会话已过期，请重新登录" };
 
   const name = str(fd, "name");
-  const advertiserId = str(fd, "advertiser_id");
   if (!name) return { error: "素材名称必填" };
-  // 广告主可空：空 = 公共素材库
+  // 素材不再绑定广告主
 
   // 展现样式多选
   const styles = fd.getAll("styles").map(String).filter(Boolean);
@@ -44,7 +43,6 @@ export async function saveCreativeAction(
   if (!storagePath) return { error: "素材地址必填（上传后的对象 key 或落地页 URL）" };
 
   const fields: Record<string, unknown> = {
-    advertiser_id: advertiserId,
     name,
     media_type: str(fd, "media_type") || "video",
     storage_path: storagePath,

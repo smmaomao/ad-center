@@ -4,7 +4,7 @@
 // 写凭证只在本服务端使用，不进响应。
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
-import { goApi } from "@/lib/go-api";
+
 import { presignPUT, r2ConfigFromEnv } from "@/lib/r2/signer";
 
 /** 上传角色：与 Go 侧素材创建一致（operator 及以上） */
@@ -19,11 +19,9 @@ const EXT_ALLOWLIST: Record<string, string[]> = {
 const MAX_FILE_BYTES = 100 * 1024 * 1024; // 100MB
 const UPLOAD_TTL_SECONDS = 600; // 预签名时效 10 分钟
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const SHA256_RE = /^[0-9a-f]{64}$/;
 
 interface PresignRequest {
-  advertiser_id: string;
   media_type: string;
   ext: string;
   file_size_bytes: number;
@@ -44,12 +42,8 @@ export async function POST(req: NextRequest) {
   }
 
   const body = (await req.json().catch(() => null)) as PresignRequest | null;
-  // advertiser_id：空 = 公共素材库（不绑定广告主）；非空须为合法 id。
-  // 随广告主 id 迁移为 bigint，故接受整数 id（兼容旧 uuid 形态）。
-  const advId = body?.advertiser_id ?? "";
-  const idValid = advId === "" || /^[0-9]+$/.test(advId) || UUID_RE.test(advId);
-  if (!body || !idValid) {
-    return NextResponse.json({ error: "invalid advertiser_id" }, { status: 400 });
+  if (!body) {
+    return NextResponse.json({ error: "invalid request body" }, { status: 400 });
   }
   const exts = EXT_ALLOWLIST[body.media_type];
   const ext = (body.ext ?? "").toLowerCase();
@@ -67,15 +61,6 @@ export async function POST(req: NextRequest) {
       { error: "invalid content_sha256 (need 64-hex SHA-256 of file bytes)" },
       { status: 400 },
     );
-  }
-
-  // 广告主存在性校验（复用 Go API，防孤儿对象）；公共素材库（空 id）跳过
-  if (advId !== "") {
-    try {
-      await goApi(`/v1/admin/advertisers/${advId}`, session.email);
-    } catch {
-      return NextResponse.json({ error: "advertiser not found" }, { status: 404 });
-    }
   }
 
   // 对象 key：creatives/{内容SHA-256}.{ext}

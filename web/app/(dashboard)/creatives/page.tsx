@@ -1,7 +1,6 @@
 import { canWriteRole, requireMenu } from "@/lib/auth";
 import {
   listCreatives,
-  listAdvertisers,
   listApps,
 } from "@/lib/go-api";
 import { CreativesClient } from "./creatives-client";
@@ -13,13 +12,11 @@ export default async function CreativesPage() {
   const canWrite = canWriteRole(session.role);
 
   let creatives: Awaited<ReturnType<typeof listCreatives>> = [];
-  let advertisers: Awaited<ReturnType<typeof listAdvertisers>> = [];
   let apps: Awaited<ReturnType<typeof listApps>> = [];
   let error: string | null = null;
   try {
-    [creatives, advertisers, apps] = await Promise.all([
+    [creatives, apps] = await Promise.all([
       listCreatives(session.email),
-      listAdvertisers(session.email).catch(() => []),
       listApps(session.email).catch(() => []),
     ]);
   } catch (e) {
@@ -29,7 +26,6 @@ export default async function CreativesPage() {
   return (
     <CreativesClient
       creatives={creatives}
-      advertisers={advertisers}
       apps={apps}
       error={error}
       canWrite={canWrite}

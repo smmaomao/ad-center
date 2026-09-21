@@ -1,15 +1,12 @@
 import { requireMenu } from "@/lib/auth";
-import { listAdvertisers, listApps } from "@/lib/go-api";
+import { listApps } from "@/lib/go-api";
 import { CreativeForm } from "../creative-form";
 
 export const dynamic = "force-dynamic";
 
 export default async function NewCreativePage() {
   const session = await requireMenu("/creatives");
-  const [advertisers, apps] = await Promise.all([
-    listAdvertisers(session.email).catch(() => []),
-    listApps(session.email).catch(() => []),
-  ]);
+  const apps = await listApps(session.email).catch(() => []);
 
   return (
     <div className="mx-auto max-w-3xl space-y-6">
@@ -19,7 +16,7 @@ export default async function NewCreativePage() {
           上传广告内容，并定义它可以投放到哪些 App、以什么样式展现
         </p>
       </div>
-      <CreativeForm advertisers={advertisers} apps={apps} />
+      <CreativeForm apps={apps} />
     </div>
   );
 }
