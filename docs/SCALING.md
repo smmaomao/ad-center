@@ -63,6 +63,7 @@
 
 - 生产端**批量 XADD**（pipeline，每 10ms 或 100 条一批）——降 RTT，也降 Upstash 按请求计费的成本。
 - 保留策略：`XADD MAXLEN ~ N`（约数小时~百万条），足够吸收峰值；更久的保留交给 Postgres/ClickHouse。
+- 消费端**走原生 Redis 协议（TCP/TLS）的 `XREADGROUP BLOCK 30s COUNT 500` 长阻塞**，不是定时轮询：BLOCK 期间请求挂在服务端，空闲时 30 秒才一次往返（Upstash 按请求计费 → 空闲几乎不花钱）。**绝不能配 Upstash 的 REST 端点**：REST 是 HTTP 请求式、明确不支持阻塞版 XREAD/XREADGROUP，只能每秒轮询，请求数与延迟都会暴涨。客户端读超时必须 > BLOCK（Upstash 原文："Set the client/network timeout longer than the command timeout"）；go-redis 对带 BLOCK 的 XREADGROUP 会自动把读超时放宽为 `block+10s`，无需手动改 `ReadTimeout`。可用环境变量 `QUEUE_BLOCK` 覆盖阻塞时长。
 
 ### 阶段 2（M4，量级触发后）：Kafka 系
 
@@ -107,6 +108,7 @@
 5. **RTT 合并**：决策热路径的「频控 + 预算」各自一次 Redis 往返（目标：后续合并进一个 Lua，降到 1 次）。
 6. **幂等**：事件带唯一 id（`impression_id` / `click_id`），消费端 `ON CONFLICT DO NOTHING`；`budget_ledger` 聚合行用 (广告主, 窗口) 唯一键 + `ON CONFLICT DO UPDATE` 累加——应对客户端重试与归因方重投。
 7. **Supabase 连接池**：走 Supavisor / pgBouncer transaction 模式，由消费者进程统一批量写，避免每实例各自高频写。
+8. **Redis 端点只用 TCP**：`REDIS_URL` 必须是控制台里的 `rediss://xxx.upstash.io:6379`（原生 Redis 协议），**不是** `https://xxx.upstash.io`（REST）。REST 无 BLOCK，长跑的 Go 消费端会退化成轮询刷请求；也别在长跑服务里用 `@upstash/redis` 那类 REST SDK。
 
 ---
 

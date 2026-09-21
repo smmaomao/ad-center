@@ -27,6 +27,13 @@ import (
 //
 // 投递语义：至少一次。ad_events 可能重复（M3 补幂等键），
 // budget_ledger 靠 (广告主, 小时) 的 ON CONFLICT 累加保证金额不重复计算。
+//
+// 消费端 XREADGROUP BLOCK：TCP 长阻塞，空闲时每 defaultBlock 才一次往返。
+// 注意 go-redis 会把带 BLOCK 的 XREADGROUP 的读超时自动放宽为 block+10s
+// （stream_commands.go: cmd.setReadTimeout(a.Block)），所以客户端默认的
+// 5s ReadTimeout 不会把阻塞读打断——Upstash 也要求"客户端超时 > 命令超时"。
+const defaultBlock = 30 * time.Second
+
 type Redis struct {
 	client    *redis.Client
 	stream    string
@@ -43,10 +50,23 @@ type Redis struct {
 }
 
 // NewRedis 构造 Streams 队列（必要时创建 group）。
+//
+// 连接必须是**原生 Redis 协议**的 TCP/TLS 端点（redis:// / rediss://），不能用
+// Upstash 的 REST 端点：REST 是 HTTP 请求式，不支持阻塞版 XREAD/XREADGROUP，
+// 只能定时轮询（空闲也每秒发请求，既贵又有延迟）；TCP 下 BLOCK 期间请求挂在
+// 服务端，没消息就不产生请求。见 SCALING.md §3。
 func NewRedis(redisURL, prefix, group string, batchSize int) (*Redis, error) {
 	opt, err := redis.ParseURL(redisURL)
 	if err != nil {
 		return nil, err
+	}
+	// 空闲时的阻塞时长（可用 QUEUE_BLOCK 覆盖，如 "15s"）。太长会让关停时
+	// 多等一轮；太短则空转往返变多（Upstash 按请求计费）。
+	block := defaultBlock
+	if v := os.Getenv("QUEUE_BLOCK"); v != "" {
+		if d, perr := time.ParseDuration(v); perr == nil && d > 0 {
+			block = d
+		}
 	}
 	host, _ := os.Hostname()
 	r := &Redis{
@@ -56,7 +76,7 @@ func NewRedis(redisURL, prefix, group string, batchSize int) (*Redis, error) {
 		consumer:  host + "-" + strconv.Itoa(os.Getpid()),
 		maxLen:    200000, // ≈ 数小时的事件量，足够吸收峰值
 		batchSize: batchSize,
-		block:     5 * time.Second, // 空闲最长阻塞 5s；Upstash 若不真正阻塞，由下方退避兜底
+		block:     block,
 		buf:       make([]store.AdEvent, 0, batchSize),
 	}
 	// 幂等建组：已存在返回 BUSYGROUP，忽略
@@ -107,7 +127,7 @@ func (r *Redis) flush(ctx context.Context) error {
 	return nil
 }
 
-// Run 消费循环：XREADGROUP → 批量交给 Handler → 成功后 ACK。
+// Run 消费循环：XREADGROUP（阻塞） → 批量交给 Handler → 成功后 ACK。
 func (r *Redis) Run(ctx context.Context, h Handler) {
 	// 低峰兜底：定时把没攒满的批次刷出去
 	go func() {
@@ -142,10 +162,10 @@ func (r *Redis) Run(ctx context.Context, h Handler) {
 				return // 退出中
 			}
 			if errors.Is(err, redis.Nil) {
-				// 空闲（部分服务端不真正阻塞 BLOCK，会立即返回空）：退避，
-				// 避免空转狂发 XREADGROUP 刷爆 Upstash 命令数。
+				// BLOCK 到期仍无消息——真阻塞下的正常空转（每 block 一次，不刷命令数）。
+				// 保留极小退避，仅为防止将来换成不真正阻塞的端点（如 REST）时退化为紧循环。
 				select {
-				case <-time.After(200 * time.Millisecond):
+				case <-time.After(50 * time.Millisecond):
 				case <-ctx.Done():
 				}
 				continue
