@@ -73,8 +73,8 @@ export async function saveCampaignAction(
   if (startAt) fields.start_at = startAt;
   if (endAt) fields.end_at = endAt;
 
-  const landingURL = str(fd, "landing_url");
-  if (landingURL) fields.landing_url = landingURL;
+  // 总是发送（含空串）：后端按"键是否存在"决定是否更新，空串即清空落地页地址
+  fields.landing_url = str(fd, "landing_url");
 
   const id = str(fd, "id");
   try {

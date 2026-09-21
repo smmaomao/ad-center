@@ -1,7 +1,9 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 
 	"adcenter/internal/store"
@@ -43,6 +45,7 @@ type campaignRequest struct {
 	StartAt             *string               `json:"start_at"`
 	EndAt               *string               `json:"end_at"`
 	DeliverTTLMinutes   int                   `json:"deliver_ttl_minutes"`
+	LandingURL          string                `json:"landing_url"`
 }
 
 // validateCampaign 校验并打印可用的枚举默认值；返回用于落库的字段。
@@ -97,68 +100,84 @@ func (r campaignRequest) fields() map[string]any {
 	if r.EndAt != nil {
 		f["end_at"] = *r.EndAt
 	}
+	f["landing_url"] = r.LandingURL
 	return f
 }
 
-func (r campaignRequest) updateFields() map[string]any {
+// updateFields 由请求体构造"部分更新"字段。
+//
+// 判断依据是**请求体里有没有这个键**（raw），而不是"值是否为零"：
+//   - 传了就更新，哪怕值是 0 或空串——日预算填 0（跟随广告主）、出价下限清空
+//     （退化为固定单价）、落地页清空，都是用户的明确意图；
+//   - 没传就不动，保持库里原值（正确的 PATCH 语义，不会误清零）。
+//
+// 旧的"非零才更新"写法会把上面这些合法的清零操作当成"没填"直接跳过，
+// 导致日预算/出价区间改不生效。
+func (r campaignRequest) updateFields(raw map[string]any) map[string]any {
 	f := map[string]any{}
-	if r.Name != "" {
+	has := func(k string) bool { _, ok := raw[k]; return ok }
+	if has("name") && r.Name != "" {
 		f["name"] = r.Name
 	}
-	if r.Status != "" {
+	if has("status") && r.Status != "" {
 		f["status"] = r.Status
 	}
-	if r.BiddingPrice != 0 {
+	if has("bidding_price") {
 		f["bidding_price"] = r.BiddingPrice
 	}
-	if r.BiddingPriceMin != 0 {
+	if has("bidding_price_min") {
 		f["bidding_price_min"] = r.BiddingPriceMin
 	}
-	if r.BillingMode != "" {
+	if has("billing_mode") && r.BillingMode != "" {
 		f["billing_mode"] = r.BillingMode
 	}
 	if r.CPAEventPrices != nil {
 		f["cpa_event_prices"] = r.CPAEventPrices
 	}
-	if r.TargetKPIType != "" {
+	if has("target_kpi_type") && r.TargetKPIType != "" {
 		f["target_kpi_type"] = r.TargetKPIType
 	}
-	if r.TargetKPIValue != 0 {
+	if has("target_kpi_value") {
 		f["target_kpi_value"] = r.TargetKPIValue
 	}
-	if r.DailyBudget != 0 {
+	if has("daily_budget") {
 		f["daily_budget"] = r.DailyBudget
 	}
-	if r.ConsumeSpeed != 0 {
+	if has("consume_speed") && r.ConsumeSpeed != 0 {
 		f["consume_speed"] = r.ConsumeSpeed
 	}
-	if r.DeliverTTLMinutes != 0 {
+	if has("deliver_ttl_minutes") {
 		f["deliver_ttl_minutes"] = r.DeliverTTLMinutes
 	}
-	f["guaranteed_enabled"] = r.GuaranteedEnabled
-	if r.GuaranteedMinShare != 0 {
+	if has("guaranteed_enabled") {
+		f["guaranteed_enabled"] = r.GuaranteedEnabled
+	}
+	if has("guaranteed_min_share") {
 		f["guaranteed_min_share"] = r.GuaranteedMinShare
 	}
-	if r.FreqDailyLimit != 0 {
+	if has("freq_daily_limit") {
 		f["freq_daily_limit"] = r.FreqDailyLimit
 	}
-	if r.FreqIntervalMinutes != 0 {
+	if has("freq_interval_minutes") {
 		f["freq_interval_minutes"] = r.FreqIntervalMinutes
 	}
-	if r.FreqFatigueWindow != 0 {
+	if has("freq_fatigue_window") {
 		f["freq_fatigue_window"] = r.FreqFatigueWindow
 	}
-	if r.CreativeIDs != nil {
+	if has("creative_ids") && r.CreativeIDs != nil {
 		f["creative_ids"] = r.CreativeIDs
 	}
-	if r.ProductID != "" {
+	if has("product_id") && r.ProductID != "" {
 		f["product_id"] = r.ProductID
 	}
-	if r.StartAt != nil {
+	if has("start_at") && r.StartAt != nil {
 		f["start_at"] = *r.StartAt
 	}
-	if r.EndAt != nil {
+	if has("end_at") && r.EndAt != nil {
 		f["end_at"] = *r.EndAt
+	}
+	if has("landing_url") {
+		f["landing_url"] = r.LandingURL
 	}
 	return f
 }
@@ -239,11 +258,24 @@ func (s *Server) handleUpdateCampaign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	var req campaignRequest
-	if !decodeJSON(w, r, &req) {
+	// 读一次 body：既要类型化的请求体（取值/校验），也要原始键集合 raw
+	// （判断"哪些字段被传了"——传了才更新，且允许传 0/空来清零，见 updateFields）。
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
 		return
 	}
-	fields := req.updateFields()
+	var req campaignRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	fields := req.updateFields(raw)
 	if len(fields) == 0 {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
