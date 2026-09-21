@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"adcenter/internal/config"
 )
 
 // ============================================================
@@ -53,8 +55,12 @@ func (s *Store) FlushMinuteMetrics(ctx context.Context, rows []MinuteMetric) err
 // AdEvent 原始事件行。
 type AdEvent struct {
 	AppID, Style, AdvertiserID, CreativeID, DeviceID, Country, EventType string
-	CampaignID, PixelID                                                  string // 任务标识：服务端归因任务 / 中介回传 pixel（S2S 转化落库，便于统计对账）
+	CampaignID, PixelID                                                  string // 任务标识：服务端归因任务 / 中介回传 pixel
 	Revenue                                                              float64
+	// S2S 转化回传专用字段（落 ad_conversions；内部投放事件恒为零值）：
+	ClickID  string  // 回传的 clickid（归因反查键）
+	Currency string  // 充值事件币种（ISO 4217），仅记录
+	Value    float64 // 充值事件流水金额，仅记录不参与计费
 	// CallbackOK 仅 video_complete 事件有意义：是否成功转发到 App 业务后端
 	// S2S 回调（true=HTTP 2xx；false=网络错误/非 2xx/未配置 callback_url）。
 	// 其他事件为 nil（不记录）。
@@ -76,17 +82,36 @@ func (s *Store) InsertAdEvents(ctx context.Context, events []AdEvent) error {
 // 为什么必须同事务：消费是"至少一次"语义，处理失败会重新投递。若两步分开写，
 // 失败重投会出现"明细写了、流水没写"的半截状态——重投后明细重复、流水缺失，
 // 对账永远对不齐。同事务后要么都成功，要么整批重试。
+// conversionEventSet 与 config.ConversionEvents 同源：这些事件属于 S2S 转化回传，
+// 落 ad_conversions 而非 ad_events（详见 splitEvents / WriteEventBatch）。
+var conversionEventSet = func() map[string]bool {
+	m := make(map[string]bool, len(config.ConversionEvents))
+	for _, e := range config.ConversionEvents {
+		m[e] = true
+	}
+	return m
+}()
+
+func isConversionEvent(et string) bool { return conversionEventSet[et] }
+
 func (s *Store) WriteEventBatch(ctx context.Context, events []AdEvent) error {
 	if len(events) == 0 {
 		return nil
 	}
+	// 内部投放事件与 S2S 转化回传分开落库（不同表，同一事务）。
+	internal, conv := splitEvents(events)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // 已 Commit 时 Rollback 无害
 
-	if q, args, ok := buildInsertAdEvents(events); ok {
+	if q, args, ok := buildInsertAdEvents(internal); ok {
+		if _, err := tx.Exec(ctx, q, args...); err != nil {
+			return err
+		}
+	}
+	if q, args, ok := buildInsertConversions(conv); ok {
 		if _, err := tx.Exec(ctx, q, args...); err != nil {
 			return err
 		}
@@ -152,6 +177,54 @@ func buildInsertAdEvents(events []AdEvent) (string, []any, bool) {
 			e.CampaignID, e.PixelID)
 	}
 	return sb.String(), args, true
+}
+
+// splitEvents 按事件类型把批次拆成内部投放事件与 S2S 转化回传事件，分别落
+// ad_events 与 ad_conversions（同事务，见 WriteEventBatch）。
+func splitEvents(events []AdEvent) (internal, conv []AdEvent) {
+	internal = make([]AdEvent, 0, len(events))
+	conv = make([]AdEvent, 0, len(events))
+	for _, e := range events {
+		if isConversionEvent(e.EventType) {
+			conv = append(conv, e)
+		} else {
+			internal = append(internal, e)
+		}
+	}
+	return
+}
+
+// buildInsertConversions 批量写 S2S 转化回传明细（落 ad_conversions，与内部投放
+// 事件审计表 ad_events 解耦）。revenue 为服务端确认扣费；currency/value 仅记录。
+func buildInsertConversions(events []AdEvent) (string, []any, bool) {
+	if len(events) == 0 {
+		return "", nil, false
+	}
+	var sb strings.Builder
+	sb.WriteString(`INSERT INTO ad_conversions
+		(click_id, app_code, advertiser_id, campaign_id, creative_id, device_id, style, event_type, revenue, pixel_id, currency, value)
+		VALUES `)
+	args := make([]any, 0, len(events)*12)
+	for i, e := range events {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		fmt.Fprintf(&sb, "($%d,$%d,$%d::bigint,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
+			i*12+1, i*12+2, i*12+3, i*12+4, i*12+5, i*12+6, i*12+7, i*12+8, i*12+9, i*12+10, i*12+11, i*12+12)
+		args = append(args, e.ClickID, e.AppID,
+			nilIfEmpty(e.AdvertiserID), e.CampaignID, nilIfEmpty(e.CreativeID),
+			e.DeviceID, e.Style, e.EventType, e.Revenue, e.PixelID,
+			nilIfEmpty(e.Currency), floatOrNil(e.Value))
+	}
+	return sb.String(), args, true
+}
+
+// floatOrNil 0 值转 NULL（未回传的充值金额不落 0，语义更清晰）。
+func floatOrNil(v float64) any {
+	if v == 0 {
+		return nil
+	}
+	return v
 }
 
 // WriteLedger 记预算流水（V1.2：deduct=事件确认扣费/calibrate/daily_reset；
