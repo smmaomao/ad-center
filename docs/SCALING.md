@@ -105,7 +105,7 @@
 2. **Hash tag 保 cluster 兼容**：多 key 的 Lua 脚本在 Cluster 下会 `CROSSSLOT`。所有 key 形如 `adcenter:{bud}:{id}` / `adcenter:{fr}:{app}:{dev}:...`，`{bud}` `{fr}` 强制同 slot。
 3. **预算跨日**：Hash 里存 `day` 字段（Jakarta `YYYY-MM-DD`），Lua 内比对跨日则 `spent` 归零，并回传旧值记 `daily_reset` 流水——与内存版语义一致。key **不设 TTL**（key 过期 = 广告主"未注册" = 停投，宁可让 `SyncBalances` 显式删除）。
 4. **降级 fail-open**（与 §5.3.1 一致）：Redis 超时/不可用 → `Stats` 返回 `(0,0)`（engine 只读闸中 `budget>0` 才停投，故放行）、`TryDeduct` 返回 false（不扣费）、频控放行。广告业务宁可短暂多放，不能全量无广告；事后从 Postgres 对账修正。
-5. **RTT 合并**：决策热路径的「频控 + 预算」各自一次 Redis 往返（目标：后续合并进一个 Lua，降到 1 次）。
+5. **RTT 合并**：决策热路径的预算快照已合并——`Budget.BatchStats`（`StatsAll`）用单个 Lua（所有 key 同 `{bud}` hash tag 同 slot）一次往返取全量任务预算，`engine.buildCandidates` 从 N 次 EVALSHA/请求 降为 1 次；频控 `Check` 仍逐候选 1 次 Lua，进一步合并待办。
 6. **幂等**：事件带唯一 id（`impression_id` / `click_id`），消费端 `ON CONFLICT DO NOTHING`；`budget_ledger` 聚合行用 (广告主, 窗口) 唯一键 + `ON CONFLICT DO UPDATE` 累加——应对客户端重试与归因方重投。
 7. **Supabase 连接池**：走 Supavisor / pgBouncer transaction 模式，由消费者进程统一批量写，避免每实例各自高频写。
 8. **Redis 端点只用 TCP**：`REDIS_URL` 必须是控制台里的 `rediss://xxx.upstash.io:6379`（原生 Redis 协议），**不是** `https://xxx.upstash.io`（REST）。REST 无 BLOCK，长跑的 Go 消费端会退化成轮询刷请求；也别在长跑服务里用 `@upstash/redis` 那类 REST SDK。
@@ -127,7 +127,8 @@
 - **跨日必须全局即时清零，不能用惰性 per-key 重置**：契约测试跑出来的真实差异——惰性方案下，昨日耗尽的广告主在 `Stats` 里长期返回 `spent=budget` → 引擎只读闸停投 → 再无扣费事件触发重置 → **该广告主永久停投**。现实现：`TryDeduct` / `Stats` 的 Lua 先比对全局 `day`，不符则遍历 `ids` 集合一次性清零并回传重置金额（多实例并发执行幂等）。
 - `TryDeduct`：Lua 原子执行「跨日重置 → 余额校验 → 累加」，返回 `{ok, resets}`；被重置的金额由 Go 侧补记 `daily_reset` 流水（与内存版 rollover 一致）。
 - `Stats`：同样先触发跨日重置，再读快照（与内存版 `Stats` 触发 rollover 的语义一致）。
-- `SyncBalances`：两步 pipeline（先 `EXISTS` 再 `HSET`），**只用多 key pipeline 而非多 key 脚本**——Cluster 下多 key 脚本会 CROSSSLOT。已存在只刷 `budget`；新增按 DB 快照初始化；DB 中已不存在的 key 用 SCAN + DEL 清理。
+- `StatsAll`（`BatchStats`）：单个 Lua 一次往返读全量任务预算（决策热路径，`buildCandidates` 每请求 1 次而非 N 次），同样先做跨日全局重置；未注册/失败的 ID 不在返回 map，调用方按 (0,0) fail-open。
+- `SyncBalances`：两步 pipeline（先 `EXISTS` 再 `HSET`），**只用多 key pipeline 而非多 key 脚本**——Cluster 下多 key 脚本会 CROSSSLOT。已存在只刷 `budget`；新增按 DB 快照初始化；跨日重置集合 `{bud}:ids` 用**一条批量 SADD** 维护；已删广告主的 key 清理**不做全量 SCAN**，而是 `SMEMBERS {bud}:ids` 枚举后 DEL+SREM（每次对账只多 1 条命令；无主 key 另有 7 天 TTL 兜底）。钱包侧同理（`{wal}:ids` 集合）。
 - `HourlyCalibrate`：沿用内存版语义记 `calibrate` 流水（多实例会各记一条，M3 收敛为单实例 leader 执行）。
 - 调用超时默认 100ms，可 `SetTimeout` 调整。
 
