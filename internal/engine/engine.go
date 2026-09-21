@@ -12,7 +12,6 @@
 package engine
 
 import (
-	"log/slog"
 	"sort"
 	"time"
 
@@ -116,7 +115,6 @@ func (e *Engine) Decide(snap *config.Snapshot, req Request) Response {
 	// ① 筛选（活跃/上下架/定向/样式/投放 App）+ ② 打分
 	cands := e.buildCandidates(snap, req)
 	if len(cands) == 0 {
-		e.diagnose(snap, req, nil)
 		return Response{Fallback: "self_promo"}
 	}
 
@@ -142,7 +140,6 @@ func (e *Engine) Decide(snap *config.Snapshot, req Request) Response {
 		}
 	}
 	if len(items) == 0 {
-		e.diagnose(snap, req, matReasons)
 		return Response{Fallback: "self_promo"}
 	}
 	return Response{Items: items}
@@ -359,94 +356,7 @@ func (e *Engine) materialize(req Request, c candidate) (Item, bool) {
 	}, true
 }
 
-// diagnose 在决策落空（无填充）时打印各阶段过滤计数，定位空列表根因。
-// 仅在 Decide 返回 fallback 时调用，正常填充不产生日志。
-func (e *Engine) diagnose(snap *config.Snapshot, req Request, mat map[string]int) {
-	reasons := map[string]int{}
-	campTotal := len(snap.Campaigns)
-	crTotal := len(snap.CreativesByID)
-	advTotal := len(snap.Advertisers)
-	campSum := []map[string]any{}
-	for _, camp := range snap.Campaigns {
-		campSum = append(campSum, map[string]any{
-			"id":            camp.ID,
-			"status":        camp.Status,
-			"advertiser_id": camp.AdvertiserID,
-			"creative_ids":  camp.CreativeIDs,
-		})
-		if !camp.Active(req.Now) {
-			reasons["campaign_inactive_or_schedule"]++
-			continue
-		}
-		adv := snap.Advertisers[camp.AdvertiserID]
-		if adv == nil {
-			reasons["advertiser_nil"]++
-			continue
-		}
-		if !adv.Active(req.Now) {
-			reasons["advertiser_inactive"]++
-			continue
-		}
-		if !adv.Targeting.Match(req.Country, req.Language) {
-			reasons["targeting_miss"]++
-			continue
-		}
-		if len(camp.CreativeIDs) == 0 {
-			reasons["campaign_no_creative"]++
-			continue
-		}
-		for _, crID := range camp.CreativeIDs {
-			cr := snap.CreativesByID[crID]
-			if cr == nil {
-				reasons["creative_nil"]++
-				continue
-			}
-			if !creativeActive(cr) {
-				reasons["creative_inactive"]++
-				continue
-			}
-			if !styleIn(cr.Styles, req.Style) {
-				reasons["style_miss"]++
-				continue
-			}
-			if !targetsApp(cr.TargetApps, req.App.ID) {
-				reasons["app_miss"]++
-				continue
-			}
-			reasons["passed"]++
-		}
-	}
-	// creative_detail：把每个 campaign 的 creative_ids 引用的素材详情列出（去重），
-	// 便于直接核对素材 status / styles / target_apps 是否命中请求的 style / app。
-	creativeDetail := map[string]map[string]any{}
-	for _, camp := range snap.Campaigns {
-		for _, crID := range camp.CreativeIDs {
-			if _, ok := creativeDetail[crID]; ok {
-				continue
-			}
-			cr := snap.CreativesByID[crID]
-			if cr == nil {
-				creativeDetail[crID] = map[string]any{"found": false}
-				continue
-			}
-			creativeDetail[crID] = map[string]any{
-				"found":       true,
-				"status":      cr.Status,
-				"styles":      cr.Styles,
-				"target_apps": cr.TargetApps,
-				"active":      creativeActive(cr),
-			}
-		}
-	}
-	slog.Info("ad/list diagnose: no fill",
-		"app", req.App.ID, "style", req.Style, "app_active", req.App.Active(),
-		"country", req.Country, "language", req.Language,
-		"campaigns_total", campTotal, "creatives_total", crTotal, "advertisers_total", advTotal,
-		"build_reasons", reasons, "materialize_reasons", mat,
-		"creative_detail", creativeDetail,
-		"campaigns", campSum,
-	)
-}
+
 
 // materializeBlockedReason 返回某候选在物化阶段被挡的原因（只读，不影响状态）。
 func materializeBlockedReason(e *Engine, req Request, c candidate) string {

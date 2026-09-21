@@ -20,6 +20,9 @@ type adClickReq struct {
 	UserID     string `json:"user_id"`     // 业务用户ID（归因/对账，可空）
 	AdjustAdid string `json:"adjust_adid"` // 设备标识（可空）
 	Timestamp  int64  `json:"timestamp"`   // 点击时间戳（秒，可空）
+	Count      int    `json:"count"`       // 与下发一致的下发数量（统一参数，可空）
+	IP         string `json:"ip"`          // 客户端IP（统一参数，可空）
+	OS         string `json:"os"`          // 客户端系统（统一参数，可空）
 }
 
 // newClickID 128-bit 不可枚举随机串（base64url，≈22 字符），URL 友好。

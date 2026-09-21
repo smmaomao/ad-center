@@ -447,6 +447,11 @@ func (s *Server) handleAdImpression(w http.ResponseWriter, r *http.Request) {
 		AdAppID    string `json:"ad_app_id"`
 		CreativeID string `json:"creative_id"`
 		Timestamp  int64  `json:"timestamp"`
+		UserID     string `json:"user_id"`
+		AdjustAdid string `json:"adjust_adid"`
+		Count      int    `json:"count"`
+		IP         string `json:"ip"`
+		OS         string `json:"os"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
@@ -487,6 +492,10 @@ func (s *Server) handleAdVideoComplete(w http.ResponseWriter, r *http.Request) {
 		CreativeID string `json:"creative_id"`
 		UserID     string `json:"user_id"`
 		Timestamp  int64  `json:"timestamp"`
+		AdjustAdid string `json:"adjust_adid"`
+		Count      int    `json:"count"`
+		IP         string `json:"ip"`
+		OS         string `json:"os"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
