@@ -53,6 +53,7 @@ func (s *Store) FlushMinuteMetrics(ctx context.Context, rows []MinuteMetric) err
 // AdEvent 原始事件行。
 type AdEvent struct {
 	AppID, Style, AdvertiserID, CreativeID, DeviceID, Country, EventType string
+	CampaignID, PixelID                                                  string // 任务标识：服务端归因任务 / 中介回传 pixel（S2S 转化落库，便于统计对账）
 	Revenue                                                              float64
 	// CallbackOK 仅 video_complete 事件有意义：是否成功转发到 App 业务后端
 	// S2S 回调（true=HTTP 2xx；false=网络错误/非 2xx/未配置 callback_url）。
@@ -136,18 +137,19 @@ func buildInsertAdEvents(events []AdEvent) (string, []any, bool) {
 	}
 	var sb strings.Builder
 	sb.WriteString(`INSERT INTO ad_events
-		(app_code, style, advertiser_id, creative_id, device_id, country, event_type, revenue, callback_ok)
+		(app_code, style, advertiser_id, creative_id, device_id, country, event_type, revenue, callback_ok, campaign_id, pixel_id)
 		VALUES `)
-	args := make([]any, 0, len(events)*9)
+	args := make([]any, 0, len(events)*11)
 	for i, e := range events {
 		if i > 0 {
 			sb.WriteByte(',')
 		}
-		fmt.Fprintf(&sb, "($%d,$%d,$%d::bigint,$%d::bigint,$%d,$%d,$%d,$%d,$%d)",
-			i*9+1, i*9+2, i*9+3, i*9+4, i*9+5, i*9+6, i*9+7, i*9+8, i*9+9)
+		fmt.Fprintf(&sb, "($%d,$%d,$%d::bigint,$%d::bigint,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
+			i*11+1, i*11+2, i*11+3, i*11+4, i*11+5, i*11+6, i*11+7, i*11+8, i*11+9, i*11+10, i*11+11)
 		args = append(args, e.AppID, e.Style,
 			nilIfEmpty(e.AdvertiserID), nilIfEmpty(e.CreativeID),
-			e.DeviceID, nilIfEmpty(e.Country), e.EventType, e.Revenue, e.CallbackOK)
+			e.DeviceID, nilIfEmpty(e.Country), e.EventType, e.Revenue, e.CallbackOK,
+			e.CampaignID, e.PixelID)
 	}
 	return sb.String(), args, true
 }

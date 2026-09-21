@@ -38,8 +38,9 @@ type ClickResolver interface {
 //	             转化回调用 {clickid} 宏原样带回。服务端凭它反查点击上下文
 //	             （ClickResolver）。具体透传方式（素材跳转链接参数等）待定。
 //	event_name  必填。install / activate / register / first_purchase / purchase
-//	pixelId     归因方的转化像素/事件标识。目前仅记录日志，不参与归属
-//	             （将来如需"按像素归属到广告主"再建 pixel → advertiser 映射）。
+//	pixelId     归因方/中介（berealads）的转化像素/任务标识。落库到 ad_events.pixel_id
+//	             便于"按中介侧任务标记"查看与统计；不参与归属（归属只信 clickid 反查）。
+//	             建议 berealads 侧配置为广告任务 id，与服务端 campaign_id 对照。
 //	testFlag    归因方测试流量标记（1/true…）：测试回调不扣费不记账。
 //	currency    value 的币种（ISO 4217）；充值事件（first_purchase/purchase）回传。
 //	value       充值流水金额；非充值事件为 0。当前 cpa 计费按 cpa_event_prices
@@ -96,8 +97,10 @@ func (s *Server) handleS2SEvent(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	snap := s.Cache.Snapshot()
 	var charged float64
+	var campaignID string
 	// 计费执行粒度 = campaign：出价 / 计费方式 / CPA 单价均在任务级，广告主只做钱包。
 	if campID, ok := snap.CreativeCampaign[ctx.CreativeID]; ok && campID != "" {
+		campaignID = campID
 		if camp := snap.Campaigns[campID]; camp != nil {
 			if amt, ok := camp.BillingAmount(eventName); ok {
 				// campaign 日预算闸 + 广告主总钱包闸：任一不足即不扣费
@@ -112,6 +115,7 @@ func (s *Server) handleS2SEvent(w http.ResponseWriter, r *http.Request) {
 		AppID: ctx.AppID, Style: ctx.Style, AdvertiserID: ctx.AdvertiserID,
 		DeviceID: ctx.DeviceID, CreativeID: ctx.CreativeID,
 		EventType: eventName, Revenue: charged,
+		CampaignID: campaignID, PixelID: pixelID,
 	})
 	s.Log.Info("s2s conversion", "clickid", clickID, "event_name", eventName,
 		"advertiser_id", ctx.AdvertiserID, "charged", charged,
