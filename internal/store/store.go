@@ -205,6 +205,7 @@ func (s *Store) LoadSnapshot(ctx context.Context) (*config.Snapshot, error) {
 			rows.Close()
 			return nil, fmt.Errorf("campaign %s cpa_event_prices: %w", c.ID, err)
 		}
+		c.CreativeIDs = creativeIDs
 		snap.Campaigns[c.ID] = c
 		for _, crID := range creativeIDs {
 			// 多 campaign 引用同一素材时，首个映射生效（创意归属唯一）。
