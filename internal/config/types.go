@@ -278,7 +278,8 @@ type Snapshot struct {
 	Advertisers           map[string]*Advertiser // advertiser_id → Advertiser
 	Slots                 map[string]*Slot       // slot_code → Slot
 	SlotsByKey            map[string]*Slot       // slot_key → Slot
-	CreativesByAdvertiser map[string][]*Creative // advertiser_id → 活跃素材（weight 降序）
+	CreativesByAdvertiser map[string][]*Creative // advertiser_id → 活跃素材（保留：素材管理/诊断；投放候选不再按广告主遍历）
+	CreativesByID         map[string]*Creative  // creative_id → Creative（投放候选按 ID 命中任务 creative_ids）
 	Campaigns             map[string]*Campaign   // campaign_id → Campaign（预算闸执行粒度）
 	CreativeCampaign      map[string]string      // creative_id → campaign_id（创意归属，预算闸/扣费按 campaign）
 	PricingBenchmark      *PricingBenchmark      // 平台计费标准线（系统设置，全局一份）

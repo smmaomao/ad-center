@@ -35,6 +35,7 @@ func benchSnapshot(nAdv int) *config.Snapshot {
 		Apps:                  map[string]*config.App{"app_bench": {ID: "app_bench", Status: "active"}},
 		Advertisers:           map[string]*config.Advertiser{},
 		CreativesByAdvertiser: map[string][]*config.Creative{},
+		CreativesByID:         map[string]*config.Creative{},
 		Campaigns:             map[string]*config.Campaign{},
 		CreativeCampaign:      map[string]string{},
 		PricingBenchmark:      config.DefaultPricingBenchmark(),
@@ -53,6 +54,9 @@ func benchSnapshot(nAdv int) *config.Snapshot {
 			}
 		}
 		snap.CreativesByAdvertiser[id] = crs
+		for _, c := range crs {
+			snap.CreativesByID[c.ID] = c
+		}
 		// KPI 现属 campaign：每个广告主一个 campaign，素材归属之，制造排序压力。
 		campID := "cmp_" + id
 		camp := &config.Campaign{

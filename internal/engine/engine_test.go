@@ -104,6 +104,7 @@ func mkSnapshot(specs ...advSpec) *config.Snapshot {
 		Apps:                  map[string]*config.App{"app1": {ID: "app1", Status: "active"}},
 		Advertisers:           map[string]*config.Advertiser{},
 		CreativesByAdvertiser: map[string][]*config.Creative{},
+		CreativesByID:         map[string]*config.Creative{},
 		Campaigns:             map[string]*config.Campaign{},
 		CreativeCampaign:      map[string]string{},
 		PricingBenchmark:      config.DefaultPricingBenchmark(),
@@ -117,6 +118,7 @@ func mkSnapshot(specs ...advSpec) *config.Snapshot {
 			Styles:    []string{"rewarded_video"},
 		}
 		snap.CreativesByAdvertiser[a.ID] = []*config.Creative{cr}
+		snap.CreativesByID[cr.ID] = cr
 		// 每个广告主对应一个 campaign（预算单元），其素材归属该 campaign；
 		// campaign 携带 KPI（target/actual CPI），是 KPI 执行粒度。
 		camp := s.camp

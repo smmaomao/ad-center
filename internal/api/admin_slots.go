@@ -203,7 +203,6 @@ var storagePathRe = regexp.MustCompile(`^creatives/[0-9a-f]{64}\.[a-z0-9]+$`)
 
 // creativeRequest 素材创建/更新请求体。
 type creativeRequest struct {
-	AdvertiserID  string   `json:"advertiser_id"`
 	Name          string   `json:"name"`
 	MediaType     string   `json:"media_type"`
 	StoragePath   string   `json:"storage_path"`
@@ -230,6 +229,13 @@ func (s *Server) handleListCreatives(w http.ResponseWriter, r *http.Request) {
 	}
 	if list == nil {
 		list = []*store.AdminCreative{}
+	}
+	for _, c := range list {
+		if c.MediaType == "html" {
+			c.StorageURL = c.StoragePath
+		} else if s.Storage != nil {
+			c.StorageURL = s.Storage.PresignGET(c.StoragePath, s.Storage.DefaultExpiry())
+		}
 	}
 	writeJSON(w, http.StatusOK, list)
 }
@@ -265,7 +271,7 @@ func (s *Server) handleCreateCreative(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fields := map[string]any{
-		"advertiser_id": req.AdvertiserID, "name": req.Name,
+		"name": req.Name,
 		"media_type": req.MediaType, "storage_path": req.StoragePath,
 		"file_size_bytes": req.FileSizeBytes, "updated_by": actor,
 	}

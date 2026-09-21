@@ -29,6 +29,8 @@ type AdminCreative struct {
 	Styles []string `json:"styles"`
 	// 投放目标 App（多选，空 = 全部 App）
 	TargetApps []string `json:"target_apps"`
+	// StorageURL 可直接访问的素材 URL（CDN / R2 预签名），由 API 层装饰。
+	StorageURL string `json:"storage_url,omitempty"`
 }
 
 const adminCreativeCols = `

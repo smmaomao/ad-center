@@ -72,6 +72,7 @@ func testSnapshot() *config.Snapshot {
 		Slots:                 map[string]*config.Slot{"slot1": slot},
 		SlotsByKey:            map[string]*config.Slot{"test_slot": slot},
 		CreativesByAdvertiser: map[string][]*config.Creative{},
+		CreativesByID:         map[string]*config.Creative{"cr1": {ID: "cr1", Status: "active", Styles: []string{"rewarded_video"}}},
 		Settings:              map[string]json.RawMessage{},
 	}
 }

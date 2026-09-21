@@ -57,6 +57,7 @@ func benchAPIServer(b *testing.B) (*Server, string) {
 		AppByKeyHash:          map[string]*config.App{},
 		Advertisers:           map[string]*config.Advertiser{},
 		CreativesByAdvertiser: map[string][]*config.Creative{},
+		CreativesByID:         map[string]*config.Creative{},
 		Campaigns:             map[string]*config.Campaign{},
 		CreativeCampaign:      map[string]string{},
 	}
@@ -83,6 +84,7 @@ func benchAPIServer(b *testing.B) (*Server, string) {
 			ID: "cr_" + id, AdvertiserID: id, MediaType: "video", Status: "active",
 			Styles: []string{"rewarded_video"},
 		}}
+		snap.CreativesByID["cr_"+id] = snap.CreativesByAdvertiser[id][0]
 	}
 
 	discard := slog.New(slog.DiscardHandler)

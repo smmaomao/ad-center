@@ -55,6 +55,7 @@ func (s *Store) LoadSnapshot(ctx context.Context) (*config.Snapshot, error) {
 		Slots:                 map[string]*config.Slot{},
 		SlotsByKey:            map[string]*config.Slot{},
 		CreativesByAdvertiser: map[string][]*config.Creative{},
+		CreativesByID:         map[string]*config.Creative{},
 		Campaigns:             map[string]*config.Campaign{},
 		CreativeCampaign:      map[string]string{},
 		Settings:              map[string]json.RawMessage{},
@@ -163,6 +164,7 @@ func (s *Store) LoadSnapshot(ctx context.Context) (*config.Snapshot, error) {
 			return nil, err
 		}
 		snap.CreativesByAdvertiser[c.AdvertiserID] = append(snap.CreativesByAdvertiser[c.AdvertiserID], c)
+		snap.CreativesByID[c.ID] = c
 	}
 	rows.Close()
 

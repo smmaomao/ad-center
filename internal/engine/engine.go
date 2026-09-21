@@ -142,12 +142,9 @@ func (e *Engine) Decide(snap *config.Snapshot, req Request) Response {
 	return Response{Items: items}
 }
 
-// buildCandidates 遍历所有广告主的活跃素材，筛出 style∈素材.styles 且
-// (target_apps 为空 或 含 req.App) 的素材，单素材打分。
-//
-// 预算闸按 campaign 各自控制：每个 campaign 在请求内只查一次预算快照，
-// 素材据其归属的 campaign 取 spent/budget；未挂到任何 campaign 的素材不限
-// 预算（不参与预算封顶、也不扣费）。
+// buildCandidates 遍历所有投放任务（campaign），以各任务 creative_ids 指定的素材为候选
+// （素材只与投放任务挂钩，不再按广告主维度遍历全部素材）。素材经 style / 投放 App / 广告主
+// 定向过滤后，按归属 campaign 的预算 / 排期 / KPI 打分；未关联任何任务的素材不参与投放。
 func (e *Engine) buildCandidates(snap *config.Snapshot, req Request) []candidate {
 	campBudgets := make(map[string][2]float64, len(snap.Campaigns))
 	for id := range snap.Campaigns {
@@ -155,15 +152,25 @@ func (e *Engine) buildCandidates(snap *config.Snapshot, req Request) []candidate
 		campBudgets[id] = [2]float64{spent, budget}
 	}
 	cands := make([]candidate, 0)
-	for _, adv := range snap.Advertisers {
-		if !adv.Active(req.Now) {
+	for _, camp := range snap.Campaigns {
+		if !camp.Active(req.Now) {
+			continue // 任务暂停或超出投放排期
+		}
+		adv := snap.Advertisers[camp.AdvertiserID]
+		if adv == nil || !adv.Active(req.Now) {
 			continue
 		}
 		if !adv.Targeting.Match(req.Country, req.Language) {
 			continue
 		}
-		for _, cr := range snap.CreativesByAdvertiser[adv.ID] {
-			if !creativeActive(cr) {
+		spent, budget := 0.0, 0.0
+		if b, ok := campBudgets[camp.ID]; ok {
+			spent, budget = b[0], b[1]
+		}
+		// 候选仅来自本任务关联的素材（白名单）：素材不与广告主挂钩，只与任务挂钩。
+		for _, crID := range camp.CreativeIDs {
+			cr := snap.CreativesByID[crID]
+			if cr == nil || !creativeActive(cr) {
 				continue
 			}
 			if !styleIn(cr.Styles, req.Style) {
@@ -171,20 +178,6 @@ func (e *Engine) buildCandidates(snap *config.Snapshot, req Request) []candidate
 			}
 			if !targetsApp(cr.TargetApps, req.App.ID) {
 				continue
-			}
-			// 预算 / KPI / 排期 均按素材归属的广告任务（campaign）执行。
-			var camp *config.Campaign
-			if campID, ok := snap.CreativeCampaign[cr.ID]; ok {
-				camp = snap.Campaigns[campID]
-			}
-			if camp != nil && !camp.Active(req.Now) {
-				continue // 任务暂停或超出投放排期
-			}
-			spent, budget := 0.0, 0.0
-			if camp != nil {
-				if b, ok2 := campBudgets[camp.ID]; ok2 {
-					spent, budget = b[0], b[1]
-				}
 			}
 			cands = append(cands, e.scoreCreative(cr, adv, camp, snap.PricingBenchmark, req.Now, spent, budget))
 		}

@@ -39,6 +39,7 @@ func billTestServer(t *testing.T, campID string, camp *config.Campaign, balances
 		Slots:                 map[string]*config.Slot{},
 		SlotsByKey:            map[string]*config.Slot{},
 		CreativesByAdvertiser: map[string][]*config.Creative{},
+		CreativesByID:         map[string]*config.Creative{},
 		Campaigns:             map[string]*config.Campaign{},
 		CreativeCampaign:      map[string]string{},
 	}
@@ -53,6 +54,7 @@ func billTestServer(t *testing.T, campID string, camp *config.Campaign, balances
 	snap.CreativesByAdvertiser[campID] = []*config.Creative{{
 		ID: "cr_t", AdvertiserID: campID, MediaType: "video", Status: "active",
 	}}
+	snap.CreativesByID["cr_t"] = snap.CreativesByAdvertiser[campID][0]
 	camp.ID = campID
 	camp.AdvertiserID = campID
 	if camp.Status == "" {
