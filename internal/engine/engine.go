@@ -384,6 +384,10 @@ func (e *Engine) diagnose(snap *config.Snapshot, req Request, mat map[string]int
 			reasons["targeting_miss"]++
 			continue
 		}
+		if len(camp.CreativeIDs) == 0 {
+			reasons["campaign_no_creative"]++
+			continue
+		}
 		for _, crID := range camp.CreativeIDs {
 			cr := snap.CreativesByID[crID]
 			if cr == nil {
@@ -405,11 +409,34 @@ func (e *Engine) diagnose(snap *config.Snapshot, req Request, mat map[string]int
 			reasons["passed"]++
 		}
 	}
+	// creative_detail：把每个 campaign 的 creative_ids 引用的素材详情列出（去重），
+	// 便于直接核对素材 status / styles / target_apps 是否命中请求的 style / app。
+	creativeDetail := map[string]map[string]any{}
+	for _, camp := range snap.Campaigns {
+		for _, crID := range camp.CreativeIDs {
+			if _, ok := creativeDetail[crID]; ok {
+				continue
+			}
+			cr := snap.CreativesByID[crID]
+			if cr == nil {
+				creativeDetail[crID] = map[string]any{"found": false}
+				continue
+			}
+			creativeDetail[crID] = map[string]any{
+				"found":       true,
+				"status":      cr.Status,
+				"styles":      cr.Styles,
+				"target_apps": cr.TargetApps,
+				"active":      creativeActive(cr),
+			}
+		}
+	}
 	slog.Info("ad/list diagnose: no fill",
 		"app", req.App.ID, "style", req.Style, "app_active", req.App.Active(),
 		"country", req.Country, "language", req.Language,
 		"campaigns_total", campTotal, "creatives_total", crTotal, "advertisers_total", advTotal,
 		"build_reasons", reasons, "materialize_reasons", mat,
+		"creative_detail", creativeDetail,
 	)
 }
 
