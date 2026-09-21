@@ -389,6 +389,18 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 	if len(collected) == 0 {
 		allLoopable = false
 	}
+	// 诊断日志：打印请求头（含用户信息）与最终下发的广告列表，便于排查空列表问题。
+	s.Log.Info("ad/list response",
+		"app", app.ID,
+		"device_id", deviceID,
+		"user_id", req.UserID,
+		"adjust_adid", req.AdjustAdid,
+		"os", req.OS,
+		"ip", req.IP,
+		"headers", r.Header,
+		"ad_count", len(adList),
+		"ad_list", adList,
+	)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"code": 200, "msg": "success",
 		"data": map[string]any{
