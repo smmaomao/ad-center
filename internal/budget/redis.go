@@ -4,7 +4,6 @@ import (
 	"context"
 	"math"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -125,6 +124,46 @@ if redis.call('EXISTS', KEYS[1]) == 0 then return {resets} end
 return {resets, redis.call('HGET', KEYS[1], 'budget'), redis.call('HGET', KEYS[1], 'spent')}
 `)
 
+// statsAllScript 批量读取全量任务预算快照（决策热路径，把 N 次 statsScript 合并为 1 次）。
+//
+// KEYS[1]=dayKey，KEYS[2]=idsKey，KEYS[3..]=各任务预算键；
+// ARGV[1]=today(Jakarta YYYY-MM-DD)，ARGV[2]=key 前缀。
+// 返回 {resets, b1, s1, b2, s2, ...}：resets 为跨日重置的扁平 [id, amount, ...]，
+// 其后与 KEYS[3..] 一一对应的 (budget, spent) 对，键不存在时为空串。
+// 所有预算键共享 {bud} hash tag（同 slot），Cluster 下单脚本安全；Upstash 只计 1 次请求。
+var statsAllScript = redis.NewScript(`
+local resets = {}
+local ttl = 604800
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+  local pfx = ARGV[2]
+  local ids = redis.call('SMEMBERS', KEYS[2])
+  for _, id in ipairs(ids) do
+    local k = pfx .. id
+    local sp = tonumber(redis.call('HGET', k, 'spent')) or 0
+    if sp > 0 then
+      resets[#resets + 1] = id
+      resets[#resets + 1] = tostring(sp)
+    end
+    redis.call('HSET', k, 'day', ARGV[1], 'spent', '0')
+    redis.call('EXPIRE', k, ttl)
+  end
+  redis.call('SET', KEYS[1], ARGV[1])
+  redis.call('EXPIRE', KEYS[1], ttl)
+end
+local out = {resets}
+for i = 3, #KEYS do
+  local k = KEYS[i]
+  if redis.call('EXISTS', k) == 0 then
+    out[#out + 1] = ''
+    out[#out + 1] = ''
+  else
+    out[#out + 1] = redis.call('HGET', k, 'budget') or ''
+    out[#out + 1] = redis.call('HGET', k, 'spent') or ''
+  end
+end
+return out
+`)
+
 func (r *Redis) TryDeduct(advertiserID string, amount float64) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
 	defer cancel()
@@ -159,6 +198,44 @@ func (r *Redis) Stats(advertiserID string) (spent, budget float64) {
 		return 0, 0 // 广告主未注册
 	}
 	return parseFloat(arr[2]), parseFloat(arr[1])
+}
+
+// StatsAll 批量版 Stats（BatchStats）：单个 Lua 一次往返拿全量任务预算，
+// 把决策热路径里 N 次 EVALSHA/请求 降为 1 次。语义与逐个 Stats 一致：
+// 先做跨日全局重置（含 emitResets 记 daily_reset 流水）；未注册 / 读失败的
+// 广告主**不在返回 map 中**，调用方按 (0, 0) 处理（fail-open 放行）。
+func (r *Redis) StatsAll(ids []string) map[string][2]float64 {
+	out := make(map[string][2]float64, len(ids))
+	if len(ids) == 0 {
+		return out
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
+	defer cancel()
+
+	keys := make([]string, 0, len(ids)+2)
+	keys = append(keys, r.dayKey(), r.idsKey())
+	for _, id := range ids {
+		keys = append(keys, r.key(id))
+	}
+	res, err := statsAllScript.Run(ctx, r.client, keys, r.today(), r.prefix+"{bud}:").Result()
+	if err != nil {
+		return out // fail-open：与 Stats 一致
+	}
+	arr, ok := res.([]interface{})
+	if !ok || len(arr) < 1 {
+		return out
+	}
+	r.emitResets(parseResets(arr[0]))
+	// arr[1..] 与 ids[0..] 一一对应的 (budget, spent) 对
+	for i := 1; i+1 < len(arr) && (i-1)/2 < len(ids); i += 2 {
+		id := ids[(i-1)/2]
+		b, bok := arr[i].(string)
+		if !bok || b == "" {
+			continue // 键不存在（未注册）：不入 map
+		}
+		out[id] = [2]float64{parseFloat(arr[i+1]), parseFloat(b)}
+	}
+	return out
 }
 
 // emitResets 把跨日重置的金额补记 daily_reset 流水（与内存版 rollover 一致）。
@@ -196,10 +273,17 @@ func (r *Redis) SyncBalances(balances map[string][2]float64) {
 	today := r.today()
 	pipe = r.client.Pipeline()
 	pipe.SetNX(ctx, r.dayKey(), today, stateKeyTTL) // 确立当日（已存在则不动），并刷 7d TTL
+	if len(ids) > 0 {
+		// 跨日重置集合：一条批量 SADD 取代逐个 SADD（省 N-1 条命令/次对账）
+		members := make([]interface{}, len(ids))
+		for i, id := range ids {
+			members[i] = id
+		}
+		pipe.SAdd(ctx, r.idsKey(), members...)
+	}
 	for i, id := range ids {
 		b := balances[id]
 		k := r.key(id)
-		pipe.SAdd(ctx, r.idsKey(), id) // 纳入跨日重置集合
 		if exists[i].Val() > 0 {
 			pipe.HSet(ctx, k, "budget", formatFloat(b[0])) // 已存在：只刷新上限，不动 spent
 			pipe.Expire(ctx, k, stateKeyTTL)               // 刷 7d TTL，活跃广告主永不过期
@@ -216,33 +300,28 @@ func (r *Redis) SyncBalances(balances map[string][2]float64) {
 }
 
 // sweepDeleted 清理 DB 中已不存在（软删）的广告主状态，避免无主 key 常驻。
+//
+// 实现走 {bud}:ids 集合（SyncBalances 每轮维护）枚举已知 id，**不做全量 SCAN**
+// ——每次对账只多 1 条 SMEMBERS + 真有删除时的 DEL/SREM。Upstash 按请求计费，
+// 全量 SCAN（每 500 key 一页）是对账里最贵的一条，且 7 天 TTL（stateKeyTTL）
+// 本就是无主 key 的兜底，这里只是提前清理。
 func (r *Redis) sweepDeleted(ctx context.Context, keep map[string][2]float64) {
-	const tag = "{bud}:"
-	var cursor uint64
-	for {
-		keys, next, err := r.client.Scan(ctx, cursor, r.prefix+tag+"*", 500).Result()
-		if err != nil {
-			return
+	ids, err := r.client.SMembers(ctx, r.idsKey()).Result()
+	if err != nil || len(ids) == 0 {
+		return
+	}
+	var del []string
+	srem := make([]interface{}, 0, len(ids))
+	for _, id := range ids {
+		if _, ok := keep[id]; ok {
+			continue
 		}
-		var del []string
-		for _, k := range keys {
-			id := strings.TrimPrefix(k, r.prefix+tag)
-			// day / ids 是元数据键，不参与清理
-			if id == "day" || id == "ids" {
-				continue
-			}
-			if _, ok := keep[id]; !ok {
-				del = append(del, k)
-				_ = r.client.SRem(ctx, r.idsKey(), id).Err()
-			}
-		}
-		if len(del) > 0 {
-			_ = r.client.Del(ctx, del...).Err()
-		}
-		cursor = next
-		if cursor == 0 {
-			return
-		}
+		del = append(del, r.key(id))
+		srem = append(srem, id)
+	}
+	if len(del) > 0 {
+		_ = r.client.Del(ctx, del...).Err()
+		_ = r.client.SRem(ctx, r.idsKey(), srem...).Err()
 	}
 }
 
@@ -314,6 +393,10 @@ func (r *Redis) walletKey(advertiserID string) string {
 	return r.prefix + "{wal}:" + advertiserID
 }
 
+// walletIDsKey 已启用钱包的广告主集合（SyncWallets 维护，sweepWallets 枚举用），
+// 与 walletKey 同 {wal} hash tag（同 slot，Cluster 兼容）。
+func (r *Redis) walletIDsKey() string { return r.prefix + "{wal}:ids" }
+
 // walletDeductScript 原子扣减总余额：
 //
 //	键不存在 → 返回 1（未启用，放行扣费，仍走 campaign 日预算闸）
@@ -374,6 +457,15 @@ func (r *Redis) SyncWallets(balances map[string]float64) {
 	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
 	defer cancel()
 	pipe := r.client.Pipeline()
+	if len(balances) > 0 {
+		// 已启用钱包集合：一条批量 SADD（sweepWallets 枚举用，免全量 SCAN）
+		members := make([]interface{}, 0, len(balances))
+		for id := range balances {
+			members = append(members, id)
+		}
+		pipe.SAdd(ctx, r.walletIDsKey(), members...)
+	}
+	pipe.Expire(ctx, r.walletIDsKey(), stateKeyTTL)
 	for id, b := range balances {
 		pipe.HSet(ctx, r.walletKey(id), "balance", formatFloat(b))
 		pipe.Expire(ctx, r.walletKey(id), stateKeyTTL) // 刷 7d TTL
@@ -385,33 +477,30 @@ func (r *Redis) SyncWallets(balances map[string]float64) {
 }
 
 // sweepWallets 清理 DB 中未启用（已停用钱包/已删除）的广告主钱包键。
+// 与 sweepDeleted 同思路：走 {wal}:ids 集合枚举，不做全量 SCAN。
 func (r *Redis) sweepWallets(ctx context.Context, keep map[string]float64) {
-	const tag = "{wal}:"
-	var cursor uint64
-	for {
-		keys, next, err := r.client.Scan(ctx, cursor, r.prefix+tag+"*", 500).Result()
-		if err != nil {
-			return
+	ids, err := r.client.SMembers(ctx, r.walletIDsKey()).Result()
+	if err != nil || len(ids) == 0 {
+		return
+	}
+	var del []string
+	srem := make([]interface{}, 0, len(ids))
+	for _, id := range ids {
+		if _, ok := keep[id]; ok {
+			continue
 		}
-		var del []string
-		for _, k := range keys {
-			id := strings.TrimPrefix(k, r.prefix+tag)
-			if _, ok := keep[id]; !ok {
-				del = append(del, k)
-			}
-		}
-		if len(del) > 0 {
-			_ = r.client.Del(ctx, del...).Err()
-		}
-		cursor = next
-		if cursor == 0 {
-			return
-		}
+		del = append(del, r.walletKey(id))
+		srem = append(srem, id)
+	}
+	if len(del) > 0 {
+		_ = r.client.Del(ctx, del...).Err()
+		_ = r.client.SRem(ctx, r.walletIDsKey(), srem...).Err()
 	}
 }
 
 // 编译期接口实现检查。
 var (
-	_ Ctrl   = (*Redis)(nil)
-	_ Syncer = (*Redis)(nil)
+	_ Ctrl       = (*Redis)(nil)
+	_ Syncer     = (*Redis)(nil)
+	_ BatchStats = (*Redis)(nil)
 )

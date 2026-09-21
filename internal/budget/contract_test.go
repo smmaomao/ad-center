@@ -99,6 +99,26 @@ func runCtrlContract(t *testing.T, c Ctrl, setNow func(time.Time), sync func(all
 		}
 	})
 
+	if bs, ok := c.(BatchStats); ok {
+		t.Run("StatsAll_批量与单查一致", func(t *testing.T) {
+			// 前置用例发生过跨日重置（全局清零），不硬编码状态：
+			// 新扣一笔后，批量结果必须与逐个 Stats 完全一致。
+			if !c.TryDeduct("adv1", 5) {
+				t.Fatal("扣费应成功")
+			}
+			got := bs.StatsAll([]string{"adv1", "adv3", "ghost"})
+			for _, id := range []string{"adv1", "adv3"} {
+				spent, budget := c.Stats(id)
+				if b := got[id]; b != [2]float64{spent, budget} {
+					t.Fatalf("StatsAll(%s)=%v 与 Stats=(%v,%v) 不一致", id, b, spent, budget)
+				}
+			}
+			if _, exists := got["ghost"]; exists {
+				t.Fatal("未注册广告主不应出现在批量结果中（调用方按 (0,0) fail-open）")
+			}
+		})
+	}
+
 	if sync != nil {
 		baseline := map[string][2]float64{
 			"adv1": {100, 0}, "adv2": {100, 95}, "adv3": {50, 0},

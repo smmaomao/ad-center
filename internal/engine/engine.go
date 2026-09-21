@@ -152,10 +152,24 @@ func (e *Engine) Decide(snap *config.Snapshot, req Request) Response {
 // （素材只与投放任务挂钩，不再按广告主维度遍历全部素材）。素材经 style / 投放 App / 广告主
 // 定向过滤后，按归属 campaign 的预算 / 排期 / KPI 打分；未关联任何任务的素材不参与投放。
 func (e *Engine) buildCandidates(snap *config.Snapshot, req Request) []candidate {
+	// 预算快照一次取全量：Budget 实现 BatchStats（Redis 后端 = 单 Lua 1 次往返）
+	// 时，把原本 N 次 EVALSHA/请求（/v1/ad/list ×5 样式即 5N 次）合并为 1 次；
+	// 未实现时退化为逐个 Stats，语义不变。未注册/失败的 ID 不在返回 map 中，
+	// 下方按 (0,0) 处理，与 Stats 的 fail-open 语义一致。
 	campBudgets := make(map[string][2]float64, len(snap.Campaigns))
-	for id := range snap.Campaigns {
-		spent, budget := e.Budget.Stats(id)
-		campBudgets[id] = [2]float64{spent, budget}
+	if bs, ok := e.Budget.(budget.BatchStats); ok {
+		ids := make([]string, 0, len(snap.Campaigns))
+		for id := range snap.Campaigns {
+			ids = append(ids, id)
+		}
+		for id, b := range bs.StatsAll(ids) {
+			campBudgets[id] = b
+		}
+	} else {
+		for id := range snap.Campaigns {
+			spent, budget := e.Budget.Stats(id)
+			campBudgets[id] = [2]float64{spent, budget}
+		}
 	}
 	cands := make([]candidate, 0)
 	for _, camp := range snap.Campaigns {

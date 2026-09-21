@@ -45,8 +45,19 @@ type Ctrl interface {
 	WalletCredit(advertiserID string, amount float64)
 }
 
-// Syncer 预算控制器的可选能力：由配置变更驱动的日预算同步。
+// BatchStats 可选能力：批量读取预算快照（决策热路径优化）。
 //
+// 背景：engine.buildCandidates 每次决策要读**所有**任务的 (spent, budget)，
+// Redis 后端下逐个 Stats 意味着 N 次 EVALSHA/请求（/v1/ad/list 还要 ×5 个样式）。
+// 实现 BatchStats 的控制器（Redis：单 Lua，所有 key 同 {bud} hash tag 同 slot；
+// Memory：一次加锁遍历）把往返降到 1 次；未实现的控制器由调用方退化为逐个 Stats。
+type BatchStats interface {
+	// StatsAll 批量返回 (今日已耗, 日预算)。未注册 / 读失败的 ID 不在返回值中，
+	// 调用方按 (0, 0) 处理——与 Stats 的 fail-open 语义一致。
+	StatsAll(ids []string) map[string][2]float64
+}
+
+// Syncer 预算控制器的可选能力：由配置变更驱动的日预算同步。//
 // 为什么需要（B2/B3）：广告主列表与日预算由 ConfigCache 热更新（秒级生效），
 // 但预算状态是进程内独立维护的（启动时从 DB 灌入后不再回查）。不同步会导致：
 //   - B2：后台新建的广告主，配置已进快照可以参排，但预算表里没有它 →

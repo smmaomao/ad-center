@@ -110,6 +110,22 @@ func (m *Memory) Stats(advertiserID string) (spent, budget float64) {
 	return b.spent, b.budget
 }
 
+// StatsAll 批量版 Stats（BatchStats）：一次加锁遍历，跨日重置只做一次
+//（逐个 Stats 每个都会触发 rolloverLocked，幂等但重复）。未注册的 ID 不入 map，
+// 调用方按 (0,0) 处理，与 Stats 语义一致。
+func (m *Memory) StatsAll(ids []string) map[string][2]float64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rolloverLocked()
+	out := make(map[string][2]float64, len(ids))
+	for _, id := range ids {
+		if b, ok := m.balances[id]; ok {
+			out[id] = [2]float64{b.spent, b.budget}
+		}
+	}
+	return out
+}
+
 // SyncBalances 用 DB 全量快照对齐内存预算表（配置热更新路径调用）。
 //
 // 语义严格遵循 budget.Syncer 接口契约，核心是**只刷新 daily_budget、不动 spent**：
@@ -196,6 +212,7 @@ func (m *Memory) SyncWallets(balances map[string]float64) {
 
 // 编译期接口实现检查。
 var (
-	_ Ctrl   = (*Memory)(nil)
-	_ Syncer = (*Memory)(nil)
+	_ Ctrl       = (*Memory)(nil)
+	_ Syncer     = (*Memory)(nil)
+	_ BatchStats = (*Memory)(nil)
 )
