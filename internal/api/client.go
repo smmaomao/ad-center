@@ -632,15 +632,20 @@ func (s *Server) fireRewardCallback(app *config.App, bid *BidContext, bidID, use
 		ok := false
 		resp, err := rewardCallbackClient.Post(url, "application/json", bytes.NewReader(b))
 		if err != nil {
-			s.Log.Warn("reward callback failed", "url", url, "err", err)
+			s.Log.Warn("reward callback failed", "url", url, "err", err, "req", string(b))
+			s.enqueueVideoComplete(bid, app.ID, false)
+			return
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		ok = resp.StatusCode >= 200 && resp.StatusCode < 300
+		if ok {
+			s.Log.Info("reward callback sent", "url", url, "user_id", userID, "bid_id", bidID)
 		} else {
-			resp.Body.Close()
-			ok = resp.StatusCode >= 200 && resp.StatusCode < 300
-			if ok {
-				s.Log.Info("reward callback sent", "url", url, "user_id", userID, "bid_id", bidID)
-			} else {
-				s.Log.Warn("reward callback non-2xx", "url", url, "status", resp.StatusCode)
-			}
+			// 业务后端非 2xx：连同响应体/请求体/app_id 一起打印，便于定位 4xx 原因。
+			s.Log.Warn("reward callback non-2xx",
+				"url", url, "status", resp.StatusCode, "resp", string(body),
+				"req", string(b), "app_id", payload["app_id"], "user_id", userID)
 		}
 		s.enqueueVideoComplete(bid, app.ID, ok)
 	}()
