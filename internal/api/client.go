@@ -519,6 +519,8 @@ func (s *Server) handleAdImpression(w http.ResponseWriter, r *http.Request) {
 
 // handleAdVideoComplete POST /v1/ad/video-complete 激励视频播放完毕（文档接口 4）。
 // 服务端校验后异步触发 S2S 回调，通知业务后端给 user_id 发奖励。
+// 注意：bid_id 为非强校验——客户端走第三方广告 SDK 时可能不带 bid_id（或已过期），
+// 此时用客户端上报字段构造最小上下文继续发奖回调，不因缺失 bid_id 拒绝请求。
 //
 //	@Summary      视频播放完毕
 //	@Description  仅 REWARDED_VIDEO 样式：观看达到 required_duration 秒或自然播完时上报，触发 S2S 回调发奖。
@@ -571,12 +573,16 @@ func (s *Server) handleAdVideoComplete(w http.ResponseWriter, r *http.Request) {
 	}
 	bid, ok := s.Bids.Get(r.Context(), req.BidID)
 	if !ok {
-		writeError(w, http.StatusBadRequest, "invalid or expired bid_id")
-		return
-	}
-	if req.CreativeID != "" && req.CreativeID != bid.CreativeID {
-		writeError(w, http.StatusBadRequest, "creative_id mismatch")
-		return
+		// 客户端可能走第三方广告 SDK，上报时不带 bid_id/creative_id（或 bid 已过期）。
+		// 不做强校验：用客户端上报的字段构造最小上下文，继续触发 S2S 发奖回调。
+		s.Log.Info("ad video-complete: no valid bid_id, proceed without bid context",
+			"app", app.ID, "bid_id", req.BidID, "creative_id", req.CreativeID)
+		bid = &BidContext{AppID: app.ID, CreativeID: req.CreativeID}
+	} else if req.CreativeID != "" && req.CreativeID != bid.CreativeID {
+		// creative_id 也非强校验：第三方 SDK 场景可能与 bid 记录不一致，仅记日志不影响发奖。
+		s.Log.Warn("ad video-complete: creative_id mismatch, proceed anyway",
+			"app", app.ID, "bid_id", req.BidID,
+			"req_creative_id", req.CreativeID, "bid_creative_id", bid.CreativeID)
 	}
 	s.fireRewardCallback(app, bid, req.BidID, req.UserID, req.Timestamp)
 	s.Log.Info("ad video-complete",
