@@ -628,6 +628,9 @@ func (s *Server) fireRewardCallback(app *config.App, bid *BidContext, bidID, use
 		return
 	}
 	url := app.CallbackURL
+	// 每次转发都打印完整参数（app_id/user_id 以及合并后的 ad_watch_params 等），便于对账与定位业务后端 4xx。
+	s.Log.Info("reward callback dispatch",
+		"url", url, "params", string(b), "app_id", payload["app_id"], "user_id", userID, "bid_id", bidID)
 	go func() {
 		ok := false
 		resp, err := rewardCallbackClient.Post(url, "application/json", bytes.NewReader(b))
