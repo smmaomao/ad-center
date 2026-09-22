@@ -621,6 +621,13 @@ func (s *Server) fireRewardCallback(app *config.App, bid *BidContext, bidID, use
 	} else {
 		payload["app_id"] = appID
 	}
+	// user_id：业务后端（如 dramaapk /adWatch/callback）约定为 int64；纯数字字符串转为数字发送，
+	// 非数字（如 UUID）则维持字符串，兼容其它业务后端。
+	if s, ok := payload["user_id"].(string); ok {
+		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+			payload["user_id"] = n
+		}
+	}
 	b, err := json.Marshal(payload)
 	if err != nil {
 		s.Log.Error("marshal reward callback failed", "err", err)
