@@ -265,17 +265,8 @@ func (r *Redis) SyncBalances(balances map[string][2]float64) {
 		ids = append(ids, id)
 	}
 
-	pipe := r.client.Pipeline()
-	exists := make([]*redis.IntCmd, len(ids))
-	for i, id := range ids {
-		exists[i] = pipe.Exists(ctx, r.key(id))
-	}
-	if _, err := pipe.Exec(ctx); err != nil {
-		return
-	}
-
 	today := r.today()
-	pipe = r.client.Pipeline()
+	pipe := r.client.Pipeline()
 	pipe.SetNX(ctx, r.dayKey(), today, stateKeyTTL) // 确立当日（已存在则不动），并刷 7d TTL
 	if len(ids) > 0 {
 		// 跨日重置集合：一条批量 SADD 取代逐个 SADD（省 N-1 条命令/次对账）
@@ -285,16 +276,15 @@ func (r *Redis) SyncBalances(balances map[string][2]float64) {
 		}
 		pipe.SAdd(ctx, r.idsKey(), members...)
 	}
-	for i, id := range ids {
+	for _, id := range ids {
 		b := balances[id]
 		k := r.key(id)
-		if exists[i].Val() > 0 {
-			pipe.HSet(ctx, k, "budget", formatFloat(b[0])) // 已存在：只刷新上限，不动 spent
-			pipe.Expire(ctx, k, stateKeyTTL)               // 刷 7d TTL，活跃广告主永不过期
-			continue
-		}
-		pipe.HSet(ctx, k, "budget", formatFloat(b[0]), "spent", formatFloat(b[1]), "day", today)
-		pipe.Expire(ctx, k, stateKeyTTL)
+		// 预算上限始终用同步值刷新；spent/day 仅在字段缺失时初始化（HSetNX），
+		// 避免覆盖运行时累计值。相比先 Exists 探活再分支，省掉一次管道往返。
+		pipe.HSet(ctx, k, "budget", formatFloat(b[0]))
+		pipe.HSetNX(ctx, k, "spent", formatFloat(b[1]))
+		pipe.HSetNX(ctx, k, "day", today)
+		pipe.Expire(ctx, k, stateKeyTTL) // 刷 7d TTL，活跃广告主永不过期
 	}
 	pipe.Expire(ctx, r.idsKey(), stateKeyTTL) // 刷 7d TTL
 	if _, err := pipe.Exec(ctx); err != nil {

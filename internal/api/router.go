@@ -37,6 +37,10 @@ func generateAPIKey() (key, hash string, err error) {
 // Decider 决策引擎接口（*engine.Engine 实现）。抽出来便于缓存逻辑单测注入桩。
 type Decider interface {
 	Decide(snap *config.Snapshot, req engine.Request) engine.Response
+	// 跨样式批量决策时由 API 层预取一次、复用，避免热路径重复读 Redis。
+	BudgetSnapshot(snap *config.Snapshot) map[string][2]float64
+	WalletBalances(snap *config.Snapshot) map[string]float64
+	DecideWith(snap *config.Snapshot, req engine.Request, campBudgets map[string][2]float64, wallets map[string]float64) engine.Response
 }
 
 // Server 聚合全部运行依赖（main 装配后注入）。

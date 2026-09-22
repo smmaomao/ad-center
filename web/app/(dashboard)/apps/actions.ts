@@ -24,8 +24,17 @@ export async function createAppAction(
   if (!session) return { error: "未登录" };
   const name = str(fd, "name");
   if (!name) return { error: "请填写应用名称" };
+  const adWatchParams = str(fd, "ad_watch_params");
+  if (adWatchParams) {
+    try {
+      JSON.parse(adWatchParams);
+    } catch {
+      return { error: "ad_watch_params 必须是合法 JSON 对象" };
+    }
+  }
+  const addServerID = str(fd, "add_server_id");
   try {
-    const r = await createApp(session.email, name);
+    const r = await createApp(session.email, name, adWatchParams, addServerID);
     revalidatePath("/apps");
     return { id: r.id, api_key: r.api_key };
   } catch (e) {
@@ -55,6 +64,20 @@ export async function updateAppAction(
   if (status) fields.status = status;
   // 回调地址允许清空
   fields.callback_url = str(fd, "callback_url");
+
+  // 完播回传附加参数（JSON 对象），允许清空
+  const adWatchParams = str(fd, "ad_watch_params");
+  if (adWatchParams) {
+    try {
+      JSON.parse(adWatchParams);
+    } catch {
+      return { error: "ad_watch_params 必须是合法 JSON 对象" };
+    }
+  }
+  fields.ad_watch_params = adWatchParams;
+
+  // app 服务端侧 id（转发 reward 回调时作为 app_id；留空则回退 app_code）
+  fields.add_server_id = str(fd, "add_server_id");
 
   try {
     await updateApp(session.email, id, fields);

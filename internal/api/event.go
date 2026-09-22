@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strconv"
 
@@ -259,18 +260,27 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Name string `json:"name"`
+		Name          string `json:"name"`
+		AdWatchParams string `json:"ad_watch_params"`
+		AddServerID   string `json:"add_server_id"`
 	}
 	if !decodeJSON(w, r, &body) || body.Name == "" {
 		writeError(w, http.StatusBadRequest, "name required")
 		return
+	}
+	if body.AdWatchParams != "" {
+		var tmp map[string]any
+		if err := json.Unmarshal([]byte(body.AdWatchParams), &tmp); err != nil {
+			writeError(w, http.StatusBadRequest, "ad_watch_params must be a JSON object")
+			return
+		}
 	}
 	key, hash, err := generateAPIKey()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	id, err := s.Store.CreateApp(r.Context(), body.Name, key, hash)
+	id, err := s.Store.CreateApp(r.Context(), body.Name, key, hash, body.AdWatchParams, body.AddServerID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -280,18 +290,20 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id, "api_key": key})
 }
 
-// handleUpdateApp 更新 App 名称 / 状态 / 业务后端回调地址。
+// handleUpdateApp 更新 App 名称 / 状态 / 业务后端回调地址 / 完播回传附加参数 / app 服务端 id。
 //
-//	PATCH /v1/admin/apps/{id}  {"name"?,"status"?,"callback_url"?}
+//	PATCH /v1/admin/apps/{id}  {"name"?,"status"?,"callback_url"?,"ad_watch_params"?,"add_server_id"?}
 func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireRole(w, r, true, true) // 仅 super_admin
 	if !ok {
 		return
 	}
 	var body struct {
-		Name        *string `json:"name"`
-		Status      *string `json:"status"`
-		CallbackURL *string `json:"callback_url"`
+		Name          *string `json:"name"`
+		Status        *string `json:"status"`
+		CallbackURL   *string `json:"callback_url"`
+		AdWatchParams *string `json:"ad_watch_params"`
+		AddServerID   *string `json:"add_server_id"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -309,6 +321,19 @@ func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.CallbackURL != nil {
 		fields["callback_url"] = *body.CallbackURL
+	}
+	if body.AdWatchParams != nil {
+		if *body.AdWatchParams != "" {
+			var tmp map[string]any
+			if err := json.Unmarshal([]byte(*body.AdWatchParams), &tmp); err != nil {
+				writeError(w, http.StatusBadRequest, "ad_watch_params must be a JSON object")
+				return
+			}
+		}
+		fields["ad_watch_params"] = *body.AdWatchParams
+	}
+	if body.AddServerID != nil {
+		fields["add_server_id"] = *body.AddServerID
 	}
 	if len(fields) == 0 {
 		writeError(w, http.StatusBadRequest, "no fields to update")

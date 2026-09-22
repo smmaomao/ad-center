@@ -90,16 +90,18 @@ export interface AdminApp {
   name: string;
   status: string;
   callback_url: string | null; // 业务后端 S2S 接收地址
+  ad_watch_params: string | null; // 激励视频完播回传附加参数（JSON 对象，扩展用，如鉴权）
+  add_server_id: string | null; // app 服务端侧的应用 id（转发时作为 app_id）
   secret_key: string; // S2S 签名密钥（可重置）
   api_key: string | null; // API Key 明文（仅展示/复制，鉴权走 hash）
   created_at?: string | null; // 创建日期（YYYY-MM-DD）
 }
 
-/** 更新 App（名称 / 状态 / 业务回调地址） */
+/** 更新 App（名称 / 状态 / 业务回调地址 / 完播回传附加参数 / app 服务端 id） */
 export async function updateApp(
   actorEmail: string,
   id: string,
-  body: { name?: string; status?: string; callback_url?: string },
+  body: { name?: string; status?: string; callback_url?: string; ad_watch_params?: string; add_server_id?: string },
 ) {
   return goSend<{ status: string }>(
     `/v1/admin/apps/${id}`,
@@ -440,12 +442,12 @@ export async function listApps(actorEmail: string) {
 }
 
 /** 注册 App：返回 Ad_App_Id 与 API Key（Key 仅此一次返回，之后不可再取） */
-export async function createApp(actorEmail: string, name: string) {
+export async function createApp(actorEmail: string, name: string, adWatchParams?: string, addServerID?: string) {
   return goSend<{ id: string; api_key: string }>(
     "/v1/admin/apps",
     actorEmail,
     "POST",
-    { name },
+    { name, ad_watch_params: adWatchParams ?? "", add_server_id: addServerID ?? "" },
   );
 }
 

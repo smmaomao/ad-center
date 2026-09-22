@@ -205,20 +205,22 @@ func (s *Store) ListSlots(ctx context.Context) ([]*AdminSlot, error) {
 
 // AdminApp App 管理视图（密钥仅展示当前值，用于复制）。
 type AdminApp struct {
-	ID          string  `json:"id"`
-	Name        string  `json:"name"`
-	Status      string  `json:"status"`
-	CallbackURL *string `json:"callback_url"` // 业务后端 S2S 接收地址
-	SecretKey   string  `json:"secret_key"`   // S2S 签名密钥（支持重置）
-	APIKey      *string `json:"api_key"`      // API Key 明文（仅展示/交付；鉴权走 hash）
-	CreatedAt   *string `json:"created_at"`   // 创建日期（YYYY-MM-DD）
+	ID             string  `json:"id"`
+	Name           string  `json:"name"`
+	Status         string  `json:"status"`
+	CallbackURL    *string `json:"callback_url"`    // 业务后端 S2S 接收地址
+	AdWatchParams  *string `json:"ad_watch_params"` // 激励视频完播回传附加参数（JSON 对象，扩展用，如鉴权）
+	AddServerID    *string `json:"add_server_id"`   // app 服务端侧的应用 id（转发时作为 app_id）
+	SecretKey      string  `json:"secret_key"`      // S2S 签名密钥（支持重置）
+	APIKey         *string `json:"api_key"`         // API Key 明文（仅展示/交付；鉴权走 hash）
+	CreatedAt      *string `json:"created_at"`      // 创建日期（YYYY-MM-DD）
 }
 
 // ListApps App 列表（已软删的不展示）。
 func (s *Store) ListApps(ctx context.Context) ([]*AdminApp, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT code, name, status,
-		        callback_url, secret_key, api_key, to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')
+		        callback_url, ad_watch_params, add_server_id, secret_key, api_key, to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')
 		 FROM apps WHERE deleted_at IS NULL ORDER BY created_at`)
 	if err != nil {
 		return nil, err
@@ -228,7 +230,7 @@ func (s *Store) ListApps(ctx context.Context) ([]*AdminApp, error) {
 	for rows.Next() {
 		a := &AdminApp{}
 		if err := rows.Scan(&a.ID, &a.Name, &a.Status,
-			&a.CallbackURL, &a.SecretKey, &a.APIKey, &a.CreatedAt); err != nil {
+			&a.CallbackURL, &a.AdWatchParams, &a.AddServerID, &a.SecretKey, &a.APIKey, &a.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
@@ -252,15 +254,15 @@ func (s *Store) SoftDeleteApp(ctx context.Context, id string) error {
 // CreateApp 注册 App：app_code 短字符串由本方法生成（10 位 数字+小写字母），
 // api key 哈希由调用方生成，明文一并落库（仅供后台展示/复制，鉴权仍走 hash）。
 // app_code（apps.code）全局唯一由 apps 的 code 唯一约束保证，极小概率冲突时自动换一个重试。
-func (s *Store) CreateApp(ctx context.Context, name, key, keyHash string) (string, error) {
+func (s *Store) CreateApp(ctx context.Context, name, key, keyHash, adWatchParams, addServerID string) (string, error) {
 	for attempt := 0; attempt < 5; attempt++ {
 		id, err := generateAppID()
 		if err != nil {
 			return "", err
 		}
 		if _, err = s.pool.Exec(ctx, `
-			INSERT INTO apps (code, name, api_key, api_key_hash)
-			VALUES ($1, $2, $3, $4)`, id, name, key, keyHash); err != nil {
+			INSERT INTO apps (code, name, api_key, api_key_hash, ad_watch_params, add_server_id)
+			VALUES ($1, $2, $3, $4, $5, $6)`, id, name, key, keyHash, adWatchParams, addServerID); err != nil {
 			if isUniqueViolation(err) {
 				continue
 			}
@@ -310,7 +312,7 @@ func isUniqueViolation(err error) bool {
 // appUpdatable App 可更新列。api_key_hash 不在其中——换 key 必须走专门的
 // 轮换流程（重新生成并安全交付给客户端），不能被普通编辑接口覆盖。
 var appUpdatable = map[string]bool{
-	"name": true, "status": true, "callback_url": true,
+	"name": true, "status": true, "callback_url": true, "ad_watch_params": true, "add_server_id": true,
 }
 
 // UpdateApp 更新 App 名称 / 状态 / 业务回调地址（部分更新）。

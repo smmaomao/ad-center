@@ -67,14 +67,14 @@ func (s *Store) LoadSnapshot(ctx context.Context) (*config.Snapshot, error) {
 	}
 
 	rows, err := s.pool.Query(ctx, `
-		SELECT code, name, api_key_hash, status, COALESCE(callback_url, '')
+		SELECT code, name, api_key_hash, status, COALESCE(callback_url, ''), COALESCE(ad_watch_params, ''), COALESCE(add_server_id, '')
 		FROM apps WHERE status = 'active' AND deleted_at IS NULL`)
 	if err != nil {
 		return nil, fmt.Errorf("load apps: %w", err)
 	}
 	for rows.Next() {
 		a := &config.App{}
-		if err := rows.Scan(&a.ID, &a.Name, &a.APIKeyHash, &a.Status, &a.CallbackURL); err != nil {
+		if err := rows.Scan(&a.ID, &a.Name, &a.APIKeyHash, &a.Status, &a.CallbackURL, &a.AdWatchParams, &a.AddServerID); err != nil {
 			rows.Close()
 			return nil, err
 		}

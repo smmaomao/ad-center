@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -310,15 +311,19 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 	mark("snapshot")
 	now := time.Now()
 
+	// 预算/钱包快照只取一次，跨 5 个样式复用（Decide 内部不再重复读 Redis）。
+	campBudgets := s.Engine.BudgetSnapshot(snap)
+	wallets := s.Engine.WalletBalances(snap)
+
 	// 跨全部样式决策，按素材(creative)去重汇总，取前 count 条。
 	// 一个 creative 对应一条广告：ad_style / target_scene 合并该素材支持的全部样式，
 	// required_duration 取各样式最大值；bid/指标以素材首个样式作为归因代表。
 	collected := make([]engine.Item, 0)
 	seen := map[string]bool{}
 	for _, style := range engine.Styles {
-		resp := s.Engine.Decide(snap, engine.Request{
+		resp := s.Engine.DecideWith(snap, engine.Request{
 			App: app, Style: style, DeviceID: deviceID, Count: count, Now: now,
-		})
+		}, campBudgets, wallets)
 		for _, it := range resp.Items {
 			if it.Creative == nil {
 				continue
@@ -592,6 +597,29 @@ func (s *Server) fireRewardCallback(app *config.App, bid *BidContext, bidID, use
 		"app_code":    app.ID,
 		"style":       bid.Style,
 		"timestamp":   ts,
+	}
+	// 合并后台维护的 ad_watch_params（扩展参数，后续可放鉴权等）。后台保证
+	// user_id（本次观看请求）与 app_id 始终存在：app_id 取 add_server_id（app
+	// 服务端侧 id），未配置时回退到本系统 app_code。
+	if app.AdWatchParams != "" {
+		var extra map[string]any
+		if err := json.Unmarshal([]byte(app.AdWatchParams), &extra); err == nil {
+			for k, v := range extra {
+				payload[k] = v
+			}
+		} else {
+			s.Log.Warn("ad_watch_params invalid json, ignored", "app", app.ID, "err", err)
+		}
+	}
+	appID := app.AddServerID
+	if appID == "" {
+		appID = app.ID
+	}
+	// 与 app 服务端约定：app_id 尽量以数字形式发送，否则回退字符串。
+	if n, err := strconv.ParseInt(appID, 10, 64); err == nil {
+		payload["app_id"] = n
+	} else {
+		payload["app_id"] = appID
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {

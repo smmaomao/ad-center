@@ -38,6 +38,19 @@ func (d *countingDecider) Decide(_ *config.Snapshot, _ engine.Request) engine.Re
 	return d.resp
 }
 
+func (d *countingDecider) BudgetSnapshot(_ *config.Snapshot) map[string][2]float64 {
+	return nil
+}
+
+func (d *countingDecider) WalletBalances(_ *config.Snapshot) map[string]float64 {
+	return nil
+}
+
+func (d *countingDecider) DecideWith(_ *config.Snapshot, _ engine.Request, _ map[string][2]float64, _ map[string]float64) engine.Response {
+	d.calls++
+	return d.resp
+}
+
 // fakeCache 内存实现 cache.DecisionCache，记录 Set 次数。
 type fakeCache struct {
 	m    map[string][]byte

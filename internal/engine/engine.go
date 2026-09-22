@@ -100,8 +100,46 @@ type candidate struct {
 	budget float64
 }
 
-// Decide 执行决策（PRD 5.1 / 5.5，去 slot 版）。
+// BudgetSnapshot 全量任务预算快照（一次 Redis 往返）。跨样式复用：/v1/ad/list 按
+// engine.Styles 循环决策时由 API 层预取一次传入，避免每个样式各读一遍全量预算。
+func (e *Engine) BudgetSnapshot(snap *config.Snapshot) map[string][2]float64 {
+	ids := make([]string, 0, len(snap.Campaigns))
+	for id := range snap.Campaigns {
+		ids = append(ids, id)
+	}
+	out := make(map[string][2]float64, len(ids))
+	if bs, ok := e.Budget.(budget.BatchStats); ok {
+		for id, b := range bs.StatsAll(ids) {
+			out[id] = b
+		}
+		return out
+	}
+	for _, id := range ids {
+		spent, budget := e.Budget.Stats(id)
+		out[id] = [2]float64{spent, budget}
+	}
+	return out
+}
+
+// WalletBalances 全部广告主总钱包余额（一次批量读）。未启用钱包的广告主记为 +inf，
+// 与 Budget.WalletBalance 的 fail-open 语义一致。materialize 按广告主复用，避免
+// 逐候选重复读同一广告主的钱包（EXISTS + HGET 两次 Redis）。
+func (e *Engine) WalletBalances(snap *config.Snapshot) map[string]float64 {
+	out := make(map[string]float64, len(snap.Advertisers))
+	for id := range snap.Advertisers {
+		out[id] = e.Budget.WalletBalance(id)
+	}
+	return out
+}
+
+// Decide 单次决策（兼容单样式直接调用）。预算/钱包快照各取一次。
 func (e *Engine) Decide(snap *config.Snapshot, req Request) Response {
+	return e.DecideWith(snap, req, e.BudgetSnapshot(snap), e.WalletBalances(snap))
+}
+
+// DecideWith 复用调用方已取好的快照（跨样式批量决策时由 API 层预取一次传入），
+// 消除热路径里按样式重复的 Redis 读。
+func (e *Engine) DecideWith(snap *config.Snapshot, req Request, campBudgets map[string][2]float64, wallets map[string]float64) Response {
 	if req.Count < 1 {
 		req.Count = 1
 	}
@@ -113,7 +151,7 @@ func (e *Engine) Decide(snap *config.Snapshot, req Request) Response {
 	}
 
 	// ① 筛选（活跃/上下架/定向/样式/投放 App）+ ② 打分
-	cands := e.buildCandidates(snap, req)
+	cands := e.buildCandidates(snap, req, campBudgets)
 	if len(cands) == 0 {
 		return Response{Fallback: "self_promo"}
 	}
@@ -128,15 +166,12 @@ func (e *Engine) Decide(snap *config.Snapshot, req Request) Response {
 
 	// ④ 逐条物化：频控 / 预算闸挡住的跳过，至多取 count 条
 	var items []Item
-	matReasons := map[string]int{}
 	for _, c := range cands {
 		if len(items) >= req.Count {
 			break
 		}
-		if item, ok := e.materialize(req, c); ok {
+		if item, ok := e.materialize(req, c, wallets); ok {
 			items = append(items, item)
-		} else {
-			matReasons[materializeBlockedReason(e, req, c)]++
 		}
 	}
 	if len(items) == 0 {
@@ -148,26 +183,8 @@ func (e *Engine) Decide(snap *config.Snapshot, req Request) Response {
 // buildCandidates 遍历所有投放任务（campaign），以各任务 creative_ids 指定的素材为候选
 // （素材只与投放任务挂钩，不再按广告主维度遍历全部素材）。素材经 style / 投放 App / 广告主
 // 定向过滤后，按归属 campaign 的预算 / 排期 / KPI 打分；未关联任何任务的素材不参与投放。
-func (e *Engine) buildCandidates(snap *config.Snapshot, req Request) []candidate {
-	// 预算快照一次取全量：Budget 实现 BatchStats（Redis 后端 = 单 Lua 1 次往返）
-	// 时，把原本 N 次 EVALSHA/请求（/v1/ad/list ×5 样式即 5N 次）合并为 1 次；
-	// 未实现时退化为逐个 Stats，语义不变。未注册/失败的 ID 不在返回 map 中，
-	// 下方按 (0,0) 处理，与 Stats 的 fail-open 语义一致。
-	campBudgets := make(map[string][2]float64, len(snap.Campaigns))
-	if bs, ok := e.Budget.(budget.BatchStats); ok {
-		ids := make([]string, 0, len(snap.Campaigns))
-		for id := range snap.Campaigns {
-			ids = append(ids, id)
-		}
-		for id, b := range bs.StatsAll(ids) {
-			campBudgets[id] = b
-		}
-	} else {
-		for id := range snap.Campaigns {
-			spent, budget := e.Budget.Stats(id)
-			campBudgets[id] = [2]float64{spent, budget}
-		}
-	}
+func (e *Engine) buildCandidates(snap *config.Snapshot, req Request, campBudgets map[string][2]float64) []candidate {
+	// 预算快照由调用方预取（DecideWith 透传），此处直接复用，不再读 Redis。
 	cands := make([]candidate, 0)
 	for _, camp := range snap.Campaigns {
 		if !camp.Active(req.Now) {
@@ -325,7 +342,7 @@ func CampaignFreqWindows(camp *config.Campaign) []frequency.Window {
 // 层调用 frequency.Store.Record（见 CampaignFreqWindows 的同款窗口）。materialize
 // 只通过 frequency.Store.Check 读取计数，据此隐藏已达上限的素材——决策缓存命中
 // 也不会误增计数，上限始终以真实观看次数为准。
-func (e *Engine) materialize(req Request, c candidate) (Item, bool) {
+func (e *Engine) materialize(req Request, c candidate, wallets map[string]float64) (Item, bool) {
 	// 任务级滑动窗口频控（每个 campaign 独立；广告主级 freq_windows 已弃用）。
 	// 计数时机改为真实观看（impression），此处仅做只读检查。
 	if c.camp != nil {
@@ -338,9 +355,11 @@ func (e *Engine) materialize(req Request, c candidate) (Item, bool) {
 		}
 	}
 	// 广告主总钱包硬顶：余额 <=0 → 停投该广告主下全部 campaign（即使 campaign
-	// 日预算没超）。未启用钱包的广告主 WalletBalance 返回 +inf，不受此闸限制。
-	if c.adv != nil && e.Budget.WalletBalance(c.adv.ID) <= 0 {
-		return Item{}, false
+	// 日预算没超）。wallets 由调用方按广告主预取，未启用记为 +inf 不受此闸限制。
+	if c.adv != nil {
+		if bal, ok := wallets[c.adv.ID]; ok && bal <= 0 {
+			return Item{}, false
+		}
 	}
 	// 预算只读闸：用请求内快照判断（spent >= budget 停投，不扣费）。
 	if c.budget > 0 && c.spent >= c.budget {
@@ -359,7 +378,7 @@ func (e *Engine) materialize(req Request, c candidate) (Item, bool) {
 
 
 // materializeBlockedReason 返回某候选在物化阶段被挡的原因（只读，不影响状态）。
-func materializeBlockedReason(e *Engine, req Request, c candidate) string {
+func materializeBlockedReason(e *Engine, req Request, c candidate, wallets map[string]float64) string {
 	if c.camp != nil {
 		windows := CampaignFreqWindows(c.camp)
 		if len(windows) > 0 {
@@ -369,8 +388,10 @@ func materializeBlockedReason(e *Engine, req Request, c candidate) string {
 			}
 		}
 	}
-	if c.adv != nil && e.Budget.WalletBalance(c.adv.ID) <= 0 {
-		return "wallet_zero"
+	if c.adv != nil {
+		if bal, ok := wallets[c.adv.ID]; ok && bal <= 0 {
+			return "wallet_zero"
+		}
 	}
 	if c.budget > 0 && c.spent >= c.budget {
 		return "budget_exhausted"

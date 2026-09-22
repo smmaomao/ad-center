@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { useEffect, useActionState, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -33,6 +33,14 @@ export function EditAppModal({
   const [rState, rAction, rPending] = useActionState(resetAppSecretAction, {} as ResetResult);
   const [kState, kAction, kPending] = useActionState(resetAppKeyAction, {} as ResetKeyResult);
   const [showKey, setShowKey] = useState(false);
+
+  // 编辑保存成功后自动关闭弹窗（重置密钥/Key 成功时不关，需保留页面供复制）。
+  useEffect(() => {
+    if (uState.ok) {
+      const t = setTimeout(onClose, 400);
+      return () => clearTimeout(t);
+    }
+  }, [uState.ok, onClose]);
 
   const footer = canWrite ? (
     <>
@@ -73,6 +81,34 @@ export function EditAppModal({
               defaultValue={app.callback_url ?? ""}
               disabled={!canWrite}
             />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="ad_watch_params">完播回传附加参数 (ad_watch_params)</Label>
+            <textarea
+              id="ad_watch_params"
+              name="ad_watch_params"
+              rows={3}
+              defaultValue={app.ad_watch_params ?? ""}
+              disabled={!canWrite}
+              className="block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-sm outline-none transition focus-visible:border-slate-400 focus-visible:ring-2 focus-visible:ring-slate-200 disabled:opacity-60"
+            />
+            <p className="text-xs text-slate-500">
+              激励视频完播回传 App 业务后端时的扩展参数（JSON 对象），后续可用于鉴权等。系统会自动附带 app_id（取自 App 服务端 ID）与 user_id，其余参数按需填写；留空则仅发送 app_id + user_id。
+            </p>
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="add_server_id">App 服务端 ID (add_server_id)</Label>
+            <Input
+              id="add_server_id"
+              name="add_server_id"
+              placeholder="如 1"
+              defaultValue={app.add_server_id ?? ""}
+              disabled={!canWrite}
+              autoComplete="off"
+            />
+            <p className="text-xs text-slate-500">
+              App 服务端侧的应用 id。视频完播回传到业务后端时，会以 "app_id" 键发送该值；留空则回退到本系统 app_code。
+            </p>
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="status">状态</Label>
