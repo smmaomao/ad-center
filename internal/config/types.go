@@ -334,11 +334,12 @@ func ParseTargeting(b []byte) (Targeting, error) {
 }
 
 // ConversionEvents 归因方 S2S 回调（/v1/s2s/event 的 event_name）支持的转化动作
-// （ad_events.event_type 取值，也是 cpa_event_prices 的 key）。广告主配置 cpa
-// 计费时按具体事件扣费。
-// install/activate/register/first_purchase/purchase：purchase 是首充之后的
-// 充值，first_purchase 是首充归因；充值事件会随回调带回 currency/value。
-var ConversionEvents = []string{"install", "activate", "register", "first_purchase", "purchase"}
+// （ad_conversions.event_type 取值）。广告主配置 cpa 计费时按具体事件扣费
+// （BillingAmount：cpi→install、cpa-activate→activate、cpa-register→register、
+// cpa-first-deposit→first_purchase、cpa-pay→purchase）。
+// purchase 是首充之后的充值，first_purchase 是首充归因；subscribe 为订阅事件
+// （当前无对应计费方式，仅记录不扣费）。充值事件会随回调带回 currency/value。
+var ConversionEvents = []string{"install", "activate", "register", "first_purchase", "purchase", "subscribe"}
 
 // ParseCPAEventPrices 解析 cpa_event_prices jsonb（转化事件 → [min,max] 单价区间美元）。
 // 数组格式 [min,max]；历史单值会在 migration 000010 就地转成 [v,v]（退化为固定价）。

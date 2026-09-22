@@ -76,8 +76,11 @@ func (s *Server) NewRouter() http.Handler {
 	mux.HandleFunc("POST /v1/ad/click", s.handleAdClick) // 生成 clickid + 落登记表（跳转前调用）
 	mux.HandleFunc("POST /v1/ad/video-complete", s.handleAdVideoComplete)
 
-	// 归因方 S2S 转化回调（无 App Key，暂时无独立密钥；GET 适配 Adjust postback）
+	// 归因方 S2S 转化回调（无 App Key，暂时无独立密钥）。
+	// 同时支持 GET 与 POST：参数既可走 query，也可走 JSON / 表单 body —— 适配
+	// 不同归因平台与中介（berealads 等）各自的回传方式。
 	mux.HandleFunc("GET /v1/s2s/event", s.handleS2SEvent)
+	mux.HandleFunc("POST /v1/s2s/event", s.handleS2SEvent)
 
 	// 管理 API（内部密钥 + RBAC）
 	mux.HandleFunc("GET /v1/admin/advertisers", s.handleListAdvertisers)

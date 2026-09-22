@@ -1,7 +1,10 @@
 package api
 
 import (
+	"encoding/json"
+	"io"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -28,7 +31,7 @@ type ClickResolver interface {
 	Resolve(clickID string) (*ClickContext, bool)
 }
 
-// handleS2SEvent 归因方 S2S 转化回调（GET，用户决定暂不加独立密钥）。
+// handleS2SEvent 归因方 S2S 转化回调（同时支持 GET 与 POST，用户决定暂不加独立密钥）。
 //
 // 客户端不应（也无法）上报转化：安装/激活/注册/首充/充值只能由归因平台
 // （Adjust/AppsFlyer…）或广告主服务器确认后通知。此回调与 Adjust 的转化
@@ -52,9 +55,10 @@ type ClickResolver interface {
 // 归属：只信 clickid 反查结果；归因不到（登记表未上线/点击过期不存在）→
 // 200 确认但不扣费不记账（防归因方把失败当重试放大刷量），日志暴露未归因量。
 func (s *Server) handleS2SEvent(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
+	q := s2sParams(r)
 	clickID := q.Get("clickid")
-	eventName := q.Get("event_name")
+	rawEventName := q.Get("event_name")
+	eventName := normalizeEventName(rawEventName)
 	pixelID := q.Get("pixelId")
 	currency := q.Get("currency")
 	valueStr := q.Get("value")
@@ -64,8 +68,12 @@ func (s *Server) handleS2SEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !slices.Contains(config.ConversionEvents, eventName) {
+		// 事件名解析失败会直接导致 cpa 计费永不触发：把原始值打出来，便于对接排查。
+		s.Log.Warn("s2s unknown event_name",
+			"raw_event_name", rawEventName, "clickid", clickID, "pixel_id", pixelID)
 		writeError(w, http.StatusBadRequest,
-			"event_name must be one of "+strings.Join(config.ConversionEvents, "/"))
+			"event_name must be one of "+strings.Join(config.ConversionEvents, "/")+
+				" (got "+rawEventName+")")
 		return
 	}
 	if isTruthy(q.Get("testFlag")) {
@@ -140,4 +148,72 @@ func isTruthy(v string) bool {
 		return true
 	}
 	return false
+}
+
+// s2sParams 合并取回调参数：GET 走 query；POST 额外解析 body（query 优先）。
+// 兼容 JSON（application/json，含数字/布尔值）与表单（application/x-www-form-urlencoded）。
+func s2sParams(r *http.Request) url.Values {
+	params := r.URL.Query()
+	if r.Method != http.MethodPost {
+		return params
+	}
+	if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+		dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+		dec.UseNumber() // 数字保留原文，避免 float64 科学计数法/精度问题
+		var body map[string]any
+		if err := dec.Decode(&body); err != nil {
+			return params
+		}
+		for k, v := range body {
+			if params.Get(k) != "" {
+				continue // query 优先，body 仅补齐 query 未提供的键
+			}
+			switch t := v.(type) {
+			case string:
+				params.Set(k, t)
+			case json.Number:
+				params.Set(k, t.String())
+			case bool:
+				params.Set(k, strconv.FormatBool(t))
+			}
+		}
+		return params
+	}
+	// 表单：r.Form 已含 query + body，PostForm 为 body 部分
+	if err := r.ParseForm(); err == nil {
+		for k, vs := range r.PostForm {
+			if params.Get(k) == "" && len(vs) > 0 {
+				params.Set(k, vs[0])
+			}
+		}
+	}
+	return params
+}
+
+// s2sEventAliases 归因方/中介回传的固定事件枚举 → 服务端 ConversionEvents。
+// 中介侧写死了 EVENT_* 命名，且与我们的枚举**不是简单前缀关系**
+// （EVENT_REGISTRATION→register、EVENT_FIRST_DEPOSIT→first_purchase、
+// EVENT_APP_ACTIVATE→activate），必须显式映射；否则事件名对不上，
+// BillingAmount 永远匹配不到 → cpa 计费永不触发（钱扣不到）。
+var s2sEventAliases = map[string]string{
+	"event_install":       "install",
+	"event_registration":  "register",
+	"event_purchase":      "purchase",
+	"event_first_deposit": "first_purchase",
+	"event_subscribe":     "subscribe",
+	"event_app_activate":  "activate",
+}
+
+// normalizeEventName 把归因方/中介回传的事件名归一为服务端枚举（config.ConversionEvents）：
+// 先查显式别名表（兼容中介写死的 EVENT_* 命名），未命中再做通用归一
+// （忽略大小写、去掉可选 event_ 前缀、-/空格 折成 _），以兼容其它平台。
+func normalizeEventName(raw string) string {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	if v, ok := s2sEventAliases[s]; ok {
+		return v
+	}
+	s = strings.TrimPrefix(s, "event_")
+	s = strings.NewReplacer("-", "_", " ", "_").Replace(s)
+	s = strings.ReplaceAll(s, "firstpurchase", "first_purchase")
+	return s
 }
