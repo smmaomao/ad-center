@@ -460,6 +460,7 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 		"ip", req.IP,
 		"headers", r.Header,
 		"ad_count", len(adList),
+		"ads", adList,
 		"steps", strings.Join(steps, " "),
 	)
 }
