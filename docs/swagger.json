@@ -276,14 +276,14 @@
             "type": "object",
             "properties": {
                 "ad_style": {
-                    "description": "AdStyle 广告样式列表（单条广告当前的生效样式；为兼容客户端以数组形式接收而使用数组）。",
-                    "type": "array",
-                    "items": {
-                        "type": "string"
+                    "description": "AdStyle 广告样式 → 最小播放秒数映射（单条广告当前生效样式及其要求的最小播放时长，秒）。",
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "integer"
                     },
-                    "example": [
-                        "REWARDED_VIDEO"
-                    ]
+                    "example": {
+                        "REWARDED_VIDEO": 30
+                    }
                 },
                 "bid_id": {
                     "type": "string",
@@ -310,7 +310,7 @@
                     "example": "https://cdn.example.com/creatives/abc123.mp4"
                 },
                 "required_duration": {
-                    "description": "RequiredDuration 客户端须满足的展示时长（秒），按样式取值：\nREWARDED_VIDEO=素材时长（看满才可上报 video-complete 发奖）；\nFEED=素材时长（客户端据此锁定列表滑动，满 N 秒后才可划走，图片素材兜底 3）；\nSPLASH=固定 3；其余样式为 0。",
+                    "description": "RequiredDuration 客户端须满足的最大展示时长（秒），取 ad_style 各样式最小播放秒数之最大值：\nREWARDED_VIDEO=素材时长钳制到[15,30]；\nSPLASH/INTERSTITIAL/FEED=固定 3；BANNER=0。",
                     "type": "integer",
                     "example": 15
                 },

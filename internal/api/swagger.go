@@ -25,8 +25,8 @@ type AdListRequest struct {
 type AdListItem struct {
 	BidID            string   `json:"bid_id" example:"bid_20260908_0001"`
 	CreativeID       string   `json:"creative_id" example:"cr_90002"`
-	// AdStyle 广告样式列表（单条广告当前的生效样式；为兼容客户端以数组形式接收而使用数组）。
-	AdStyle          []string `json:"ad_style" example:"REWARDED_VIDEO"`
+	// AdStyle 广告样式 → 最小播放秒数映射（单条广告当前生效样式及其要求的最小播放时长，秒）。
+	AdStyle          map[string]int `json:"ad_style" example:"REWARDED_VIDEO:30"`
 	MaterialType     string   `json:"material_type" example:"VIDEO"`
 	MaterialURL      string   `json:"material_url" example:"https://cdn.example.com/creatives/abc123.mp4"`
 	Width            int      `json:"width" example:"1080"`

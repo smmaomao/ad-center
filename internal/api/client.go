@@ -207,31 +207,26 @@ func sceneForStyle(s string) []string {
 	}
 }
 
-// required_duration（秒）按样式取值：
-//   - rewarded_video：素材时长。客户端看满后才允许上报「视频播放完毕」（触发发奖）。
-//   - feed：素材时长。客户端据此锁定信息流滑动，满 N 秒后才可划走；图片素材
-//     （无时长）用 feedDefaultSeconds 兜底，保证始终有锁定值。
-//   - splash：开屏固定 3 秒（客户端也会本地固定同一值，此处保证字段有值）。
-//   - 其余样式（interstitial / banner）：不需要，返回 0。
-const (
-	splashRequiredSeconds  = 3
-	feedDefaultRequiredSec = 3
-)
-
-func requiredDurationFor(style string, durationMS int) int {
+// minPlaySeconds 返回某样式要求的最小播放秒数（广告列表 ad_style 映射的值）：
+//   - splash / interstitial / feed：固定 3 秒
+//   - banner：固定 0
+//   - rewarded_video：与素材时长（秒）比较后钳制到 [15,30]——素材时长 <15 取 15，
+//     >30 取 30，介于二者之间取素材时长本身（无时长信息按 <15 处理，取 15）。
+func minPlaySeconds(style string, durationMS int) int {
 	switch style {
-	case "rewarded_video":
-		if durationMS > 0 {
-			return durationMS / 1000
-		}
+	case "splash", "interstitial", "feed":
+		return 3
+	case "banner":
 		return 0
-	case "feed":
-		if durationMS > 0 {
-			return durationMS / 1000
+	case "rewarded_video":
+		secs := durationMS / 1000
+		if secs < 15 {
+			return 15
 		}
-		return feedDefaultRequiredSec
-	case "splash":
-		return splashRequiredSeconds
+		if secs > 30 {
+			return 30
+		}
+		return secs
 	default:
 		return 0
 	}
@@ -350,21 +345,25 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 			landingURL = camp.LandingURL
 			clickURL = camp.LandingURL + sep + "click_id={CLICK_ID}"
 		}
-		// 合并该素材支持的全部样式：ad_style / target_scene 取并集，required_duration 取最大值。
-		adStyles := make([]string, 0, len(cr.Styles))
+		// 合并该素材支持的全部样式：ad_style 改为「样式 → 最小播放秒数」映射
+		// （splash/interstitial/feed 固定 3、banner 固定 0、rewarded_video 按素材时长
+		// 钳制到 [15,30]）；target_scene 取并集；required_duration 取各样式最大值。
+		adStyleDur := make(map[string]int, len(cr.Styles))
 		sceneSet := map[string]bool{}
 		repStyle := ""
-		maxDur := 0
 		for _, st := range cr.Styles {
-			adStyles = append(adStyles, styleToDoc(st))
+			adStyleDur[styleToDoc(st)] = minPlaySeconds(st, cr.DurationMS)
 			for _, sc := range sceneForStyle(st) {
 				sceneSet[sc] = true
 			}
-			if d := requiredDurationFor(st, cr.DurationMS); d > maxDur {
-				maxDur = d
-			}
 			if repStyle == "" {
 				repStyle = st
+			}
+		}
+		maxDur := 0
+		for _, d := range adStyleDur {
+			if d > maxDur {
+				maxDur = d
 			}
 		}
 		scenes := make([]string, 0, len(sceneSet))
@@ -385,7 +384,7 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 		adList = append(adList, map[string]any{
 			"bid_id":            bid,
 			"creative_id":       cr.ID,
-			"ad_style":          adStyles,
+			"ad_style":          adStyleDur,
 			"material_type":     mediaToDoc(cr.MediaType),
 			"material_url":      materialURL,
 			"width":             cr.Width,
