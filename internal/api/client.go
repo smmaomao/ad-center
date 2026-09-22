@@ -545,9 +545,26 @@ func (s *Server) handleAdVideoComplete(w http.ResponseWriter, r *http.Request) {
 		IP         string `json:"ip"`
 		OS         string `json:"os"`
 	}
-	if !decodeJSON(w, r, &req) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB
+	raw, _ := io.ReadAll(r.Body)
+	if err := json.Unmarshal(raw, &req); err != nil {
+		s.Log.Warn("ad video-complete bad json", "app", app.ID, "err", err, "raw", string(raw))
+		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
+	// 打印收到的全部请求参数，便于确认客户端是否传参、传了什么。
+	s.Log.Info("ad video-complete request",
+		"app", app.ID,
+		"bid_id", req.BidID,
+		"ad_app_id", req.AdAppID,
+		"creative_id", req.CreativeID,
+		"user_id", req.UserID,
+		"timestamp", req.Timestamp,
+		"adjust_adid", req.AdjustAdid,
+		"count", req.Count,
+		"ip", req.IP,
+		"os", req.OS,
+	)
 	if req.UserID == "" {
 		writeError(w, http.StatusBadRequest, "user_id required")
 		return

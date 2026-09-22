@@ -3,12 +3,14 @@
 package api
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"log/slog"
 	"net/http"
 	"runtime"
+	"strings"
 	"time"
 
 	"adcenter/internal/budget"
@@ -157,14 +159,27 @@ func (s *Server) NewRouter() http.Handler {
 }
 
 // statusRecorder 包装 ResponseWriter，记录响应状态码（默认 200）。
+// 对 4xx/5xx 额外截留一小段响应体（错误原因），供日志打印——正常响应不缓冲。
 type statusRecorder struct {
 	http.ResponseWriter
-	status int
+	status  int
+	capture bool
+	body    bytes.Buffer
 }
 
 func (r *statusRecorder) WriteHeader(code int) {
 	r.status = code
+	r.capture = code >= 400
 	r.ResponseWriter.WriteHeader(code)
+}
+
+// Write 透传响应体；仅当本次为 4xx/5xx 时截留前 1KB（错误信息本身很小），
+// 避免对大响应（如列表、流式）做无谓缓冲。
+func (r *statusRecorder) Write(b []byte) (int, error) {
+	if r.capture && r.body.Len() < 1024 {
+		r.body.Write(b)
+	}
+	return r.ResponseWriter.Write(b)
 }
 
 // Flush 透传给底层 ResponseWriter（若支持），否则静默忽略。
@@ -178,6 +193,7 @@ func (r *statusRecorder) Flush() {
 
 // loggingMiddleware 对每个请求打印耗时（毫秒）、方法、路径、状态码，
 // 便于通过 fly logs 观察哪些接口慢。/healthz 健康检查每 60s 一次，跳过以免刷屏。
+// 4xx/5xx 时附带应用返回的错误原因（resp），便于直接定位失败原因。
 func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 	skip := map[string]bool{"/healthz": true, "/swagger/": true}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -188,12 +204,16 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
-		s.Log.Info("request",
+		attrs := []any{
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", rec.status,
 			"dur_ms", time.Since(start).Milliseconds(),
-		)
+		}
+		if rec.status >= 400 {
+			attrs = append(attrs, "resp", strings.TrimSpace(rec.body.String()))
+		}
+		s.Log.Info("request", attrs...)
 	})
 }
 
