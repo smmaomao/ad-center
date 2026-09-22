@@ -15,6 +15,8 @@ import (
 	"adcenter/internal/store"
 
 	"github.com/redis/go-redis/v9"
+
+	"adcenter/internal/redislog"
 )
 
 // Redis 基于 Redis Streams 的事件队列（M2，SCALING.md §2/§3）。
@@ -69,8 +71,10 @@ func NewRedis(redisURL, prefix, group string, batchSize int) (*Redis, error) {
 		}
 	}
 	host, _ := os.Hostname()
+	client := redis.NewClient(opt)
+	redislog.Attach(client)
 	r := &Redis{
-		client:    redis.NewClient(opt),
+		client:    client,
 		stream:    prefix + "events",
 		group:     group,
 		consumer:  host + "-" + strconv.Itoa(os.Getpid()),
@@ -224,6 +228,9 @@ func (r *Redis) Close() error {
 	_ = r.flush(context.Background())
 	return r.client.Close()
 }
+
+// Ping 探活（保活 goroutine 用），确保首个真实请求复用到热连接。
+func (r *Redis) Ping(ctx context.Context) error { return r.client.Ping(ctx).Err() }
 
 // Name 队列标识（日志/排障用）。
 func (r *Redis) Name() string {

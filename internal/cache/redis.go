@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"adcenter/internal/redislog"
 )
 
 // Redis 基于 Redis 的决策缓存（多实例共享）。
@@ -19,7 +21,9 @@ func NewRedis(redisURL, prefix string) (*Redis, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Redis{client: redis.NewClient(opt), prefix: prefix}, nil
+	client := redis.NewClient(opt)
+	redislog.Attach(client)
+	return &Redis{client: client, prefix: prefix}, nil
 }
 
 // Get 读取键；redis.Nil（不存在）视为未命中。

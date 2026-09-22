@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"adcenter/internal/redislog"
 )
 
 // RedisStore 频控的 Redis 实现（路线 B，ARCHITECTURE.md §5.3.1 / SCALING.md §6）。
@@ -30,8 +32,10 @@ func NewRedis(redisURL, prefix string, maxWindow time.Duration) (*RedisStore, er
 	if err != nil {
 		return nil, err
 	}
+	client := redis.NewClient(opt)
+	redislog.Attach(client)
 	return &RedisStore{
-		client:    redis.NewClient(opt),
+		client:    client,
 		prefix:    prefix,
 		maxWindow: maxWindow,
 		timeout:   100 * time.Millisecond, // 决策路径的 Redis 预算

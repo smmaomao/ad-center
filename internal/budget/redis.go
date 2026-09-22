@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"adcenter/internal/redislog"
 )
 
 // Redis 预算控制器（路线 B，ARCHITECTURE.md §5.3.1 / SCALING.md §6）。
@@ -35,8 +37,10 @@ func NewRedis(redisURL, prefix string, ledger LedgerFn) (*Redis, error) {
 	if err != nil {
 		return nil, err
 	}
+	client := redis.NewClient(opt)
+	redislog.Attach(client)
 	return &Redis{
-		client:  redis.NewClient(opt),
+		client:  client,
 		prefix:  prefix,
 		ledger:  ledger,
 		now:     time.Now,

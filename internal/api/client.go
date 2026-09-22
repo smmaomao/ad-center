@@ -18,6 +18,7 @@ import (
 	"adcenter/internal/config"
 	"adcenter/internal/engine"
 	"adcenter/internal/frequency"
+	"adcenter/internal/redislog"
 	"adcenter/internal/store"
 )
 
@@ -74,7 +75,9 @@ func NewRedisBidStore(redisURL string, ttl time.Duration) (*redisBidStore, error
 	if ttl <= 0 {
 		ttl = 30 * time.Minute
 	}
-	return &redisBidStore{client: redis.NewClient(opt), prefix: "adcenter:bid:", ttl: ttl}, nil
+	client := redis.NewClient(opt)
+	redislog.Attach(client)
+	return &redisBidStore{client: client, prefix: "adcenter:bid:", ttl: ttl}, nil
 }
 
 // memBidStore 进程内 bid_id → 上下文 映射（带 TTL）。
@@ -247,10 +250,22 @@ func minPlaySeconds(style string, durationMS int) int {
 //	@Success      200 {object} AdListResponse
 //	@Router       /v1/ad/list [post]
 func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
+	// 诊断打点：记录各阶段耗时，定位首请求慢的瓶颈（见 fly logs 的 steps 字段）。
+	t0 := time.Now()
+	last := t0
+	steps := make([]string, 0, 16)
+	mark := func(name string) {
+		now := time.Now()
+		steps = append(steps, name+"="+now.Sub(last).String())
+		last = now
+	}
+	var tPresign, tBids, tMetrics, tEnqueue time.Duration
+
 	app := s.authenticateApp(w, r)
 	if app == nil {
 		return
 	}
+	mark("auth")
 	var req struct {
 		AdAppID    string `json:"ad_app_id"`
 		Count      int    `json:"count"`
@@ -292,6 +307,7 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	snap := s.Cache.Snapshot()
+	mark("snapshot")
 	now := time.Now()
 
 	// 跨全部样式决策，按素材(creative)去重汇总，取前 count 条。
@@ -320,11 +336,14 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 	if len(collected) > count {
 		collected = collected[:count]
 	}
+	mark("decide")
 
 	adList := make([]map[string]any, 0, len(collected))
 	allLoopable := true
+	mark("build")
 	for _, it := range collected {
 		cr := it.Creative
+		tp := time.Now()
 		materialURL := it.MediaURL
 		if materialURL == "" && s.Storage != nil {
 			materialURL = s.Storage.PresignGET(cr.StoragePath, s.Storage.DefaultExpiry())
@@ -332,6 +351,7 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 		if materialURL == "" {
 			materialURL = cr.StoragePath
 		}
+		tPresign += time.Since(tp)
 		// click_url / landing_url：来自广告任务 landing_url，{CLICK_ID} 占位符由客户端替换；
 		// 同时把 landing_url 与 campaign_id 记进 bid 上下文，点击/频控据此直接使用。
 		clickURL := ""
@@ -370,11 +390,13 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 		for sc := range sceneSet {
 			scenes = append(scenes, sc)
 		}
+		tb := time.Now()
 		bid := s.Bids.Put(r.Context(), &BidContext{
 			AppID: app.ID, AdvertiserID: it.AdvertiserID, CreativeID: cr.ID, CampaignID: campID,
 			Style: repStyle, DeviceID: deviceID, UserID: req.UserID, AdjustAdid: req.AdjustAdid,
 			LandingURL: landingURL,
 		})
+		tBids += time.Since(tb)
 		// loopable：客户端在缓存期内能否循环播放。当前由素材类型推导：
 		// 视频素材允许循环（true），图片素材不循环（false）。
 		// 该标记上提到 data 外层（整个广告列表是否可循环），当且仅当
@@ -394,17 +416,36 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 			"click_url":         clickURL,
 		})
 		// fill 指标 + 事件（仅记日志/填充率，不计费）。repStyle 取素材首个样式作为归因代表。
+		tm := time.Now()
 		s.Metrics.Record(app.ID, repStyle, it.AdvertiserID, 1, 0, now)
+		tMetrics += time.Since(tm)
+		te := time.Now()
 		s.enqueueEvent(store.AdEvent{
 			AppID: app.ID, Style: repStyle, AdvertiserID: it.AdvertiserID,
 			CreativeID: cr.ID, DeviceID: deviceID, EventType: "fill",
 		})
+		tEnqueue += time.Since(te)
 	}
 
 	if len(collected) == 0 {
 		allLoopable = false
 	}
-	// 诊断日志：打印请求头（含用户信息）与最终下发的广告列表，便于排查空列表问题。
+	steps = append(steps,
+		"presign="+tPresign.String(),
+		"bids="+tBids.String(),
+		"metrics="+tMetrics.String(),
+		"enqueue="+tEnqueue.String(),
+	)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"code": 200, "msg": "success",
+		"data": map[string]any{
+			"loopable": allLoopable,
+			"ad_list":  adList,
+		},
+	})
+	mark("write")
+	// 诊断日志：各阶段耗时见 steps 字段（auth/snapshot/decide/build/presign/bids/
+	// metrics/enqueue/write 各段时长），用于定位首请求慢的瓶颈。
 	s.Log.Info("ad/list response",
 		"app", app.ID,
 		"device_id", deviceID,
@@ -414,15 +455,8 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 		"ip", req.IP,
 		"headers", r.Header,
 		"ad_count", len(adList),
-		"ad_list", adList,
+		"steps", strings.Join(steps, " "),
 	)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"code": 200, "msg": "success",
-		"data": map[string]any{
-			"loopable": allLoopable,
-			"ad_list":  adList,
-		},
-	})
 }
 
 // handleAdImpression POST /v1/ad/impression 曝光埋点（文档接口 2）。

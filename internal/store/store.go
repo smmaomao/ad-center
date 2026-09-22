@@ -28,6 +28,9 @@ func New(ctx context.Context, dsn string) (*Store, error) {
 	}
 	cfg.ConnConfig.RuntimeParams["search_path"] = "ads_center"
 	cfg.MaxConns = 8
+	// MinConns>0：始终保持至少 2 条物理连接，避免空闲后被回收、首个请求被迫重建
+	// 连接（Fly/Upstash 场景下重建要重走 DNS+TLS，首请求会慢 1~2s）。
+	cfg.MinConns = 2
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("connect: %w", err)
