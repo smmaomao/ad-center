@@ -346,6 +346,38 @@ export async function updateDecisionCache(
 }
 
 // ============================================================
+// 广告列表循环播放总开关（settings 表 ad_loopable）
+// ============================================================
+
+export interface LoopableConfig {
+  enabled: boolean;
+}
+
+/** 读取循环播放总开关（GET /v1/admin/settings/ad_loopable） */
+export async function getLoopable(
+  actorEmail: string,
+): Promise<LoopableConfig> {
+  const r = await goApi<{ value: LoopableConfig }>(
+    "/v1/admin/settings/ad_loopable",
+    actorEmail,
+  );
+  return r.value;
+}
+
+/** 更新循环播放总开关（PATCH /v1/admin/settings/ad_loopable） */
+export async function updateLoopable(
+  actorEmail: string,
+  cfg: LoopableConfig,
+): Promise<void> {
+  await goSend<{ status: string }>(
+    "/v1/admin/settings/ad_loopable",
+    actorEmail,
+    "PATCH",
+    { value: cfg },
+  );
+}
+
+// ============================================================
 // 平台计费标准线（出价基准分的分母，系统设置项）
 // 素材出价基准分 = 素材实际出价 ÷ 对应扣费模式的标准线 × 100
 // ============================================================

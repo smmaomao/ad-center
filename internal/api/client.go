@@ -435,6 +435,11 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 	if len(collected) == 0 {
 		allLoopable = false
 	}
+	// 循环播放「总开关」：后台在 settings 配置 ad_loopable 后，以开关为准（总的控制），
+	// 直接决定 data.loopable，忽略上面按素材类型推导的结果；未配置则保持按素材类型推导。
+	if _, present := snap.Settings["ad_loopable"]; present {
+		allLoopable = snap.LoopableConfig().Enabled
+	}
 	steps = append(steps,
 		"presign="+tPresign.String(),
 		"bids="+tBids.String(),

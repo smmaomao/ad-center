@@ -35,7 +35,7 @@ func (s *Server) handleUpdateSetting(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := r.PathValue("key")
-	if key != "decision_cache" && key != "pricing_benchmark" {
+	if key != "decision_cache" && key != "pricing_benchmark" && key != "ad_loopable" {
 		writeError(w, http.StatusBadRequest, "unknown setting: "+key)
 		return
 	}
@@ -59,6 +59,22 @@ func (s *Server) handleUpdateSetting(w http.ResponseWriter, r *http.Request) {
 			b.CPAActivate <= 0 || b.CPARegister <= 0 || b.CPAFirstPurchase <= 0 {
 			writeError(w, http.StatusBadRequest,
 				"六项标准线都必须为正数（它们作为出价基准分的分母，不能为 0 或负）")
+			return
+		}
+		if err := s.Store.UpsertSetting(r.Context(), key, body.Value); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		return
+	}
+
+	// 广告列表循环播放总开关：{"enabled": bool}。改完配置快照热更新即生效（settings
+	// 触发器带动快照重载），无需重启；开启后下发给客户端的 data.loopable 强制为 true。
+	if key == "ad_loopable" {
+		var l config.LoopableConfig
+		if err := json.Unmarshal(body.Value, &l); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid ad_loopable config: "+err.Error())
 			return
 		}
 		if err := s.Store.UpsertSetting(r.Context(), key, body.Value); err != nil {

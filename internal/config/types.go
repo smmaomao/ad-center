@@ -321,6 +321,28 @@ func (s *Snapshot) DecisionCacheConfig() DecisionCacheConfig {
 	return c
 }
 
+// LoopableConfig 广告列表循环播放「总开关」（来自 settings 表 ad_loopable 行）。
+// 后台显式配置后，data.loopable 以该开关为准（总的控制），忽略按素材类型推导的逻辑：
+// enabled=true  → 整个列表允许客户端在缓存期内循环（loopable=true）
+// enabled=false → 整个列表禁止循环（loopable=false）
+// 未配置（settings 无此 key）→ 回退到按素材类型推导的历史行为，保证改动前后 prod 一致。
+type LoopableConfig struct {
+	Enabled bool `json:"enabled"` // 是否允许广告列表循环播放（总开关）
+}
+
+// LoopableConfig 从快照的 settings 解析循环播放总开关；缺失 / 非法时兜底默认（未开启）。
+func (s *Snapshot) LoopableConfig() LoopableConfig {
+	raw, ok := s.Settings["ad_loopable"]
+	if !ok || len(raw) == 0 {
+		return LoopableConfig{Enabled: false}
+	}
+	var c LoopableConfig
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return LoopableConfig{Enabled: false}
+	}
+	return c
+}
+
 // ParseTargeting 解析 targeting jsonb（空值返回零值 Targeting = 全通过）。
 func ParseTargeting(b []byte) (Targeting, error) {
 	var t Targeting

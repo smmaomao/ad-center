@@ -5,6 +5,7 @@ import { getSession } from "@/lib/auth";
 import {
   updateDecisionCache,
   updatePricingBenchmark,
+  updateLoopable,
   type PricingBenchmark,
   GoApiError,
 } from "@/lib/go-api";
@@ -69,6 +70,25 @@ export async function updatePricingBenchmarkAction(
 
   try {
     await updatePricingBenchmark(session.email, b);
+  } catch (e) {
+    return { error: e instanceof GoApiError ? e.message : "保存失败" };
+  }
+  revalidatePath("/settings");
+  return { ok: true };
+}
+
+/** 更新广告列表循环播放总开关（表单提交） */
+export async function updateLoopableAction(
+  _prev: FormState,
+  fd: FormData,
+): Promise<FormState> {
+  const session = await getSession();
+  if (!session) return { error: "会话已过期，请重新登录" };
+
+  const enabled = fd.get("enabled") !== null;
+
+  try {
+    await updateLoopable(session.email, { enabled });
   } catch (e) {
     return { error: e instanceof GoApiError ? e.message : "保存失败" };
   }

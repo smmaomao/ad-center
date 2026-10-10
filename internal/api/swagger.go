@@ -43,7 +43,9 @@ type AdListItem struct {
 // AdListData ad_list 包装。
 type AdListData struct {
 	// Loopable 整个广告列表是否允许在客户端缓存期内循环播放。
-	// 当且仅当列表内所有素材均可循环（视频）时为 true，任一图片素材出现则为 false。
+	// 后台若配置了 ad_loopable 总开关，则以开关为准（enabled 直接决定 true/false）；
+	// 未配置时回退到按素材类型推导：当且仅当列表内所有素材均可循环（视频）时为 true，
+	// 任一图片素材出现则为 false。
 	Loopable bool         `json:"loopable" example:"true"`
 	AdList   []AdListItem `json:"ad_list"`
 }
