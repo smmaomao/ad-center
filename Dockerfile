@@ -6,10 +6,16 @@
 FROM golang:1.26-bookworm AS builder
 WORKDIR /usr/src/app
 COPY go.mod go.sum ./
-RUN go mod download && go mod verify
+# 依赖缓存挂载：go.sum 未变则命中缓存，跳过重新下载（避免远端构建机联网不稳/耗时）
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download && go mod verify
 COPY . .
 # 主包路径 = ./cmd/server
-RUN CGO_ENABLED=0 GOOS=linux go build -o /run-app ./cmd/server
+# 编译缓存挂载：未改动的包增量编译（秒级），不再每次全量重编。
+# 这是部署变快的关键（参考 drama 项目的 BuildKit 缓存优化）。
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build -o /run-app ./cmd/server
 
 FROM debian:bookworm-slim
 # ca-certificates：DB 走 TLS(sslmode=require) 与对外 HTTPS 回调用
