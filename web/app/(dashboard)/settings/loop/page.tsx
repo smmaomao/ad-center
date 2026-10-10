@@ -6,7 +6,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { LoopableForm } from "../loop-form";
+import { LoopableForm } from "./loop-form";
 
 export const dynamic = "force-dynamic";
 
