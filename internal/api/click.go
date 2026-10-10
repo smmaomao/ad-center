@@ -89,15 +89,21 @@ func (s *Server) handleAdClick(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	charged := s.chargeClientEvent(app, bid.AdvertiserID, bid.CreativeID, bid.CampaignID, bid.Style, bid.DeviceID, "click", now)
 
-	// 生成最终跳转地址：基于广告任务的落地页地址拼接 click_id，
-	// 客户端拿到 jump_url 直接打开即可（无需自行替换 {CLICK_ID} 占位符）。
+	// 生成最终跳转地址：落地页地址以"当前 campaign 快照"为准，编辑落地页后
+	// 立即生效——不依赖 bid 下发时快照的旧地址（否则已下发的 bid 在 30min TTL 内
+	// 会一直跳旧地址）。campaign 不在快照中（暂停/删除）时回退到 bid 下发时刻的
+	// 快照值，保证仍可跳转。
 	jumpURL := ""
-	if bid.LandingURL != "" {
+	landing := bid.LandingURL
+	if camp, ok := s.Cache.Snapshot().Campaigns[bid.CampaignID]; ok {
+		landing = camp.LandingURL
+	}
+	if landing != "" {
 		sep := "?"
-		if strings.Contains(bid.LandingURL, "?") {
+		if strings.Contains(landing, "?") {
 			sep = "&"
 		}
-		jumpURL = bid.LandingURL + sep + "click_id=" + clickID
+		jumpURL = landing + sep + "click_id=" + clickID
 	}
 
 	s.Log.Info("ad click",
