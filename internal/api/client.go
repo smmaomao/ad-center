@@ -344,7 +344,9 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 	mark("decide")
 
 	adList := make([]map[string]any, 0, len(collected))
-	allLoopable := true
+	// loopable 默认 false：未配置后台 ad_loopable 开关时，列表不可循环播放；
+	// 只有后台显式开启 settings.ad_loopable 才为 true（见下方总开关逻辑）。
+	allLoopable := false
 	mark("build")
 	for _, it := range collected {
 		cr := it.Creative
@@ -402,12 +404,8 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 			LandingURL: landingURL,
 		})
 		tBids += time.Since(tb)
-		// loopable：客户端在缓存期内能否循环播放。当前由素材类型推导：
-		// 视频素材允许循环（true），图片素材不循环（false）。
-		// 该标记上提到 data 外层（整个广告列表是否可循环），当且仅当
-		// 列表内所有素材均可循环时才为 true。
-		loopable := cr.MediaType == "video"
-		allLoopable = allLoopable && loopable
+		// loopable 不再按素材类型推导，统一取外层 data.loopable（默认 false，
+		// 由后台 ad_loopable 总开关控制）。
 		adList = append(adList, map[string]any{
 			"bid_id":            bid,
 			"creative_id":       cr.ID,
@@ -435,8 +433,8 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 	if len(collected) == 0 {
 		allLoopable = false
 	}
-	// 循环播放「总开关」：后台在 settings 配置 ad_loopable 后，以开关为准（总的控制），
-	// 直接决定 data.loopable，忽略上面按素材类型推导的结果；未配置则保持按素材类型推导。
+	// 循环播放「总开关」：后台在 settings 配置 ad_loopable 后，以此为准（总的控制），
+	// 直接决定 data.loopable；未配置则保持默认 false（列表不可循环播放）。
 	if _, present := snap.Settings["ad_loopable"]; present {
 		allLoopable = snap.LoopableConfig().Enabled
 	}
