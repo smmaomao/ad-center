@@ -640,6 +640,48 @@ export async function deleteCampaign(actorEmail: string, id: string) {
 }
 
 // ============================================================
+// 数据分析：按素材聚合曝光/点击/点击率（GET /v1/admin/analytics/creatives）
+// 支持按广告任务下钻到素材维度；campaign_id 省略时为「全部素材」全局模式。
+// 口径：曝光 = impression 事件，点击 = click 事件（fill 下发不计入）。
+// ============================================================
+
+export interface CreativeStat {
+  creative_id: string;
+  name: string;
+  impressions: number;
+  clicks: number;
+  ctr: number; // 0~1
+}
+
+export interface CampaignCreativeStats {
+  campaign_id: string; // 空字符串 = 全局
+  from: string;
+  to: string;
+  totals: {
+    creative_id: string;
+    name: string;
+    impressions: number;
+    clicks: number;
+    ctr: number;
+  };
+  creatives: CreativeStat[];
+}
+
+export async function getCampaignCreativeStats(
+  actorEmail: string,
+  opts: { campaign_id?: string; from?: string; to?: string },
+): Promise<CampaignCreativeStats> {
+  const q = new URLSearchParams();
+  if (opts.campaign_id) q.set("campaign_id", opts.campaign_id);
+  if (opts.from) q.set("from", opts.from);
+  if (opts.to) q.set("to", opts.to);
+  return goApi<CampaignCreativeStats>(
+    `/v1/admin/analytics/creatives?${q.toString()}`,
+    actorEmail,
+  );
+}
+
+// ============================================================
 // 产品（Product）：广告主下的产品归集（多产品广告主）
 // ============================================================
 
