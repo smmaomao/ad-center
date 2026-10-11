@@ -659,6 +659,7 @@ export interface CampaignCreativeStats {
   campaign_id: string; // 空字符串 = 全局
   from: string;
   to: string;
+  timezone: string; // 统计时区（IANA 名称，如 Asia/Bangkok），全局时为 UTC
   totals: {
     creative_id: string;
     name: string;
