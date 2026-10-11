@@ -53,6 +53,18 @@ export function CampaignForm({
     { value: "cpa-first-deposit", label: "CPA-首充" },
     { value: "cpa-pay", label: "CPA-付费" },
   ] as const;
+  // 常用统计时区（IANA 名称）。数据分析按天聚合时以此为基准。
+  const TIMEZONE_OPTIONS = [
+    { value: "UTC", label: "UTC（零时区）" },
+    { value: "Asia/Bangkok", label: "UTC+7 · 曼谷" },
+    { value: "Asia/Shanghai", label: "UTC+8 · 北京/上海" },
+    { value: "Asia/Tokyo", label: "UTC+9 · 东京" },
+    { value: "Asia/Kolkata", label: "UTC+5:30 · 印度" },
+    { value: "Europe/London", label: "UTC+0/+1 · 伦敦" },
+    { value: "Europe/Paris", label: "UTC+1/+2 · 巴黎" },
+    { value: "America/New_York", label: "UTC-5/-4 · 纽约" },
+    { value: "America/Los_Angeles", label: "UTC-8/-7 · 洛杉矶" },
+  ] as const;
   const [billingMode, setBillingMode] = useState<BillingMode>(
     initial?.billing_mode ?? "cpm",
   );
@@ -425,6 +437,24 @@ export function CampaignForm({
               placeholder="留空=10"
               defaultValue={initial?.deliver_ttl_minutes || ""}
             />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="timezone">统计时区</Label>
+            <select
+              id="timezone"
+              name="timezone"
+              className={selectCls}
+              defaultValue={initial?.timezone ?? "Asia/Bangkok"}
+            >
+              {TIMEZONE_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-muted-foreground">
+              数据分析按天切分以此为准（如 UTC+7 选 Asia/Bangkok），避免跨时区把一天算错
+            </p>
           </div>
         </CardContent>
       </Card>

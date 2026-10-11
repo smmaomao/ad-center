@@ -184,7 +184,8 @@ func (s *Store) LoadSnapshot(ctx context.Context) (*config.Snapshot, error) {
 		       COALESCE(landing_url, ''),
 		       COALESCE(freq_daily_limit, 0)::int,
 		       COALESCE(freq_interval_minutes, 0)::int,
-		       COALESCE(freq_fatigue_window, 0)::int
+		       COALESCE(freq_fatigue_window, 0)::int,
+		       COALESCE(timezone, 'UTC')
 		FROM campaigns WHERE status = 'active' AND deleted_at IS NULL`)
 	if err != nil {
 		return nil, fmt.Errorf("load campaigns: %w", err)
@@ -200,7 +201,7 @@ func (s *Store) LoadSnapshot(ctx context.Context) (*config.Snapshot, error) {
 			&c.PriorityScore,
 			&c.DeliverTTLMinutes,
 			&creativeIDs, &c.StartAt, &c.EndAt, &c.LandingURL,
-			&c.FreqDailyLimit, &c.FreqIntervalMinute, &c.FreqFatigueWindow); err != nil {
+			&c.FreqDailyLimit, &c.FreqIntervalMinute, &c.FreqFatigueWindow, &c.Timezone); err != nil {
 			rows.Close()
 			return nil, err
 		}

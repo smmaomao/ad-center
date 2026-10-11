@@ -75,6 +75,8 @@ export async function saveCampaignAction(
 
   // 总是发送（含空串）：后端按"键是否存在"决定是否更新，空串即清空落地页地址
   fields.landing_url = str(fd, "landing_url");
+  // 统计时区：下拉框恒有值（新建默认 Asia/Bangkok），随其它字段一同下发
+  fields.timezone = str(fd, "timezone") || "Asia/Bangkok";
 
   const id = str(fd, "id");
   try {

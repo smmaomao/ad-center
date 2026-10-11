@@ -111,6 +111,10 @@ export function CampaignViewModal({
               value={`${campaign.creative_ids?.length ?? 0} 个（可服务多个任务）`}
             />
             <Field
+              label="统计时区"
+              value={campaign.timezone || "UTC"}
+            />
+            <Field
               label="排期"
               value={
                 campaign.start_at || campaign.end_at

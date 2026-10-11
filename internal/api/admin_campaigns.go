@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"adcenter/internal/store"
 )
@@ -46,6 +47,7 @@ type campaignRequest struct {
 	EndAt               *string               `json:"end_at"`
 	DeliverTTLMinutes   int                   `json:"deliver_ttl_minutes"`
 	LandingURL          string                `json:"landing_url"`
+	Timezone            string                `json:"timezone"` // 统计时区（IANA 名称，如 Asia/Bangkok）
 }
 
 // validateCampaign 校验并打印可用的枚举默认值；返回用于落库的字段。
@@ -67,6 +69,11 @@ func (r campaignRequest) validate() error {
 	}
 	if r.ConsumeSpeed != 0 && (r.ConsumeSpeed < 1 || r.ConsumeSpeed > 10) {
 		return errInvalid("consume_speed (1-10)")
+	}
+	if r.Timezone != "" {
+		if _, err := time.LoadLocation(r.Timezone); err != nil {
+			return fmt.Errorf("invalid timezone: %s", r.Timezone)
+		}
 	}
 	return nil
 }
@@ -101,6 +108,7 @@ func (r campaignRequest) fields() map[string]any {
 		f["end_at"] = *r.EndAt
 	}
 	f["landing_url"] = r.LandingURL
+	f["timezone"] = orDefault(r.Timezone, "UTC")
 	return f
 }
 
@@ -178,6 +186,9 @@ func (r campaignRequest) updateFields(raw map[string]any) map[string]any {
 	}
 	if has("landing_url") {
 		f["landing_url"] = r.LandingURL
+	}
+	if has("timezone") && r.Timezone != "" {
+		f["timezone"] = r.Timezone
 	}
 	return f
 }

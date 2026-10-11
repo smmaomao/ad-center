@@ -47,6 +47,8 @@ export default async function CreativeAnalyticsPage({
       ? `素材维度分析 · 任务 #${campaignID}`
       : "素材维度分析 · 全局";
 
+  const tz = stats?.timezone || "UTC";
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -109,7 +111,7 @@ export default async function CreativeAnalyticsPage({
         <div className="space-y-3">
           <p className="text-xs text-muted-foreground">
             口径：曝光 = impression 事件，点击 = click 事件（fill 下发不计入）；
-            按点击率降序。区间 {stats.from} ~ {stats.to}
+            按点击率降序。统计时区 <span className="font-medium">{tz}</span>（按天切分以此为准）。区间 {stats.from} ~ {stats.to}
           </p>
           <div className="overflow-x-auto rounded-lg border">
             <table className="w-full text-sm">

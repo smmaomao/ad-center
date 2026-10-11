@@ -231,6 +231,7 @@ type Campaign struct {
 	StartAt            *time.Time            `json:"start_at,omitempty"`
 	EndAt              *time.Time            `json:"end_at,omitempty"`
 	LandingURL         string                `json:"landing_url,omitempty"` // 落地页 URL（click_url 来源）
+	Timezone           string                `json:"timezone"`              // 统计时区（IANA 名称，如 Asia/Bangkok）；数据分析按天切分以此为准
 	FreqDailyLimit     int                   `json:"freq_daily_limit"`      // 每日上限（滚动 24h 内最多下发次数，0 = 不限）
 	FreqIntervalMinute int                   `json:"freq_interval_minutes"` // 滑动窗口长度（分钟，0 = 不启用该窗口）
 	FreqFatigueWindow  int                   `json:"freq_fatigue_window"`   // 窗口内上限（该窗口内最多下发同一任务的次数，0 = 不限）

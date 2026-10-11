@@ -45,6 +45,7 @@ type AdminCampaign struct {
 	StartAt            *string               `json:"start_at"`
 	EndAt              *string               `json:"end_at"`
 	LandingURL         string                `json:"landing_url"`
+	Timezone           string                `json:"timezone"` // 统计时区（IANA 名称，如 Asia/Bangkok）
 }
 
 const campaignCols = `
@@ -58,7 +59,8 @@ const campaignCols = `
 	c.freq_daily_limit, c.freq_interval_minutes,
 	c.freq_fatigue_window, COALESCE(c.creative_ids, '{}')::text[],
 	COALESCE(c.product_id::text, ''), COALESCE(p.name, ''),
-	c.start_at::text, c.end_at::text, COALESCE(c.landing_url, '')`
+	c.start_at::text, c.end_at::text, COALESCE(c.landing_url, ''),
+	COALESCE(c.timezone, 'UTC')`
 
 func scanCampaign(scan func(...any) error) (*AdminCampaign, error) {
 	c := &AdminCampaign{}
@@ -70,7 +72,7 @@ func scanCampaign(scan func(...any) error) (*AdminCampaign, error) {
 		&c.DeliverTTLMinutes,
 		&c.GuaranteedEnabled, &c.GuaranteedMinShare, &c.PriorityScore,
 		&c.FreqDailyLimit, &c.FreqIntervalMinute, &c.FreqFatigueWindow,
-		&c.CreativeIDs, &c.ProductID, &c.ProductName, &c.StartAt, &c.EndAt, &c.LandingURL); err != nil {
+		&c.CreativeIDs, &c.ProductID, &c.ProductName, &c.StartAt, &c.EndAt, &c.LandingURL, &c.Timezone); err != nil {
 		return nil, err
 	}
 	if len(cpaPrices) > 0 {
@@ -122,7 +124,7 @@ var campaignWritable = map[string]bool{
 	"consume_speed": true, "deliver_ttl_minutes": true, "guaranteed_enabled": true, "guaranteed_min_share": true,
 	"priority_score": true, "freq_daily_limit": true, "freq_interval_minutes": true,
 	"freq_fatigue_window": true, "creative_ids": true,
-	"start_at": true, "end_at": true, "product_id": true, "landing_url": true, "created_by": true, "updated_by": true,
+	"start_at": true, "end_at": true, "product_id": true, "landing_url": true, "timezone": true, "created_by": true, "updated_by": true,
 }
 
 // campaignIntCols 取值需以 bigint 绑定的列（由 uuid 迁移而来的 id 列）。
@@ -186,7 +188,7 @@ var campaignUpdatable = map[string]bool{
 	"consume_speed": true, "deliver_ttl_minutes": true, "guaranteed_enabled": true, "guaranteed_min_share": true,
 	"priority_score": true, "freq_daily_limit": true, "freq_interval_minutes": true,
 	"freq_fatigue_window": true, "creative_ids": true,
-	"start_at": true, "end_at": true, "product_id": true, "landing_url": true, "updated_by": true,
+	"start_at": true, "end_at": true, "product_id": true, "landing_url": true, "timezone": true, "updated_by": true,
 }
 
 // UpdateCampaign 部分更新（白名单列）。

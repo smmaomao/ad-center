@@ -564,6 +564,8 @@ export interface AdminCampaign {
   deliver_ttl_minutes?: number;
   // 落地页地址：用户点击后服务端据此生成跳转地址（migration 000039）
   landing_url?: string;
+  // 统计时区（IANA 名称，如 Asia/Bangkok）：数据分析按天聚合以此为准
+  timezone?: string;
 }
 
 /** 按广告主 / 产品归集的 KPI 汇总（campaign 为执行粒度，product/advertiser 是归集层） */
