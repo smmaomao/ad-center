@@ -344,9 +344,9 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 	mark("decide")
 
 	adList := make([]map[string]any, 0, len(collected))
-	// loopable 默认 false：未配置后台 ad_loopable 开关时，列表不可循环播放；
-	// 只有后台显式开启 settings.ad_loopable 才为 true（见下方总开关逻辑）。
-	allLoopable := false
+	// loopable 默认 true（临时回滚测试用，原默认 false 见 6fcc383）：
+	// 未配置后台 ad_loopable 开关时，列表允许循环播放，避免客户端看完一轮就刷不出广告。
+	allLoopable := true
 	mark("build")
 	for _, it := range collected {
 		cr := it.Creative
@@ -463,6 +463,7 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 		"ip", req.IP,
 		"headers", r.Header,
 		"ad_count", len(adList),
+		"loopable", allLoopable,
 		"ads", adList,
 		"steps", strings.Join(steps, " "),
 	)
