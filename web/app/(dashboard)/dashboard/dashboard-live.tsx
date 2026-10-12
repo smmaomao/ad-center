@@ -252,8 +252,9 @@ export function DashboardLive() {
 }
 
 // 按日统计：近 7 天全局曝光/点击趋势（固定窗口，不随上方日期区间变化）。
-// 纯 SVG 双折线（曝光=品牌色，点击=蓝），各自按自身最大值归一（量级差大，共用 Y 轴会压平点击线）。
+// 纯 SVG 双折线（曝光=品牌色，点击=蓝）+ 底部横坐标 + 悬停数值气泡，各自按自身最大值归一。
 function DailyStats({ rows }: { rows: DashboardDailyRow[] }) {
+  const [hover, setHover] = useState<number | null>(null);
   const sumImp = rows.reduce((a, r) => a + r.impressions, 0);
   const sumClk = rows.reduce((a, r) => a + r.clicks, 0);
   const avgCtr = sumImp > 0 ? sumClk / sumImp : 0;
@@ -261,6 +262,7 @@ function DailyStats({ rows }: { rows: DashboardDailyRow[] }) {
   const W = 300, H = 120, padL = 8, padR = 8, padT = 12, padB = 20;
   const innerW = W - padL - padR;
   const innerH = H - padT - padB;
+  const axisY = padT + innerH;
   const n = rows.length;
   const maxImp = Math.max(1, ...rows.map((r) => r.impressions));
   const maxClk = Math.max(1, ...rows.map((r) => r.clicks));
@@ -271,6 +273,13 @@ function DailyStats({ rows }: { rows: DashboardDailyRow[] }) {
 
   const impPts = rows.map((r, i) => `${xAt(i).toFixed(1)},${yImp(r.impressions).toFixed(1)}`).join(" ");
   const clkPts = rows.map((r, i) => `${xAt(i).toFixed(1)},${yClk(r.clicks).toFixed(1)}`).join(" ");
+
+  // 悬停气泡定位（避免越出右/左边界）
+  const tipW = 96, tipH = 54;
+  const hx = hover != null ? xAt(hover) : 0;
+  let tipX = hx - tipW / 2;
+  if (tipX < 2) tipX = 2;
+  if (tipX + tipW > W - 2) tipX = W - 2 - tipW;
 
   return (
     <section className="surface-card rise-1 p-5">
@@ -286,9 +295,30 @@ function DailyStats({ rows }: { rows: DashboardDailyRow[] }) {
         </div>
       </div>
       <p className="mb-2 text-xs text-muted-foreground">
-        近 {n} 天 · 全局趋势（UTC，双轴各自归一）
+        近 {n} 天 · 全局趋势（UTC，双轴各自归一，悬停查看数值）
       </p>
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" preserveAspectRatio="xMidYMid meet">
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        className="w-full"
+        preserveAspectRatio="xMidYMid meet"
+        onMouseLeave={() => setHover(null)}
+      >
+        {/* 横坐标 */}
+        <line x1={padL} y1={axisY} x2={W - padR} y2={axisY} stroke="var(--border)" strokeWidth={1} />
+
+        {/* 悬停竖向辅助线 */}
+        {hover != null && (
+          <line
+            x1={hx}
+            y1={padT}
+            x2={hx}
+            y2={axisY}
+            stroke="var(--muted-foreground)"
+            strokeWidth={1}
+            strokeDasharray="3 3"
+          />
+        )}
+
         <polyline
           points={impPts}
           fill="none"
@@ -305,12 +335,28 @@ function DailyStats({ rows }: { rows: DashboardDailyRow[] }) {
           strokeLinejoin="round"
           strokeLinecap="round"
         />
+
         {rows.map((r, i) => (
           <g key={r.date}>
-            <circle cx={xAt(i)} cy={yImp(r.impressions)} r={2.4} fill="var(--brand)" />
-            <circle cx={xAt(i)} cy={yClk(r.clicks)} r={2.4} fill="var(--chart-2)" />
+            <circle
+              cx={xAt(i)}
+              cy={yImp(r.impressions)}
+              r={hover === i ? 3.4 : 2.4}
+              fill="var(--brand)"
+              stroke="var(--card)"
+              strokeWidth={1}
+            />
+            <circle
+              cx={xAt(i)}
+              cy={yClk(r.clicks)}
+              r={hover === i ? 3.4 : 2.4}
+              fill="var(--chart-2)"
+              stroke="var(--card)"
+              strokeWidth={1}
+            />
           </g>
         ))}
+
         {rows.map((r, i) => (
           <text
             key={r.date}
@@ -323,6 +369,55 @@ function DailyStats({ rows }: { rows: DashboardDailyRow[] }) {
             {r.date.slice(5)}
           </text>
         ))}
+
+        {/* 透明热区：整列可触发悬停 */}
+        {rows.map((r, i) => (
+          <rect
+            key={`hit-${r.date}`}
+            x={Math.max(0, xAt(i) - innerW / (2 * n))}
+            y={padT}
+            width={innerW / n}
+            height={innerH}
+            fill="transparent"
+            style={{ cursor: "pointer" }}
+            onMouseEnter={() => setHover(i)}
+          />
+        ))}
+
+        {/* 悬停数值气泡 */}
+        {hover != null &&
+          (() => {
+            const r = rows[hover];
+            const ctr = r.impressions > 0 ? r.clicks / r.impressions : 0;
+            return (
+              <g style={{ pointerEvents: "none" }}>
+                <rect
+                  x={tipX}
+                  y={padT + 2}
+                  width={tipW}
+                  height={tipH}
+                  rx={4}
+                  fill="var(--ink)"
+                  stroke="var(--border)"
+                  strokeWidth={0.5}
+                />
+                <text x={tipX + 7} y={padT + 14} className="fill-foreground" style={{ fontSize: 9, fontWeight: 600 }}>
+                  {r.date}
+                </text>
+                <circle cx={tipX + 10} cy={padT + 27} r={2.4} fill="var(--brand)" />
+                <text x={tipX + 16} y={padT + 30} className="fill-muted-foreground" style={{ fontSize: 8.5 }}>
+                  曝光 {fmtInt(r.impressions)}
+                </text>
+                <circle cx={tipX + 10} cy={padT + 40} r={2.4} fill="var(--chart-2)" />
+                <text x={tipX + 16} y={padT + 43} className="fill-muted-foreground" style={{ fontSize: 8.5 }}>
+                  点击 {fmtInt(r.clicks)}
+                </text>
+                <text x={tipX + 16} y={padT + 51} className="fill-muted-foreground" style={{ fontSize: 8.5 }}>
+                  CTR {fmtRate(ctr)}
+                </text>
+              </g>
+            );
+          })()}
       </svg>
       <div className="mt-3 grid grid-cols-3 gap-2 border-t border-white/10 pt-3 text-center">
         <div>
