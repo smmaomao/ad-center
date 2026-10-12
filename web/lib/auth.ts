@@ -32,7 +32,7 @@ export interface NavItem {
  * 保证后台不会因为这些原因变成空白页。
  */
 const FALLBACK_NAV: NavItem[] = [
-  { href: "/dashboard", label: "实时监控" },
+  { href: "/dashboard", label: "总览" },
   { href: "/advertisers", label: "广告主管理" },
   { href: "/campaigns", label: "广告任务管理" },
   { href: "/creatives", label: "素材管理" },
@@ -74,7 +74,7 @@ export interface NavNode {
 
 /** 兜底导航树：迁移未执行或 DB 故障时不至于让后台变成空白 */
 const FALLBACK_TREE: NavNode[] = [
-  { code: "dashboard", label: "实时监控", href: "/dashboard", parentCode: null, sortOrder: 10, children: [] },
+  { code: "dashboard", label: "总览", href: "/dashboard", parentCode: null, sortOrder: 10, children: [] },
   { code: "apps", label: "应用管理", href: "/apps", parentCode: null, sortOrder: 15, children: [] },
   {
     code: "ad_mgmt",

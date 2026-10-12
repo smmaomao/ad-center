@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"math"
+	"time"
 )
 
 // ============================================================
@@ -26,6 +27,13 @@ type DashboardOverview struct {
 	ECPM              float64 `json:"ecpm"`            // revenue/impressions*1000
 	ActiveAdvertisers int     `json:"active_advertisers"`
 	ActiveCampaigns   int     `json:"active_campaigns"`
+	// 转化事件拆分（数据源 ad_conversions，S2S 回传明细，按 event_type 聚合）：
+	// 安装=install、激活=activate、注册=register、转化=first_purchase(首充)、付费=purchase。
+	Install    int64 `json:"install"`
+	Activate   int64 `json:"activate"`
+	Register   int64 `json:"register"`
+	Conversion int64 `json:"conversion"` // first_purchase
+	Pay        int64 `json:"pay"`        // purchase
 }
 
 // DashboardAdvertiser 广告主 KPI 监控行（含预警标识）。
@@ -94,6 +102,77 @@ func (s *Store) DashboardOverview(ctx context.Context) (*DashboardOverview, erro
 		o.ECPM = o.Revenue / float64(o.Impressions) * 1000
 	}
 	return o, nil
+}
+
+// DashboardOverviewRange 按日期区间 [from, to) 拉取看板总览 KPI（to 为开区间）。
+//
+// 与 DashboardOverview（今日）的区别：请求/填充/曝光/点击/消耗按传入区间从
+// metrics_minute 聚合，并额外按 event_type 从 ad_conversions 拆出
+// 安装/激活/注册/转化/付费 五项。
+// 日预算/今日消耗/活跃数取自 campaigns 的「今日」快照（无历史快照可查），不随区间变化。
+func (s *Store) DashboardOverviewRange(ctx context.Context, from, to time.Time) (*DashboardOverview, error) {
+	o := &DashboardOverview{}
+	var tgt float64
+	if err := s.pool.QueryRow(ctx, `
+		SELECT
+			COALESCE(SUM(daily_budget), 0)::float8,
+			COALESCE(SUM(spent_today), 0)::float8,
+			CASE WHEN SUM(spent_today) > 0 AND SUM(spent_today / NULLIF(target_kpi_value, 0)) > 0
+			     THEN SUM(spent_today) / SUM(spent_today / NULLIF(target_kpi_value, 0)) ELSE 0 END,
+			COUNT(*) FILTER (WHERE status = 'active'),
+			COUNT(DISTINCT advertiser_id) FILTER (WHERE status = 'active')
+		FROM campaigns WHERE deleted_at IS NULL`).
+		Scan(&o.DailyBudget, &o.SpentToday, &tgt, &o.ActiveCampaigns, &o.ActiveAdvertisers); err != nil {
+		return nil, err
+	}
+	// 实测 CPI 不再落库，总体达成率暂置中性 1.0（后期引入运行时实测值再计算）。
+	o.Achievement = clampAchievement(tgt, 0)
+
+	if err := s.pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(requests), 0)::bigint, COALESCE(SUM(fills), 0)::bigint,
+		       COALESCE(SUM(impressions), 0)::bigint, COALESCE(SUM(clicks), 0)::bigint,
+		       COALESCE(SUM(conversions), 0)::bigint, COALESCE(SUM(revenue), 0)::float8
+		FROM metrics_minute WHERE minute_ts >= $1 AND minute_ts < $2`, from, to).
+		Scan(&o.Requests, &o.Fills, &o.Impressions, &o.Clicks, &o.Conversions, &o.Revenue); err != nil {
+		return nil, err
+	}
+	if o.Requests > 0 {
+		o.FillRate = float64(o.Fills) / float64(o.Requests)
+	}
+	if o.Impressions > 0 {
+		o.ECPM = o.Revenue / float64(o.Impressions) * 1000
+	}
+
+	// 转化事件拆分：ad_conversions 为 S2S 回传明细，event_type 见 config.ConversionEvents。
+	rows, err := s.pool.Query(ctx, `
+		SELECT event_type, COUNT(*)::bigint
+		FROM ad_conversions
+		WHERE ts >= $1 AND ts < $2
+		GROUP BY event_type`, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var et string
+		var n int64
+		if err := rows.Scan(&et, &n); err != nil {
+			return nil, err
+		}
+		switch et {
+		case "install":
+			o.Install = n
+		case "activate":
+			o.Activate = n
+		case "register":
+			o.Register = n
+		case "first_purchase":
+			o.Conversion = n
+		case "purchase":
+			o.Pay = n
+		}
+	}
+	return o, rows.Err()
 }
 
 // DashboardAdvertisers 广告主维度 KPI 监控（按广告主聚合旗下 campaign）。

@@ -685,6 +685,63 @@ export async function getCampaignCreativeStats(
 }
 
 // ============================================================
+// 总览（Dashboard Overview）：按日期区间的 KPI + 广告主 KPI 监控
+// ============================================================
+
+export interface DashboardOverview {
+  daily_budget: number;
+  spent_today: number;
+  achievement: number;
+  requests: number;
+  fills: number;
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  revenue: number;
+  fill_rate: number;
+  ecpm: number;
+  active_advertisers: number;
+  active_campaigns: number;
+  // 转化事件拆分（ad_conversions）：安装 / 激活 / 注册 / 转化(首充) / 付费
+  install: number;
+  activate: number;
+  register: number;
+  conversion: number; // first_purchase 首充
+  pay: number; // purchase
+}
+
+export interface DashboardAdvertiserRow {
+  id: string;
+  name: string;
+  status: string;
+  daily_budget: number;
+  spent_today: number;
+  target_kpi_value: number;
+  achievement: number;
+  warning: string; // "" / "paused" / "budget" / "kpi"
+}
+
+export interface DashboardOverviewResult {
+  from: string; // YYYY-MM-DD（含）
+  to: string; // YYYY-MM-DD（含）
+  overview: DashboardOverview;
+  advertisers: DashboardAdvertiserRow[];
+}
+
+export async function getDashboardOverview(
+  actorEmail: string,
+  opts: { from?: string; to?: string },
+): Promise<DashboardOverviewResult> {
+  const q = new URLSearchParams();
+  if (opts.from) q.set("from", opts.from);
+  if (opts.to) q.set("to", opts.to);
+  return goApi<DashboardOverviewResult>(
+    `/v1/admin/dashboard/overview?${q.toString()}`,
+    actorEmail,
+  );
+}
+
+// ============================================================
 // 产品（Product）：广告主下的产品归集（多产品广告主）
 // ============================================================
 

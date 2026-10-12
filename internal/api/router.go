@@ -121,6 +121,9 @@ func (s *Server) NewRouter() http.Handler {
 	// 数据分析：按素材聚合曝光/点击/点击率（数据源 ad_events；任务内可下钻到素材维度）
 	mux.HandleFunc("GET /v1/admin/analytics/creatives", s.handleCampaignCreativeStats)
 
+	// 总览：按日期区间的 KPI（曝光/点击 + 安装/激活/注册/转化/付费拆分）+ 广告主 KPI 监控
+	mux.HandleFunc("GET /v1/admin/dashboard/overview", s.handleDashboardOverview)
+
 	// 产品（Product）：广告主下的产品归集（多产品广告主）
 	mux.HandleFunc("GET /v1/admin/products", s.handleListProducts)
 	mux.HandleFunc("POST /v1/admin/products", s.handleCreateProduct)

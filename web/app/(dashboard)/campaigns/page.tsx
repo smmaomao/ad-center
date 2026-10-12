@@ -1,4 +1,3 @@
-import Link from "next/link";
 import { canWriteRole, requireMenu } from "@/lib/auth";
 import {
   listCampaigns,
@@ -32,15 +31,7 @@ export default async function CampaignsPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">广告任务管理</h1>
-        <Link
-          href="/campaigns/analytics"
-          className="text-sm text-primary hover:underline"
-        >
-          素材维度分析 →
-        </Link>
-      </div>
+      <h1 className="text-2xl font-semibold">广告任务管理</h1>
       <CampaignsClient
       campaigns={campaigns}
       advertisers={advertisers}
