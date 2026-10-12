@@ -36,6 +36,55 @@ type DashboardOverview struct {
 	Pay        int64 `json:"pay"`        // purchase
 }
 
+// DashboardDailyRow 按日统计的一行（近 N 天，全局口径，UTC）。
+type DashboardDailyRow struct {
+	Date        string  `json:"date"`        // YYYY-MM-DD
+	Impressions int64   `json:"impressions"` // 当日曝光
+	Clicks      int64   `json:"clicks"`      // 当日点击
+	Conversions int64   `json:"conversions"` // 当日转化（首充）
+	Revenue     float64 `json:"revenue"`     // 当日消耗金额
+}
+
+// DashboardDaily 拉取最近 days 天（含今天）的全局每日聚合，按日期升序，
+// 缺失数据的日期也补齐为 0 行（generate_series 保证连续 7 天）。
+// 数据源 metrics_minute（分区表，保留 13 个月），与总览 KPI 口径一致。
+func (s *Store) DashboardDaily(ctx context.Context, days int) ([]DashboardDailyRow, error) {
+	if days < 1 {
+		days = 1
+	}
+	if days > 92 {
+		days = 92
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT to_char(d.day, 'YYYY-MM-DD'),
+		       COALESCE(SUM(m.impressions), 0)::bigint,
+		       COALESCE(SUM(m.clicks), 0)::bigint,
+		       COALESCE(SUM(m.conversions), 0)::bigint,
+		       COALESCE(SUM(m.revenue), 0)::float8
+		FROM generate_series(
+		       date_trunc('day', now()) - make_interval(days => $1 - 1),
+		       date_trunc('day', now()),
+		       interval '1 day'
+		     ) AS d(day)
+		LEFT JOIN metrics_minute m
+		       ON m.minute_ts >= d.day AND m.minute_ts < d.day + interval '1 day'
+		GROUP BY d.day
+		ORDER BY d.day`, days)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]DashboardDailyRow, 0, days)
+	for rows.Next() {
+		var r DashboardDailyRow
+		if err := rows.Scan(&r.Date, &r.Impressions, &r.Clicks, &r.Conversions, &r.Revenue); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // DashboardAdvertiser 广告主 KPI 监控行（含预警标识）。
 type DashboardAdvertiser struct {
 	ID           string  `json:"id"`

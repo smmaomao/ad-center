@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { loadDashboardAction, type DashboardPayload } from "./actions";
+import type { DashboardDailyRow } from "@/lib/go-api";
 
 const WARNING_LABEL: Record<string, { text: string; cls: string }> = {
   paused: { text: "已暂停", cls: "bg-zinc-500/15 text-zinc-300" },
@@ -29,15 +30,9 @@ function fmtInt(n: number): string {
 function todayStr(): string {
   return new Date().toISOString().slice(0, 10);
 }
-function shiftDay(base: string, delta: number): string {
-  const d = new Date(base + "T00:00:00Z");
-  d.setUTCDate(d.getUTCDate() + delta);
-  return d.toISOString().slice(0, 10);
-}
 
 export function DashboardLive() {
   const today = useMemo(() => todayStr(), []);
-  const minDate = useMemo(() => shiftDay(today, -6), [today]); // 只能选最近 7 天
 
   const [from, setFrom] = useState(today);
   const [to, setTo] = useState(today);
@@ -52,12 +47,12 @@ export function DashboardLive() {
     if (Number.isNaN(a) || Number.isNaN(b)) return 0;
     return Math.round((b - a) / 86400000);
   }, [from, to]);
-  const valid = spanDays >= 0 && spanDays <= 6;
+  const valid = spanDays >= 0; // 仅要求开始 <= 结束；区间不再限制 7 天
 
   // 经 server action 由服务端转发（浏览器不直连 Go，密钥只在服务端）
   const load = useCallback(async () => {
     if (!valid) {
-      setError("日期区间最多 7 天");
+      setError("开始日期不能晚于结束日期");
       return;
     }
     setLoading(true);
@@ -81,6 +76,7 @@ export function DashboardLive() {
   const advertisers = data?.overview.advertisers ?? [];
   const creatives = data?.creatives.creatives ?? [];
   const totals = data?.creatives.totals;
+  const dailyRows = data?.daily.data ?? [];
 
   return (
     <div className="space-y-6">
@@ -94,7 +90,6 @@ export function DashboardLive() {
               <input
                 type="date"
                 value={from}
-                min={minDate}
                 max={today}
                 onChange={(e) => setFrom(e.target.value)}
                 className="h-9 rounded-md border bg-background px-2 text-sm text-foreground"
@@ -105,7 +100,6 @@ export function DashboardLive() {
               <input
                 type="date"
                 value={to}
-                min={minDate}
                 max={today}
                 onChange={(e) => setTo(e.target.value)}
                 className="h-9 rounded-md border bg-background px-2 text-sm text-foreground"
@@ -118,11 +112,6 @@ export function DashboardLive() {
         }
       />
 
-      {!valid && (
-        <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          日期区间最多 7 天（最近 7 天内可选）
-        </div>
-      )}
       {error && (
         <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           {error}
@@ -210,51 +199,113 @@ export function DashboardLive() {
         </div>
       </section>
 
-      {/* 素材维度分析（原「广告位实时状态」） */}
-      <section className="surface-card rise-1 p-5">
-        <h2 className="mb-4 text-sm font-semibold text-foreground">素材维度分析</h2>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead className="text-left text-muted-foreground">
-              <tr className="border-b border-white/10">
-                <th className="py-2 pr-4 font-medium">素材</th>
-                <th className="py-2 pr-4 font-medium">素材 ID</th>
-                <th className="py-2 pr-4 font-medium">曝光</th>
-                <th className="py-2 pr-4 font-medium">点击</th>
-                <th className="py-2 font-medium">点击率</th>
-              </tr>
-            </thead>
-            <tbody>
-              {creatives.length === 0 && (
-                <tr>
-                  <td colSpan={5} className="py-6 text-center text-muted-foreground">
-                    暂无数据
-                  </td>
+      {/* 素材维度分析 + 按日统计（并排） */}
+      <div className="grid gap-4 lg:grid-cols-3">
+        <section className="surface-card rise-1 p-5 lg:col-span-2">
+          <h2 className="mb-4 text-sm font-semibold text-foreground">素材维度分析</h2>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="text-left text-muted-foreground">
+                <tr className="border-b border-white/10">
+                  <th className="py-2 pr-4 font-medium">素材</th>
+                  <th className="py-2 pr-4 font-medium">素材 ID</th>
+                  <th className="py-2 pr-4 font-medium">曝光</th>
+                  <th className="py-2 pr-4 font-medium">点击</th>
+                  <th className="py-2 font-medium">点击率</th>
                 </tr>
-              )}
-              {creatives.map((c) => (
-                <tr key={c.creative_id} className="border-b border-white/5">
-                  <td className="py-2 pr-4 text-foreground">{c.name}</td>
-                  <td className="py-2 pr-4 text-muted-foreground">{c.creative_id}</td>
-                  <td className="py-2 pr-4">{fmtInt(c.impressions)}</td>
-                  <td className="py-2 pr-4">{fmtInt(c.clicks)}</td>
-                  <td className="py-2">{fmtRate(c.ctr)}</td>
-                </tr>
-              ))}
-              {totals && creatives.length > 0 && (
-                <tr className="font-medium">
-                  <td className="py-2 pr-4 text-foreground">合计</td>
-                  <td className="py-2 pr-4" />
-                  <td className="py-2 pr-4">{fmtInt(totals.impressions)}</td>
-                  <td className="py-2 pr-4">{fmtInt(totals.clicks)}</td>
-                  <td className="py-2">{fmtRate(totals.ctr)}</td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </section>
+              </thead>
+              <tbody>
+                {creatives.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="py-6 text-center text-muted-foreground">
+                      暂无数据
+                    </td>
+                  </tr>
+                )}
+                {creatives.map((c) => (
+                  <tr key={c.creative_id} className="border-b border-white/5">
+                    <td className="py-2 pr-4 text-foreground">{c.name}</td>
+                    <td className="py-2 pr-4 text-muted-foreground">{c.creative_id}</td>
+                    <td className="py-2 pr-4">{fmtInt(c.impressions)}</td>
+                    <td className="py-2 pr-4">{fmtInt(c.clicks)}</td>
+                    <td className="py-2">{fmtRate(c.ctr)}</td>
+                  </tr>
+                ))}
+                {totals && creatives.length > 0 && (
+                  <tr className="font-medium">
+                    <td className="py-2 pr-4 text-foreground">合计</td>
+                    <td className="py-2 pr-4" />
+                    <td className="py-2 pr-4">{fmtInt(totals.impressions)}</td>
+                    <td className="py-2 pr-4">{fmtInt(totals.clicks)}</td>
+                    <td className="py-2">{fmtRate(totals.ctr)}</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <DailyStats rows={dailyRows} />
+      </div>
     </div>
+  );
+}
+
+// 按日统计：近 7 天全局曝光/点击/CTR 趋势（固定窗口，不随上方日期区间变化）。
+// 纯 CSS 柱状条（高度 ∝ 当日曝光）+ 汇总行，不引图表库。
+function DailyStats({ rows }: { rows: DashboardDailyRow[] }) {
+  const max = Math.max(1, ...rows.map((r) => r.impressions));
+  const sumImp = rows.reduce((a, r) => a + r.impressions, 0);
+  const sumClk = rows.reduce((a, r) => a + r.clicks, 0);
+  const avgCtr = sumImp > 0 ? sumClk / sumImp : 0;
+  return (
+    <section className="surface-card rise-1 p-5">
+      <h2 className="mb-1 text-sm font-semibold text-foreground">按日统计</h2>
+      <p className="mb-4 text-xs text-muted-foreground">
+        近 {rows.length} 天 · 全局曝光/点击趋势（UTC）
+      </p>
+      <div className="flex h-36 items-end gap-1.5">
+        {rows.map((r) => {
+          const h = Math.round((r.impressions / max) * 100);
+          const ctr = r.impressions > 0 ? r.clicks / r.impressions : 0;
+          return (
+            <div
+              key={r.date}
+              className="flex flex-1 flex-col items-center justify-end gap-1"
+              title={`${r.date}\n曝光 ${fmtInt(r.impressions)}\n点击 ${fmtInt(r.clicks)}\nCTR ${fmtRate(ctr)}\n转化 ${fmtInt(r.conversions)}`}
+            >
+              <span className="text-[10px] leading-none text-muted-foreground">
+                {fmtInt(r.impressions)}
+              </span>
+              <div
+                className="w-full rounded-sm bg-brand"
+                style={{ height: `${h}%`, minHeight: r.impressions > 0 ? 3 : 1 }}
+              />
+              <span className="text-[10px] leading-none text-muted-foreground">
+                {r.date.slice(5)}
+              </span>
+              <span className="text-[10px] leading-none text-foreground/70">
+                {fmtRate(ctr)}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      <div className="mt-4 grid grid-cols-3 gap-2 border-t border-white/10 pt-3 text-center">
+        <div>
+          <div className="text-[11px] text-muted-foreground">曝光合计</div>
+          <div className="text-sm font-semibold">{fmtInt(sumImp)}</div>
+        </div>
+        <div>
+          <div className="text-[11px] text-muted-foreground">点击合计</div>
+          <div className="text-sm font-semibold">{fmtInt(sumClk)}</div>
+        </div>
+        <div>
+          <div className="text-[11px] text-muted-foreground">平均CTR</div>
+          <div className="text-sm font-semibold">{fmtRate(avgCtr)}</div>
+        </div>
+      </div>
+    </section>
   );
 }
 

@@ -741,6 +741,33 @@ export async function getDashboardOverview(
   );
 }
 
+// DashboardDailyRow 按日统计的一行（近 N 天，全局口径，UTC）。
+export interface DashboardDailyRow {
+  date: string; // YYYY-MM-DD
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  revenue: number;
+}
+
+export interface DashboardDailyResult {
+  days: number;
+  data: DashboardDailyRow[];
+}
+
+/** 总览页「按日统计」：最近 days 天（默认 7）的全局每日聚合（趋势用，固定窗口）。 */
+export async function getDashboardDaily(
+  actorEmail: string,
+  opts: { days?: number },
+): Promise<DashboardDailyResult> {
+  const q = new URLSearchParams();
+  if (opts.days) q.set("days", String(opts.days));
+  return goApi<DashboardDailyResult>(
+    `/v1/admin/dashboard/daily?${q.toString()}`,
+    actorEmail,
+  );
+}
+
 // ============================================================
 // 产品（Product）：广告主下的产品归集（多产品广告主）
 // ============================================================

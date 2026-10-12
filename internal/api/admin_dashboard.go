@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 	"time"
 
 	"adcenter/internal/store"
@@ -61,4 +62,32 @@ func (s *Server) handleDashboardOverview(w http.ResponseWriter, r *http.Request)
 		Overview:    ov,
 		Advertisers: advs,
 	})
+}
+
+// dashboardDailyResponse 按日统计响应体（近 N 天每日全局聚合）。
+type dashboardDailyResponse struct {
+	Days int                    `json:"days"`
+	Data []store.DashboardDailyRow `json:"data"`
+}
+
+// handleDashboardDaily 总览页「按日统计」：最近 N 天（默认 7）的全局每日聚合，
+// 用于展示曝光/点击/CTR 的近期趋势（固定窗口，不随上方日期区间变化）。
+//
+//	GET /v1/admin/dashboard/daily?days=7
+func (s *Server) handleDashboardDaily(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireRole(w, r, false, false); !ok {
+		return
+	}
+	days := 7
+	if v := r.URL.Query().Get("days"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			days = n
+		}
+	}
+	data, err := s.Store.DashboardDaily(r.Context(), days)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, dashboardDailyResponse{Days: days, Data: data})
 }
