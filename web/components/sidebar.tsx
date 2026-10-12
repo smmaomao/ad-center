@@ -76,7 +76,7 @@ export function Sidebar({ items, email, roleLabel, logout }: SidebarProps) {
           </svg>
         </div>
         <div className="leading-tight">
-          <p className="text-[15px] font-bold tracking-tight text-white">广告中心</p>
+          <p className="text-[15px] font-bold tracking-tight text-white">BeReal Media</p>
           <p className="text-[11px] font-medium text-white/45">自有广告投放管理</p>
         </div>
       </div>

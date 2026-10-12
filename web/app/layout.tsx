@@ -17,7 +17,7 @@ const mono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "广告中心管理后台",
+  title: "BeReal Media 管理后台",
   description: "短剧 App 自有广告投放管理系统",
 };
 

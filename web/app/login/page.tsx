@@ -46,7 +46,7 @@ export default function LoginPage() {
     <main className="flex min-h-screen items-center justify-center bg-muted/40">
       <Card className="w-full max-w-sm">
         <CardHeader>
-          <CardTitle className="text-2xl">广告中心</CardTitle>
+          <CardTitle className="text-2xl">BeReal Media</CardTitle>
           <CardDescription>广告管理系统</CardDescription>
         </CardHeader>
         <CardContent>
