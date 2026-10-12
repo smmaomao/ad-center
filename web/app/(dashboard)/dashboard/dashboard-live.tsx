@@ -251,47 +251,80 @@ export function DashboardLive() {
   );
 }
 
-// 按日统计：近 7 天全局曝光/点击/CTR 趋势（固定窗口，不随上方日期区间变化）。
-// 纯 CSS 柱状条（高度 ∝ 当日曝光）+ 汇总行，不引图表库。
+// 按日统计：近 7 天全局曝光/点击趋势（固定窗口，不随上方日期区间变化）。
+// 纯 SVG 双折线（曝光=品牌色，点击=蓝），各自按自身最大值归一（量级差大，共用 Y 轴会压平点击线）。
 function DailyStats({ rows }: { rows: DashboardDailyRow[] }) {
-  const max = Math.max(1, ...rows.map((r) => r.impressions));
   const sumImp = rows.reduce((a, r) => a + r.impressions, 0);
   const sumClk = rows.reduce((a, r) => a + r.clicks, 0);
   const avgCtr = sumImp > 0 ? sumClk / sumImp : 0;
+
+  const W = 300, H = 120, padL = 8, padR = 8, padT = 12, padB = 20;
+  const innerW = W - padL - padR;
+  const innerH = H - padT - padB;
+  const n = rows.length;
+  const maxImp = Math.max(1, ...rows.map((r) => r.impressions));
+  const maxClk = Math.max(1, ...rows.map((r) => r.clicks));
+
+  const xAt = (i: number) => padL + (n <= 1 ? innerW / 2 : (i * innerW) / (n - 1));
+  const yImp = (v: number) => padT + (1 - v / maxImp) * innerH;
+  const yClk = (v: number) => padT + (1 - v / maxClk) * innerH;
+
+  const impPts = rows.map((r, i) => `${xAt(i).toFixed(1)},${yImp(r.impressions).toFixed(1)}`).join(" ");
+  const clkPts = rows.map((r, i) => `${xAt(i).toFixed(1)},${yClk(r.clicks).toFixed(1)}`).join(" ");
+
   return (
     <section className="surface-card rise-1 p-5">
-      <h2 className="mb-1 text-sm font-semibold text-foreground">按日统计</h2>
-      <p className="mb-4 text-xs text-muted-foreground">
-        近 {rows.length} 天 · 全局曝光/点击趋势（UTC）
-      </p>
-      <div className="flex h-36 items-end gap-1.5">
-        {rows.map((r) => {
-          const h = Math.round((r.impressions / max) * 100);
-          const ctr = r.impressions > 0 ? r.clicks / r.impressions : 0;
-          return (
-            <div
-              key={r.date}
-              className="flex flex-1 flex-col items-center justify-end gap-1"
-              title={`${r.date}\n曝光 ${fmtInt(r.impressions)}\n点击 ${fmtInt(r.clicks)}\nCTR ${fmtRate(ctr)}\n转化 ${fmtInt(r.conversions)}`}
-            >
-              <span className="text-[10px] leading-none text-muted-foreground">
-                {fmtInt(r.impressions)}
-              </span>
-              <div
-                className="w-full rounded-sm bg-brand"
-                style={{ height: `${h}%`, minHeight: r.impressions > 0 ? 3 : 1 }}
-              />
-              <span className="text-[10px] leading-none text-muted-foreground">
-                {r.date.slice(5)}
-              </span>
-              <span className="text-[10px] leading-none text-foreground/70">
-                {fmtRate(ctr)}
-              </span>
-            </div>
-          );
-        })}
+      <div className="mb-1 flex items-center justify-between">
+        <h2 className="text-sm font-semibold text-foreground">按日统计</h2>
+        <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
+          <span className="flex items-center gap-1">
+            <span className="inline-block h-2 w-2 rounded-full bg-brand" /> 曝光
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="inline-block h-2 w-2 rounded-full" style={{ background: "var(--chart-2)" }} /> 点击
+          </span>
+        </div>
       </div>
-      <div className="mt-4 grid grid-cols-3 gap-2 border-t border-white/10 pt-3 text-center">
+      <p className="mb-2 text-xs text-muted-foreground">
+        近 {n} 天 · 全局趋势（UTC，双轴各自归一）
+      </p>
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" preserveAspectRatio="xMidYMid meet">
+        <polyline
+          points={impPts}
+          fill="none"
+          stroke="var(--brand)"
+          strokeWidth={2}
+          strokeLinejoin="round"
+          strokeLinecap="round"
+        />
+        <polyline
+          points={clkPts}
+          fill="none"
+          stroke="var(--chart-2)"
+          strokeWidth={2}
+          strokeLinejoin="round"
+          strokeLinecap="round"
+        />
+        {rows.map((r, i) => (
+          <g key={r.date}>
+            <circle cx={xAt(i)} cy={yImp(r.impressions)} r={2.4} fill="var(--brand)" />
+            <circle cx={xAt(i)} cy={yClk(r.clicks)} r={2.4} fill="var(--chart-2)" />
+          </g>
+        ))}
+        {rows.map((r, i) => (
+          <text
+            key={r.date}
+            x={xAt(i)}
+            y={H - 5}
+            textAnchor="middle"
+            className="fill-muted-foreground"
+            style={{ fontSize: 9 }}
+          >
+            {r.date.slice(5)}
+          </text>
+        ))}
+      </svg>
+      <div className="mt-3 grid grid-cols-3 gap-2 border-t border-white/10 pt-3 text-center">
         <div>
           <div className="text-[11px] text-muted-foreground">曝光合计</div>
           <div className="text-sm font-semibold">{fmtInt(sumImp)}</div>
