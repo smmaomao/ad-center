@@ -768,6 +768,48 @@ export async function getDashboardDaily(
   );
 }
 
+// DashboardCampaignDaily 单日曝光/点击（按该任务时区切分）。
+export interface DashboardCampaignDaily {
+  date: string; // YYYY-MM-DD（任务时区）
+  impressions: number;
+  clicks: number;
+}
+
+// DashboardCampaignStat 单个广告任务在 [from,to] 内的全部指标（按任务维度）。
+export interface DashboardCampaignStat {
+  campaign_id: string;
+  name: string;
+  timezone: string;
+  impressions: number; // 曝光
+  clicks: number; // 点击
+  install: number; // 安装
+  activate: number; // 激活
+  register: number; // 注册
+  conversion: number; // 转化（首充 first_purchase）
+  pay: number; // 付费（purchase）
+  daily: DashboardCampaignDaily[];
+}
+
+export interface DashboardCampaignsResult {
+  from: string;
+  to: string;
+  campaigns: DashboardCampaignStat[];
+}
+
+/** 总览页「按广告任务维度」：每个任务的曝光/点击/安装/激活/注册/转化/付费 + 按日趋势。 */
+export async function getDashboardCampaigns(
+  actorEmail: string,
+  opts: { from?: string; to?: string },
+): Promise<DashboardCampaignsResult> {
+  const q = new URLSearchParams();
+  if (opts.from) q.set("from", opts.from);
+  if (opts.to) q.set("to", opts.to);
+  return goApi<DashboardCampaignsResult>(
+    `/v1/admin/dashboard/campaigns?${q.toString()}`,
+    actorEmail,
+  );
+}
+
 // ============================================================
 // 产品（Product）：广告主下的产品归集（多产品广告主）
 // ============================================================

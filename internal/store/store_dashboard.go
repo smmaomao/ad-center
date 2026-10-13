@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"math"
+	"strings"
 	"time"
 )
 
@@ -81,6 +82,150 @@ func (s *Store) DashboardDaily(ctx context.Context, days int) ([]DashboardDailyR
 			return nil, err
 		}
 		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// CampaignDashInfo 调用方传入的广告任务概要（来自配置快照，避免 store 依赖 config）。
+type CampaignDashInfo struct {
+	ID          string
+	Name        string
+	Timezone    string
+	CreativeIDs []string
+}
+
+// DashboardCampaignDaily 单日曝光/点击（按该任务时区切分）。
+type DashboardCampaignDaily struct {
+	Date        string `json:"date"`        // YYYY-MM-DD（任务时区）
+	Impressions int64  `json:"impressions"` // 当日曝光
+	Clicks      int64  `json:"clicks"`      // 当日点击
+}
+
+// DashboardCampaignStat 单个广告任务在 [from,to) 内的全部指标（按任务维度统计）。
+type DashboardCampaignStat struct {
+	CampaignID  string                   `json:"campaign_id"`
+	Name        string                   `json:"name"`
+	Timezone    string                   `json:"timezone"`
+	Impressions int64                    `json:"impressions"` // 曝光
+	Clicks      int64                    `json:"clicks"`      // 点击
+	Install     int64                    `json:"install"`     // 安装
+	Activate    int64                    `json:"activate"`    // 激活
+	Register    int64                    `json:"register"`    // 注册
+	Conversion  int64                    `json:"conversion"`  // 转化（首充 first_purchase）
+	Pay         int64                    `json:"pay"`         // 付费（purchase）
+	Daily       []DashboardCampaignDaily `json:"daily"`       // 按日趋势（曝光/点击，任务时区）
+}
+
+// DashboardCampaigns 逐个广告任务聚合 [from,to] 内的指标 + 按日趋势。
+// 曝光/点击来自 ad_events（按 creative_id 归属到任务）；安装/激活/注册/转化/付费来自
+// ad_conversions（按 campaign_id）。按日趋势按任务自身时区切分（generate_series 补齐连续日）。
+// 入参 to 为含当天（当天 00:00 起）；区间聚合用 to+1 天做开区间，按日趋势含 to 当天。
+func (s *Store) DashboardCampaigns(
+	ctx context.Context, camps []CampaignDashInfo, from, to time.Time,
+) ([]DashboardCampaignStat, error) {
+	toExclusive := to.AddDate(0, 0, 1)
+	out := make([]DashboardCampaignStat, 0, len(camps))
+	for _, c := range camps {
+		st := DashboardCampaignStat{CampaignID: c.ID, Name: c.Name, Timezone: c.Timezone}
+
+		// 曝光 / 点击：累加该任务关联素材在 ad_events 的 impression/click 计数
+		if len(c.CreativeIDs) > 0 {
+			stats, err := s.CreativeStats(ctx, c.CreativeIDs, from, toExclusive)
+			if err != nil {
+				return nil, err
+			}
+			for _, cs := range stats {
+				st.Impressions += cs.Impressions
+				st.Clicks += cs.Clicks
+			}
+		}
+
+		// 安装/激活/注册/转化/付费：按 campaign_id 聚合 ad_conversions
+		conv, err := s.campaignConversions(ctx, c.ID, from, toExclusive)
+		if err != nil {
+			return nil, err
+		}
+		st.Install = conv["install"]
+		st.Activate = conv["activate"]
+		st.Register = conv["register"]
+		st.Conversion = conv["first_purchase"]
+		st.Pay = conv["purchase"]
+
+		// 按日趋势：按任务时区切分曝光/点击（含 to 当天）
+		daily, err := s.campaignDaily(ctx, c.CreativeIDs, c.Timezone, from, to)
+		if err != nil {
+			return nil, err
+		}
+		st.Daily = daily
+
+		out = append(out, st)
+	}
+	return out, nil
+}
+
+// campaignConversions 按 campaign_id 聚合 ad_conversions 的各 event_type 计数。
+func (s *Store) campaignConversions(
+	ctx context.Context, campaignID string, from, to time.Time,
+) (map[string]int64, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT event_type, COUNT(*)::bigint
+		FROM ad_conversions
+		WHERE campaign_id = $1 AND ts >= $2 AND ts < $3
+		GROUP BY event_type`, campaignID, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]int64)
+	for rows.Next() {
+		var et string
+		var n int64
+		if err := rows.Scan(&et, &n); err != nil {
+			return nil, err
+		}
+		out[et] = n
+	}
+	return out, rows.Err()
+}
+
+// campaignDaily 按任务时区切分 [from,to) 内每日曝光/点击（补齐连续日，无数据补 0）。
+func (s *Store) campaignDaily(
+	ctx context.Context, creativeIDs []string, tz string, from, to time.Time,
+) ([]DashboardCampaignDaily, error) {
+	if len(creativeIDs) == 0 {
+		return []DashboardCampaignDaily{}, nil
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		loc = time.UTC
+	}
+	// 任务时区下的起止「本地日」边界（绝对时刻），generate_series 据此展开连续日
+	localStart := time.Date(from.In(loc).Year(), from.In(loc).Month(), from.In(loc).Day(), 0, 0, 0, 0, loc)
+	localEnd := time.Date(to.In(loc).Year(), to.In(loc).Month(), to.In(loc).Day(), 0, 0, 0, 0, loc)
+	lit := "{" + strings.Join(creativeIDs, ",") + "}"
+
+	rows, err := s.pool.Query(ctx, `
+		SELECT to_char(d.day AT TIME ZONE $4, 'YYYY-MM-DD'),
+		       COALESCE(SUM(CASE WHEN ae.event_type = 'impression' THEN 1 ELSE 0 END), 0)::bigint,
+		       COALESCE(SUM(CASE WHEN ae.event_type = 'click' THEN 1 ELSE 0 END), 0)::bigint
+		FROM generate_series($1::timestamptz, $2::timestamptz, interval '1 day') AS d(day)
+		LEFT JOIN ad_events ae
+		       ON ae.ts >= d.day AND ae.ts < d.day + interval '1 day'
+		      AND ae.event_type IN ('impression', 'click')
+		      AND ae.creative_id = ANY($3::bigint[])
+		GROUP BY d.day
+		ORDER BY d.day`, localStart, localEnd, lit, tz)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]DashboardCampaignDaily, 0)
+	for rows.Next() {
+		var d DashboardCampaignDaily
+		if err := rows.Scan(&d.Date, &d.Impressions, &d.Clicks); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
 	}
 	return out, rows.Err()
 }

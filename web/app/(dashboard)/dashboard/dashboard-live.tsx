@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { loadDashboardAction, type DashboardPayload } from "./actions";
-import type { DashboardDailyRow } from "@/lib/go-api";
+import type { DashboardCampaignDaily } from "@/lib/go-api";
 
 const WARNING_LABEL: Record<string, { text: string; cls: string }> = {
   paused: { text: "已暂停", cls: "bg-zinc-500/15 text-zinc-300" },
@@ -33,8 +33,14 @@ function todayStr(): string {
 
 export function DashboardLive() {
   const today = useMemo(() => todayStr(), []);
+  // 默认展示最近 7 天（与「按日趋势」语义一致），日期框仍可放宽到任意区间
+  const initialFrom = useMemo(() => {
+    const d = new Date(today + "T00:00:00Z");
+    d.setUTCDate(d.getUTCDate() - 6);
+    return d.toISOString().slice(0, 10);
+  }, [today]);
 
-  const [from, setFrom] = useState(today);
+  const [from, setFrom] = useState(initialFrom);
   const [to, setTo] = useState(today);
   const [data, setData] = useState<DashboardPayload | null>(null);
   const [loading, setLoading] = useState(false);
@@ -74,9 +80,7 @@ export function DashboardLive() {
 
   const ov = data?.overview.overview;
   const advertisers = data?.overview.advertisers ?? [];
-  const creatives = data?.creatives.creatives ?? [];
-  const totals = data?.creatives.totals;
-  const dailyRows = data?.daily.data ?? [];
+  const campaigns = data?.campaigns.campaigns ?? [];
 
   return (
     <div className="space-y-6">
@@ -118,7 +122,7 @@ export function DashboardLive() {
         </div>
       )}
 
-      {/* KPI 卡片 */}
+      {/* KPI 卡片（仅快照类指标；区间指标改按广告任务维度展示） */}
       <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
         <KpiCard
           label="今日消耗 / 日预算"
@@ -129,17 +133,6 @@ export function DashboardLive() {
           value={ov ? fmtPct(ov.achievement) : "—"}
           hint={ov ? "目标/实际 CPI 加权" : ""}
         />
-        <KpiCard
-          label="曝光 / 点击"
-          value={ov ? `${fmtInt(ov.impressions)} / ${fmtInt(ov.clicks)}` : "—"}
-        />
-        <KpiCard label="安装" value={ov ? fmtInt(ov.install) : "—"} />
-        <KpiCard label="激活" value={ov ? fmtInt(ov.activate) : "—"} />
-        <KpiCard label="注册" value={ov ? fmtInt(ov.register) : "—"} />
-        <KpiCard label="转化" value={ov ? fmtInt(ov.conversion) : "—"} hint="首充" />
-        <KpiCard label="付费" value={ov ? fmtInt(ov.pay) : "—"} />
-        <KpiCard label="填充率" value={ov ? fmtPct(ov.fill_rate) : "—"} />
-        <KpiCard label="eCPM" value={ov ? fmtMoney(ov.ecpm) : "—"} />
         <KpiCard
           label="活跃广告主 / 任务"
           value={ov ? `${ov.active_advertisers} / ${ov.active_campaigns}` : "—"}
@@ -199,80 +192,100 @@ export function DashboardLive() {
         </div>
       </section>
 
-      {/* 素材维度分析 + 按日统计（并排） */}
-      <div className="grid gap-4 lg:grid-cols-3">
-        <section className="surface-card rise-1 p-5 lg:col-span-2">
-          <h2 className="mb-4 text-sm font-semibold text-foreground">素材维度分析</h2>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="text-left text-muted-foreground">
-                <tr className="border-b border-white/10">
-                  <th className="py-2 pr-4 font-medium">素材</th>
-                  <th className="py-2 pr-4 font-medium">素材 ID</th>
-                  <th className="py-2 pr-4 font-medium">曝光</th>
-                  <th className="py-2 pr-4 font-medium">点击</th>
-                  <th className="py-2 font-medium">点击率</th>
+      {/* 广告任务维度分析（按任务拆分，不再做全局汇总） */}
+      <section className="surface-card rise-1 p-5">
+        <h2 className="mb-1 text-sm font-semibold text-foreground">广告任务维度分析</h2>
+        <p className="mb-4 text-xs text-muted-foreground">
+          按广告任务维度统计（区间 {from} ~ {to}，UTC 口径）；按日趋势按各任务时区切分
+        </p>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="text-left text-muted-foreground">
+              <tr className="border-b border-white/10">
+                <th className="py-2 pr-4 font-medium">广告任务</th>
+                <th className="py-2 pr-4 font-medium">时区</th>
+                <th className="py-2 pr-4 font-medium">曝光</th>
+                <th className="py-2 pr-4 font-medium">点击</th>
+                <th className="py-2 pr-4 font-medium">安装</th>
+                <th className="py-2 pr-4 font-medium">激活</th>
+                <th className="py-2 pr-4 font-medium">注册</th>
+                <th className="py-2 pr-4 font-medium">转化</th>
+                <th className="py-2 font-medium">付费</th>
+              </tr>
+            </thead>
+            <tbody>
+              {campaigns.length === 0 && (
+                <tr>
+                  <td colSpan={9} className="py-6 text-center text-muted-foreground">
+                    暂无数据
+                  </td>
                 </tr>
-              </thead>
-              <tbody>
-                {creatives.length === 0 && (
-                  <tr>
-                    <td colSpan={5} className="py-6 text-center text-muted-foreground">
-                      暂无数据
-                    </td>
-                  </tr>
-                )}
-                {creatives.map((c) => (
-                  <tr key={c.creative_id} className="border-b border-white/5">
-                    <td className="py-2 pr-4 text-foreground">{c.name}</td>
-                    <td className="py-2 pr-4 text-muted-foreground">{c.creative_id}</td>
-                    <td className="py-2 pr-4">{fmtInt(c.impressions)}</td>
-                    <td className="py-2 pr-4">{fmtInt(c.clicks)}</td>
-                    <td className="py-2">{fmtRate(c.ctr)}</td>
-                  </tr>
-                ))}
-                {totals && creatives.length > 0 && (
-                  <tr className="font-medium">
-                    <td className="py-2 pr-4 text-foreground">合计</td>
-                    <td className="py-2 pr-4" />
-                    <td className="py-2 pr-4">{fmtInt(totals.impressions)}</td>
-                    <td className="py-2 pr-4">{fmtInt(totals.clicks)}</td>
-                    <td className="py-2">{fmtRate(totals.ctr)}</td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </section>
+              )}
+              {campaigns.map((c) => (
+                <tr key={c.campaign_id} className="border-b border-white/5">
+                  <td className="py-2 pr-4 text-foreground">{c.name}</td>
+                  <td className="py-2 pr-4 text-muted-foreground">{c.timezone}</td>
+                  <td className="py-2 pr-4">{fmtInt(c.impressions)}</td>
+                  <td className="py-2 pr-4">{fmtInt(c.clicks)}</td>
+                  <td className="py-2 pr-4">{fmtInt(c.install)}</td>
+                  <td className="py-2 pr-4">{fmtInt(c.activate)}</td>
+                  <td className="py-2 pr-4">{fmtInt(c.register)}</td>
+                  <td className="py-2 pr-4">{fmtInt(c.conversion)}</td>
+                  <td className="py-2">{fmtInt(c.pay)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
 
-        <DailyStats rows={dailyRows} />
-      </div>
+      {/* 按日趋势：按广告任务细分（每任务一张双折线图） */}
+      <section className="surface-card rise-1 p-5">
+        <h2 className="mb-1 text-sm font-semibold text-foreground">按日趋势（按广告任务细分）</h2>
+        <p className="mb-4 text-xs text-muted-foreground">
+          近区间每日 曝光/点击（各任务按自身时区切分，双轴各自归一，悬停查看数值）
+        </p>
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          {campaigns.length === 0 && (
+            <div className="py-6 text-center text-muted-foreground">暂无数据</div>
+          )}
+          {campaigns.map((c) => (
+            <div key={c.campaign_id} className="rounded-lg border border-white/10 p-3">
+              <div className="mb-1 flex items-center justify-between">
+                <span className="truncate text-sm font-medium text-foreground">{c.name}</span>
+                <span className="ml-2 shrink-0 text-[10px] text-muted-foreground">{c.timezone}</span>
+              </div>
+              <TrendChart daily={c.daily} />
+            </div>
+          ))}
+        </div>
+      </section>
     </div>
   );
 }
 
-// 按日统计：近 7 天全局曝光/点击趋势（固定窗口，不随上方日期区间变化）。
-// 纯 SVG 双折线（曝光=品牌色，点击=蓝）+ 底部横坐标 + 悬停数值气泡，各自按自身最大值归一。
-function DailyStats({ rows }: { rows: DashboardDailyRow[] }) {
+// 按日趋势双折线图：曝光（品牌色）+ 点击（蓝），各自按自身最大值归一，
+// 带横坐标与悬停数值气泡。用于「按广告任务细分」的每任务一张小图。
+function TrendChart({ daily }: { daily: DashboardCampaignDaily[] }) {
   const [hover, setHover] = useState<number | null>(null);
-  const sumImp = rows.reduce((a, r) => a + r.impressions, 0);
-  const sumClk = rows.reduce((a, r) => a + r.clicks, 0);
+  const sumImp = daily.reduce((a, r) => a + r.impressions, 0);
+  const sumClk = daily.reduce((a, r) => a + r.clicks, 0);
   const avgCtr = sumImp > 0 ? sumClk / sumImp : 0;
 
   const W = 300, H = 120, padL = 8, padR = 8, padT = 12, padB = 20;
   const innerW = W - padL - padR;
   const innerH = H - padT - padB;
   const axisY = padT + innerH;
-  const n = rows.length;
-  const maxImp = Math.max(1, ...rows.map((r) => r.impressions));
-  const maxClk = Math.max(1, ...rows.map((r) => r.clicks));
+  const n = daily.length;
+  const maxImp = Math.max(1, ...daily.map((r) => r.impressions));
+  const maxClk = Math.max(1, ...daily.map((r) => r.clicks));
 
   const xAt = (i: number) => padL + (n <= 1 ? innerW / 2 : (i * innerW) / (n - 1));
   const yImp = (v: number) => padT + (1 - v / maxImp) * innerH;
   const yClk = (v: number) => padT + (1 - v / maxClk) * innerH;
 
-  const impPts = rows.map((r, i) => `${xAt(i).toFixed(1)},${yImp(r.impressions).toFixed(1)}`).join(" ");
-  const clkPts = rows.map((r, i) => `${xAt(i).toFixed(1)},${yClk(r.clicks).toFixed(1)}`).join(" ");
+  const impPts = daily.map((r, i) => `${xAt(i).toFixed(1)},${yImp(r.impressions).toFixed(1)}`).join(" ");
+  const clkPts = daily.map((r, i) => `${xAt(i).toFixed(1)},${yClk(r.clicks).toFixed(1)}`).join(" ");
 
   // 悬停气泡定位（避免越出右/左边界）
   const tipW = 96, tipH = 54;
@@ -282,21 +295,7 @@ function DailyStats({ rows }: { rows: DashboardDailyRow[] }) {
   if (tipX + tipW > W - 2) tipX = W - 2 - tipW;
 
   return (
-    <section className="surface-card rise-1 p-5">
-      <div className="mb-1 flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-foreground">按日统计</h2>
-        <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
-          <span className="flex items-center gap-1">
-            <span className="inline-block h-2 w-2 rounded-full bg-brand" /> 曝光
-          </span>
-          <span className="flex items-center gap-1">
-            <span className="inline-block h-2 w-2 rounded-full" style={{ background: "var(--chart-2)" }} /> 点击
-          </span>
-        </div>
-      </div>
-      <p className="mb-2 text-xs text-muted-foreground">
-        近 {n} 天 · 全局趋势（UTC，双轴各自归一，悬停查看数值）
-      </p>
+    <div>
       <svg
         viewBox={`0 0 ${W} ${H}`}
         className="w-full"
@@ -336,7 +335,7 @@ function DailyStats({ rows }: { rows: DashboardDailyRow[] }) {
           strokeLinecap="round"
         />
 
-        {rows.map((r, i) => (
+        {daily.map((r, i) => (
           <g key={r.date}>
             <circle
               cx={xAt(i)}
@@ -357,7 +356,7 @@ function DailyStats({ rows }: { rows: DashboardDailyRow[] }) {
           </g>
         ))}
 
-        {rows.map((r, i) => (
+        {daily.map((r, i) => (
           <text
             key={r.date}
             x={xAt(i)}
@@ -371,7 +370,7 @@ function DailyStats({ rows }: { rows: DashboardDailyRow[] }) {
         ))}
 
         {/* 透明热区：整列可触发悬停 */}
-        {rows.map((r, i) => (
+        {daily.map((r, i) => (
           <rect
             key={`hit-${r.date}`}
             x={Math.max(0, xAt(i) - innerW / (2 * n))}
@@ -387,7 +386,7 @@ function DailyStats({ rows }: { rows: DashboardDailyRow[] }) {
         {/* 悬停数值气泡 */}
         {hover != null &&
           (() => {
-            const r = rows[hover];
+            const r = daily[hover];
             const ctr = r.impressions > 0 ? r.clicks / r.impressions : 0;
             return (
               <g style={{ pointerEvents: "none" }}>
@@ -419,21 +418,12 @@ function DailyStats({ rows }: { rows: DashboardDailyRow[] }) {
             );
           })()}
       </svg>
-      <div className="mt-3 grid grid-cols-3 gap-2 border-t border-white/10 pt-3 text-center">
-        <div>
-          <div className="text-[11px] text-muted-foreground">曝光合计</div>
-          <div className="text-sm font-semibold">{fmtInt(sumImp)}</div>
-        </div>
-        <div>
-          <div className="text-[11px] text-muted-foreground">点击合计</div>
-          <div className="text-sm font-semibold">{fmtInt(sumClk)}</div>
-        </div>
-        <div>
-          <div className="text-[11px] text-muted-foreground">平均CTR</div>
-          <div className="text-sm font-semibold">{fmtRate(avgCtr)}</div>
-        </div>
+      <div className="mt-2 flex items-center justify-center gap-3 text-[11px] text-muted-foreground">
+        <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full bg-brand" />曝光 {fmtInt(sumImp)}</span>
+        <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: "var(--chart-2)" }} />点击 {fmtInt(sumClk)}</span>
+        <span>CTR {fmtRate(avgCtr)}</span>
       </div>
-    </section>
+    </div>
   );
 }
 

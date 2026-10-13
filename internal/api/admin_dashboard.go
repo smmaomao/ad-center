@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"sort"
 	"strconv"
 	"time"
 
@@ -90,4 +91,63 @@ func (s *Server) handleDashboardDaily(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, dashboardDailyResponse{Days: days, Data: data})
+}
+
+// dashboardCampaignsResponse 按广告任务维度的总览响应体。
+type dashboardCampaignsResponse struct {
+	From       string                     `json:"from"`
+	To         string                     `json:"to"`
+	Campaigns  []store.DashboardCampaignStat `json:"campaigns"`
+}
+
+// handleDashboardCampaigns 总览页「按广告任务维度」统计：每个广告任务的
+// 曝光/点击（ad_events）+ 安装/激活/注册/转化/付费（ad_conversions）+ 按日趋势（任务时区）。
+// 不再做全局汇总，所有指标按 campaign 维度拆分，按各自时区切分按天。
+//
+//	GET /v1/admin/dashboard/campaigns?from=YYYY-MM-DD&to=YYYY-MM-DD
+func (s *Server) handleDashboardCampaigns(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireRole(w, r, false, false); !ok {
+		return
+	}
+	now := time.Now().UTC()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	from := today.AddDate(0, 0, -6) // 默认最近 7 天（与日期选择器默认一致）
+	to := today
+	if y, m, d, ok := parseDate(r.URL.Query().Get("from")); ok {
+		from = time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+	}
+	if y, m, d, ok := parseDate(r.URL.Query().Get("to")); ok {
+		to = time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+	}
+	if to.Before(from) {
+		from, to = to, from
+	}
+
+	snap := s.Cache.Snapshot()
+	if snap == nil {
+		writeError(w, http.StatusServiceUnavailable, "config not loaded")
+		return
+	}
+	camps := make([]store.CampaignDashInfo, 0, len(snap.Campaigns))
+	for _, c := range snap.Campaigns {
+		camps = append(camps, store.CampaignDashInfo{
+			ID:          c.ID,
+			Name:        c.Name,
+			Timezone:    c.Timezone,
+			CreativeIDs: c.CreativeIDs,
+		})
+	}
+	// 按名称稳定排序，便于前端展示
+	sort.Slice(camps, func(i, j int) bool { return camps[i].Name < camps[j].Name })
+
+	data, err := s.Store.DashboardCampaigns(r.Context(), camps, from, to)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, dashboardCampaignsResponse{
+		From:      from.Format("2006-01-02"),
+		To:        to.Format("2006-01-02"),
+		Campaigns: data,
+	})
 }
