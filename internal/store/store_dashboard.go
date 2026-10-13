@@ -379,9 +379,11 @@ func mapVal(m map[string]int64, k string) int64 {
 }
 
 // CreativeNameMap 批量取素材 id -> 名称（含已停止/非活跃素材，供明细展示）。
+// 注意 creatives.id 为 bigint，必须显式 ::text 后再与 text[] 比较，
+// 否则报 "operator does not exist: bigint = text"。
 func (s *Store) CreativeNameMap(ctx context.Context, ids []string) (map[string]string, error) {
 	lit := "{" + strings.Join(ids, ",") + "}"
-	rows, err := s.pool.Query(ctx, `SELECT id::text, name FROM creatives WHERE id = ANY($1::text[])`, lit)
+	rows, err := s.pool.Query(ctx, `SELECT id::text, name FROM creatives WHERE id::text = ANY($1::text[])`, lit)
 	if err != nil {
 		return nil, err
 	}

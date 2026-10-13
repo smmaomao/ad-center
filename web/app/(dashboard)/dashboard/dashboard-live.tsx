@@ -253,6 +253,11 @@ export function DashboardLive() {
             const dayImp = day.campaigns.reduce((a, c) => a + c.impressions, 0);
             const dayClk = day.campaigns.reduce((a, c) => a + c.clicks, 0);
             const dayCtr = dayImp > 0 ? dayClk / dayImp : 0;
+            const dayInst = day.campaigns.reduce((a, c) => a + c.install, 0);
+            const dayAct = day.campaigns.reduce((a, c) => a + c.activate, 0);
+            const dayReg = day.campaigns.reduce((a, c) => a + c.register, 0);
+            const dayConv = day.campaigns.reduce((a, c) => a + c.conversion, 0);
+            const dayPay = day.campaigns.reduce((a, c) => a + c.pay, 0);
             return (
               <div
                 key={day.date}
@@ -288,9 +293,16 @@ export function DashboardLive() {
                       {day.campaigns.length} 个广告任务
                     </span>
                   </span>
-                  <span className="ml-auto flex shrink-0 items-center gap-5 sm:gap-8">
+                  <span className="ml-auto flex shrink-0 items-center gap-3.5 sm:gap-6">
                     <MiniStat label="曝光" value={fmtInt(dayImp)} />
                     <MiniStat label="点击" value={fmtInt(dayClk)} />
+                    <span className="hidden items-center gap-3.5 sm:gap-6 lg:flex">
+                      <MiniStat label="安装" value={fmtCnt(dayInst)} />
+                      <MiniStat label="激活" value={fmtCnt(dayAct)} />
+                      <MiniStat label="注册" value={fmtCnt(dayReg)} />
+                      <MiniStat label="转化" value={fmtCnt(dayConv)} />
+                      <MiniStat label="付费" value={fmtCnt(dayPay)} />
+                    </span>
                     <span className="hidden sm:block">
                       <MiniStat label="CTR" value={fmtRate(dayCtr)} accent />
                     </span>
@@ -608,6 +620,11 @@ function ChevronIcon({ className }: { className?: string }) {
 function Num({ v }: { v: number }) {
   if (!v) return <span className="text-muted-foreground/35">—</span>;
   return <span className="font-mono tabular-nums text-foreground">{fmtInt(v)}</span>;
+}
+
+// 汇总指标：0 显示为淡横杠
+function fmtCnt(n: number): string {
+  return n > 0 ? fmtInt(n) : "—";
 }
 
 // 日头部右侧的迷你指标
