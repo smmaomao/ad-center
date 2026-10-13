@@ -780,6 +780,7 @@ export interface DashboardCampaignStat {
   campaign_id: string;
   name: string;
   timezone: string;
+  status: string; // active / paused（投放中 / 已停止）
   impressions: number; // 曝光
   clicks: number; // 点击
   install: number; // 安装
@@ -790,10 +791,42 @@ export interface DashboardCampaignStat {
   daily: DashboardCampaignDaily[];
 }
 
+// DashboardCreativeDaily 单日单个素材的曝光/点击/CTR。
+export interface DashboardCreativeDaily {
+  creative_id: string;
+  name: string;
+  impressions: number;
+  clicks: number;
+  ctr: number; // 0~1
+}
+
+// DashboardCampaignDay 单日（UTC）下单个广告任务的指标 + 关联素材明细。
+export interface DashboardCampaignDay {
+  campaign_id: string;
+  name: string;
+  timezone: string;
+  status: string;
+  impressions: number;
+  clicks: number;
+  install: number;
+  activate: number;
+  register: number;
+  conversion: number;
+  pay: number;
+  creatives: DashboardCreativeDaily[];
+}
+
+// DashboardDay 一天（UTC 日期）下各广告任务的指标。
+export interface DashboardDay {
+  date: string; // YYYY-MM-DD
+  campaigns: DashboardCampaignDay[];
+}
+
 export interface DashboardCampaignsResult {
   from: string;
   to: string;
-  campaigns: DashboardCampaignStat[];
+  days: DashboardDay[]; // 按日分组（UTC）+ 素材明细
+  campaigns: DashboardCampaignStat[]; // 每任务汇总 + 按日趋势
 }
 
 /** 总览页「按广告任务维度」：每个任务的曝光/点击/安装/激活/注册/转化/付费 + 按日趋势。 */

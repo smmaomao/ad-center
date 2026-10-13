@@ -1,11 +1,19 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type Dispatch,
+  type SetStateAction,
+} from "react";
 
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { loadDashboardAction, type DashboardPayload } from "./actions";
-import type { DashboardCampaignDaily } from "@/lib/go-api";
+import type { DashboardCampaignDaily, DashboardDay } from "@/lib/go-api";
 
 const WARNING_LABEL: Record<string, { text: string; cls: string }> = {
   paused: { text: "已暂停", cls: "bg-zinc-500/15 text-zinc-300" },
@@ -45,6 +53,19 @@ export function DashboardLive() {
   const [data, setData] = useState<DashboardPayload | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 按日分组表格的展开状态：openDays=展开的日期；openCamps=展开的「日期::任务」明细
+  const [openDays, setOpenDays] = useState<Set<string>>(new Set());
+  const [openCamps, setOpenCamps] = useState<Set<string>>(new Set());
+  const toggleSet = (
+    setter: Dispatch<SetStateAction<Set<string>>>,
+    key: string,
+  ) =>
+    setter((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
 
   // 区间跨度（天），含首尾：0 = 同一天，6 = 跨 7 天
   const spanDays = useMemo(() => {
@@ -81,6 +102,7 @@ export function DashboardLive() {
   const ov = data?.overview.overview;
   const advertisers = data?.overview.advertisers ?? [];
   const campaigns = data?.campaigns.campaigns ?? [];
+  const days = data?.campaigns.days ?? [];
 
   return (
     <div className="space-y-6">
@@ -192,50 +214,140 @@ export function DashboardLive() {
         </div>
       </section>
 
-      {/* 广告任务维度分析（按任务拆分，不再做全局汇总） */}
+      {/* 广告任务维度分析（按日分组，每天一行，可展开到素材明细） */}
       <section className="surface-card rise-1 p-5">
-        <h2 className="mb-1 text-sm font-semibold text-foreground">广告任务维度分析</h2>
+        <h2 className="mb-1 text-sm font-semibold text-foreground">广告任务维度分析（按日）</h2>
         <p className="mb-4 text-xs text-muted-foreground">
-          按广告任务维度统计（区间 {from} ~ {to}，UTC 口径）；按日趋势按各任务时区切分
+          按日分组（UTC，区间 {from} ~ {to}）；展开某天查看当日各广告任务，再展开任务查看关联素材明细。
+          含已停止但 7 天内有活动的任务。
         </p>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead className="text-left text-muted-foreground">
-              <tr className="border-b border-white/10">
-                <th className="py-2 pr-4 font-medium">广告任务</th>
-                <th className="py-2 pr-4 font-medium">时区</th>
-                <th className="py-2 pr-4 font-medium">曝光</th>
-                <th className="py-2 pr-4 font-medium">点击</th>
-                <th className="py-2 pr-4 font-medium">安装</th>
-                <th className="py-2 pr-4 font-medium">激活</th>
-                <th className="py-2 pr-4 font-medium">注册</th>
-                <th className="py-2 pr-4 font-medium">转化</th>
-                <th className="py-2 font-medium">付费</th>
-              </tr>
-            </thead>
-            <tbody>
-              {campaigns.length === 0 && (
-                <tr>
-                  <td colSpan={9} className="py-6 text-center text-muted-foreground">
-                    暂无数据
-                  </td>
-                </tr>
-              )}
-              {campaigns.map((c) => (
-                <tr key={c.campaign_id} className="border-b border-white/5">
-                  <td className="py-2 pr-4 text-foreground">{c.name}</td>
-                  <td className="py-2 pr-4 text-muted-foreground">{c.timezone}</td>
-                  <td className="py-2 pr-4">{fmtInt(c.impressions)}</td>
-                  <td className="py-2 pr-4">{fmtInt(c.clicks)}</td>
-                  <td className="py-2 pr-4">{fmtInt(c.install)}</td>
-                  <td className="py-2 pr-4">{fmtInt(c.activate)}</td>
-                  <td className="py-2 pr-4">{fmtInt(c.register)}</td>
-                  <td className="py-2 pr-4">{fmtInt(c.conversion)}</td>
-                  <td className="py-2">{fmtInt(c.pay)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <div className="space-y-2">
+          {days.length === 0 && (
+            <div className="py-6 text-center text-sm text-muted-foreground">暂无数据</div>
+          )}
+          {days.map((day) => {
+            const dayOpen = openDays.has(day.date);
+            const dayImp = day.campaigns.reduce((a, c) => a + c.impressions, 0);
+            const dayClk = day.campaigns.reduce((a, c) => a + c.clicks, 0);
+            return (
+              <div key={day.date} className="rounded-lg border border-white/10">
+                <button
+                  type="button"
+                  onClick={() => toggleSet(setOpenDays, day.date)}
+                  className="flex w-full items-center justify-between px-4 py-2 text-left hover:bg-white/5"
+                >
+                  <span className="flex items-center gap-2 text-sm font-medium text-foreground">
+                    <span className="text-muted-foreground">{dayOpen ? "▾" : "▸"}</span>
+                    {day.date}
+                    <span className="text-xs text-muted-foreground">任务 {day.campaigns.length}</span>
+                  </span>
+                  <span className="text-xs text-muted-foreground">
+                    曝光 {fmtInt(dayImp)} · 点击 {fmtInt(dayClk)}
+                  </span>
+                </button>
+                {dayOpen && (
+                  <div className="overflow-x-auto px-2 pb-2">
+                    <table className="w-full text-sm">
+                      <thead className="text-left text-muted-foreground">
+                        <tr className="border-b border-white/10">
+                          <th className="py-2 pr-4 font-medium">广告任务</th>
+                          <th className="py-2 pr-4 font-medium">状态</th>
+                          <th className="py-2 pr-4 font-medium">时区</th>
+                          <th className="py-2 pr-4 font-medium">曝光</th>
+                          <th className="py-2 pr-4 font-medium">点击</th>
+                          <th className="py-2 pr-4 font-medium">安装</th>
+                          <th className="py-2 pr-4 font-medium">激活</th>
+                          <th className="py-2 pr-4 font-medium">注册</th>
+                          <th className="py-2 pr-4 font-medium">转化</th>
+                          <th className="py-2 font-medium">付费</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {day.campaigns.map((c) => {
+                          const key = `${day.date}::${c.campaign_id}`;
+                          const cOpen = openCamps.has(key);
+                          return (
+                            <Fragment key={c.campaign_id}>
+                              <tr className="border-b border-white/5">
+                                <td className="py-2 pr-4 text-foreground">
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleSet(setOpenCamps, key)}
+                                    className="flex items-center gap-1 hover:underline"
+                                  >
+                                    <span className="text-muted-foreground">{cOpen ? "▾" : "▸"}</span>
+                                    {c.name}
+                                  </button>
+                                </td>
+                                <td className="py-2 pr-4">
+                                  {c.status === "active" ? (
+                                    <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs text-emerald-300">
+                                      投放中
+                                    </span>
+                                  ) : (
+                                    <span className="rounded-full bg-zinc-500/15 px-2 py-0.5 text-xs text-zinc-300">
+                                      已停止
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="py-2 pr-4 text-muted-foreground">{c.timezone}</td>
+                                <td className="py-2 pr-4">{fmtInt(c.impressions)}</td>
+                                <td className="py-2 pr-4">{fmtInt(c.clicks)}</td>
+                                <td className="py-2 pr-4">{fmtInt(c.install)}</td>
+                                <td className="py-2 pr-4">{fmtInt(c.activate)}</td>
+                                <td className="py-2 pr-4">{fmtInt(c.register)}</td>
+                                <td className="py-2 pr-4">{fmtInt(c.conversion)}</td>
+                                <td className="py-2">{fmtInt(c.pay)}</td>
+                              </tr>
+                              {cOpen && (
+                                <tr>
+                                  <td colSpan={10} className="py-2 pr-4">
+                                    <div className="ml-4 rounded border border-white/10 bg-black/20 p-3">
+                                      <div className="mb-2 text-xs text-muted-foreground">
+                                        关联素材明细（{c.creatives.length}）
+                                      </div>
+                                      {c.creatives.length === 0 ? (
+                                        <div className="text-xs text-muted-foreground">
+                                          当日无素材曝光/点击（仅有转化回传）
+                                        </div>
+                                      ) : (
+                                        <table className="w-full text-sm">
+                                          <thead className="text-left text-muted-foreground">
+                                            <tr className="border-b border-white/10">
+                                              <th className="py-1 pr-4 font-medium">素材</th>
+                                              <th className="py-1 pr-4 font-medium">曝光</th>
+                                              <th className="py-1 pr-4 font-medium">点击</th>
+                                              <th className="py-1 font-medium">CTR</th>
+                                            </tr>
+                                          </thead>
+                                          <tbody>
+                                            {c.creatives.map((cr) => (
+                                              <tr key={cr.creative_id} className="border-b border-white/5">
+                                                <td className="py-1 pr-4 text-foreground">
+                                                  {cr.name || cr.creative_id}
+                                                </td>
+                                                <td className="py-1 pr-4">{fmtInt(cr.impressions)}</td>
+                                                <td className="py-1 pr-4">{fmtInt(cr.clicks)}</td>
+                                                <td className="py-1">{fmtRate(cr.ctr)}</td>
+                                              </tr>
+                                            ))}
+                                          </tbody>
+                                        </table>
+                                      )}
+                                    </div>
+                                  </td>
+                                </tr>
+                              )}
+                            </Fragment>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       </section>
 
@@ -243,7 +355,7 @@ export function DashboardLive() {
       <section className="surface-card rise-1 p-5">
         <h2 className="mb-1 text-sm font-semibold text-foreground">按日趋势（按广告任务细分）</h2>
         <p className="mb-4 text-xs text-muted-foreground">
-          近区间每日 曝光/点击（各任务按自身时区切分，双轴各自归一，悬停查看数值）
+          近区间每日 曝光/点击（各任务按自身时区切分，双轴各自归一，悬停查看数值）。含已停止任务。
         </p>
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
           {campaigns.length === 0 && (
@@ -251,9 +363,20 @@ export function DashboardLive() {
           )}
           {campaigns.map((c) => (
             <div key={c.campaign_id} className="rounded-lg border border-white/10 p-3">
-              <div className="mb-1 flex items-center justify-between">
+              <div className="mb-1 flex items-center justify-between gap-2">
                 <span className="truncate text-sm font-medium text-foreground">{c.name}</span>
                 <span className="ml-2 shrink-0 text-[10px] text-muted-foreground">{c.timezone}</span>
+              </div>
+              <div className="mb-1">
+                {c.status === "active" ? (
+                  <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] text-emerald-300">
+                    投放中
+                  </span>
+                ) : (
+                  <span className="rounded-full bg-zinc-500/15 px-2 py-0.5 text-[10px] text-zinc-300">
+                    已停止
+                  </span>
+                )}
               </div>
               <TrendChart daily={c.daily} />
             </div>

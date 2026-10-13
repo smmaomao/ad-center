@@ -95,14 +95,16 @@ func (s *Server) handleDashboardDaily(w http.ResponseWriter, r *http.Request) {
 
 // dashboardCampaignsResponse 按广告任务维度的总览响应体。
 type dashboardCampaignsResponse struct {
-	From       string                     `json:"from"`
-	To         string                     `json:"to"`
-	Campaigns  []store.DashboardCampaignStat `json:"campaigns"`
+	From       string                      `json:"from"`
+	To         string                      `json:"to"`
+	Days       []store.DashboardDay        `json:"days"`       // 按日分组（UTC）+ 素材明细
+	Campaigns  []store.DashboardCampaignStat `json:"campaigns"` // 每任务汇总 + 按日趋势
 }
 
 // handleDashboardCampaigns 总览页「按广告任务维度」统计：每个广告任务的
 // 曝光/点击（ad_events）+ 安装/激活/注册/转化/付费（ad_conversions）+ 按日趋势（任务时区）。
-// 不再做全局汇总，所有指标按 campaign 维度拆分，按各自时区切分按天。
+// 不再做全局汇总，所有指标按 campaign 维度拆分。任务来源为 DB 全量未删除任务（含已停止），
+// 再按窗口内实际活动过滤，因此「仅今日投放中、但 7 天内刚停的任务」也能统计出来。
 //
 //	GET /v1/admin/dashboard/campaigns?from=YYYY-MM-DD&to=YYYY-MM-DD
 func (s *Server) handleDashboardCampaigns(w http.ResponseWriter, r *http.Request) {
@@ -123,31 +125,96 @@ func (s *Server) handleDashboardCampaigns(w http.ResponseWriter, r *http.Request
 		from, to = to, from
 	}
 
-	snap := s.Cache.Snapshot()
-	if snap == nil {
-		writeError(w, http.StatusServiceUnavailable, "config not loaded")
+	// 取全部未删除的广告任务（含已停止），再按窗口内实际活动过滤，
+	// 这样「仅今日投放中、但 7 天内刚停的任务」也能统计出来。
+	all, err := s.Store.ListCampaigns(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	camps := make([]store.CampaignDashInfo, 0, len(snap.Campaigns))
-	for _, c := range snap.Campaigns {
+	// 收集素材 id 用于取名称（含非活跃素材）
+	crSet := map[string]struct{}{}
+	for _, c := range all {
+		for _, cr := range c.CreativeIDs {
+			crSet[cr] = struct{}{}
+		}
+	}
+	crNames := map[string]string{}
+	if len(crSet) > 0 {
+		ids := make([]string, 0, len(crSet))
+		for id := range crSet {
+			ids = append(ids, id)
+		}
+		if nm, e := s.Store.CreativeNameMap(r.Context(), ids); e == nil {
+			crNames = nm
+		}
+	}
+	camps := make([]store.CampaignDashInfo, 0, len(all))
+	for _, c := range all {
+		names := make(map[string]string, len(c.CreativeIDs))
+		for _, cr := range c.CreativeIDs {
+			names[cr] = crNames[cr]
+		}
 		camps = append(camps, store.CampaignDashInfo{
-			ID:          c.ID,
-			Name:        c.Name,
-			Timezone:    c.Timezone,
-			CreativeIDs: c.CreativeIDs,
+			ID: c.ID, Name: c.Name, Status: c.Status, Timezone: c.Timezone,
+			CreativeIDs: c.CreativeIDs, CreativeNames: names,
 		})
 	}
 	// 按名称稳定排序，便于前端展示
 	sort.Slice(camps, func(i, j int) bool { return camps[i].Name < camps[j].Name })
 
-	data, err := s.Store.DashboardCampaigns(r.Context(), camps, from, to)
+	res, err := s.Store.DashboardCampaigns(r.Context(), camps, from, to)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+
+	// 过滤：仅保留「当前投放中」或「窗口内任一指标有活动」的任务。
+	keep := make(map[string]bool, len(res.Campaigns))
+	for _, st := range res.Campaigns {
+		active := false
+		for _, c := range camps {
+			if c.ID == st.CampaignID && c.Status == "active" {
+				active = true
+				break
+			}
+		}
+		any := st.Impressions > 0 || st.Clicks > 0 || st.Install > 0 ||
+			st.Activate > 0 || st.Register > 0 || st.Conversion > 0 || st.Pay > 0
+		hasDaily := false
+		for _, d := range st.Daily {
+			if d.Impressions > 0 || d.Clicks > 0 {
+				hasDaily = true
+				break
+			}
+		}
+		if active || any || hasDaily {
+			keep[st.CampaignID] = true
+		}
+	}
+	filtered := make([]store.DashboardCampaignStat, 0, len(res.Campaigns))
+	for _, st := range res.Campaigns {
+		if keep[st.CampaignID] {
+			filtered = append(filtered, st)
+		}
+	}
+	days := make([]store.DashboardDay, 0, len(res.Days))
+	for _, dy := range res.Days {
+		cc := make([]store.DashboardCampaignDay, 0, len(dy.Campaigns))
+		for _, c := range dy.Campaigns {
+			if keep[c.CampaignID] {
+				cc = append(cc, c)
+			}
+		}
+		if len(cc) > 0 {
+			days = append(days, store.DashboardDay{Date: dy.Date, Campaigns: cc})
+		}
+	}
+
 	writeJSON(w, http.StatusOK, dashboardCampaignsResponse{
 		From:      from.Format("2006-01-02"),
 		To:        to.Format("2006-01-02"),
-		Campaigns: data,
+		Days:      days,
+		Campaigns: filtered,
 	})
 }

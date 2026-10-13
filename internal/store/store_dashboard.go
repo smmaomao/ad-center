@@ -86,12 +86,14 @@ func (s *Store) DashboardDaily(ctx context.Context, days int) ([]DashboardDailyR
 	return out, rows.Err()
 }
 
-// CampaignDashInfo 调用方传入的广告任务概要（来自配置快照，避免 store 依赖 config）。
+// CampaignDashInfo 调用方传入的广告任务概要（来自 DB，避免 store 依赖 config）。
 type CampaignDashInfo struct {
-	ID          string
-	Name        string
-	Timezone    string
-	CreativeIDs []string
+	ID            string
+	Name          string
+	Status        string // active / paused（用于区分投放中/已停止）
+	Timezone      string
+	CreativeIDs   []string
+	CreativeNames map[string]string // creative_id -> 素材名（明细展示用）
 }
 
 // DashboardCampaignDaily 单日曝光/点击（按该任务时区切分）。
@@ -101,11 +103,43 @@ type DashboardCampaignDaily struct {
 	Clicks      int64  `json:"clicks"`      // 当日点击
 }
 
-// DashboardCampaignStat 单个广告任务在 [from,to) 内的全部指标（按任务维度统计）。
+// DashboardCreativeDaily 单日单个素材的曝光/点击/CTR（归属到某任务）。
+type DashboardCreativeDaily struct {
+	CreativeID  string  `json:"creative_id"`
+	Name        string  `json:"name"`
+	Impressions int64   `json:"impressions"`
+	Clicks      int64   `json:"clicks"`
+	Ctr         float64 `json:"ctr"` // 0~1
+}
+
+// DashboardCampaignDay 单个广告任务在单日（UTC）的指标 + 关联素材明细。
+type DashboardCampaignDay struct {
+	CampaignID  string                   `json:"campaign_id"`
+	Name        string                   `json:"name"`
+	Timezone    string                   `json:"timezone"`
+	Status      string                   `json:"status"`
+	Impressions int64                    `json:"impressions"`
+	Clicks      int64                    `json:"clicks"`
+	Install     int64                    `json:"install"`
+	Activate    int64                    `json:"activate"`
+	Register    int64                    `json:"register"`
+	Conversion  int64                    `json:"conversion"`
+	Pay         int64                    `json:"pay"`
+	Creatives   []DashboardCreativeDaily `json:"creatives"`
+}
+
+// DashboardDay 一天（UTC 日期）下各广告任务的指标（用于「按日分组」表格）。
+type DashboardDay struct {
+	Date      string               `json:"date"` // YYYY-MM-DD
+	Campaigns []DashboardCampaignDay `json:"campaigns"`
+}
+
+// DashboardCampaignStat 单个广告任务在 [from,to] 内的全部指标（按任务维度统计）。
 type DashboardCampaignStat struct {
 	CampaignID  string                   `json:"campaign_id"`
 	Name        string                   `json:"name"`
 	Timezone    string                   `json:"timezone"`
+	Status      string                   `json:"status"`
 	Impressions int64                    `json:"impressions"` // 曝光
 	Clicks      int64                    `json:"clicks"`      // 点击
 	Install     int64                    `json:"install"`     // 安装
@@ -116,31 +150,30 @@ type DashboardCampaignStat struct {
 	Daily       []DashboardCampaignDaily `json:"daily"`       // 按日趋势（曝光/点击，任务时区）
 }
 
-// DashboardCampaigns 逐个广告任务聚合 [from,to] 内的指标 + 按日趋势。
-// 曝光/点击来自 ad_events（按 creative_id 归属到任务）；安装/激活/注册/转化/付费来自
-// ad_conversions（按 campaign_id）。按日趋势按任务自身时区切分（generate_series 补齐连续日）。
-// 入参 to 为含当天（当天 00:00 起）；区间聚合用 to+1 天做开区间，按日趋势含 to 当天。
+// DashboardCampaignsResult 总览「按广告任务维度」结果：
+// - Campaigns：每个任务在 [from,to] 的汇总指标 + 按日趋势（供趋势图）。
+// - Days：按日分组（UTC），每天下列出当日有活动的任务及其关联素材明细（供分析表）。
+// 口径：曝光/点击来自 ad_events（按 creative_id 归属任务）；安装/激活/注册/转化/付费来自
+// ad_conversions（按 campaign_id）。当前量小实时查；量大后改离线预聚合（待办）。
 func (s *Store) DashboardCampaigns(
 	ctx context.Context, camps []CampaignDashInfo, from, to time.Time,
-) ([]DashboardCampaignStat, error) {
+) (*DashboardCampaignsResult, error) {
 	toExclusive := to.AddDate(0, 0, 1)
-	out := make([]DashboardCampaignStat, 0, len(camps))
+	stats := make([]DashboardCampaignStat, 0, len(camps))
 	for _, c := range camps {
-		st := DashboardCampaignStat{CampaignID: c.ID, Name: c.Name, Timezone: c.Timezone}
-
-		// 曝光 / 点击：累加该任务关联素材在 ad_events 的 impression/click 计数
+		st := DashboardCampaignStat{
+			CampaignID: c.ID, Name: c.Name, Timezone: c.Timezone, Status: c.Status,
+		}
 		if len(c.CreativeIDs) > 0 {
-			stats, err := s.CreativeStats(ctx, c.CreativeIDs, from, toExclusive)
+			cs, err := s.CreativeStats(ctx, c.CreativeIDs, from, toExclusive)
 			if err != nil {
 				return nil, err
 			}
-			for _, cs := range stats {
-				st.Impressions += cs.Impressions
-				st.Clicks += cs.Clicks
+			for _, v := range cs {
+				st.Impressions += v.Impressions
+				st.Clicks += v.Clicks
 			}
 		}
-
-		// 安装/激活/注册/转化/付费：按 campaign_id 聚合 ad_conversions
 		conv, err := s.campaignConversions(ctx, c.ID, from, toExclusive)
 		if err != nil {
 			return nil, err
@@ -151,16 +184,209 @@ func (s *Store) DashboardCampaigns(
 		st.Conversion = conv["first_purchase"]
 		st.Pay = conv["purchase"]
 
-		// 按日趋势：按任务时区切分曝光/点击（含 to 当天）
 		daily, err := s.campaignDaily(ctx, c.CreativeIDs, c.Timezone, from, to)
 		if err != nil {
 			return nil, err
 		}
 		st.Daily = daily
+		stats = append(stats, st)
+	}
 
-		out = append(out, st)
+	days, err := s.dashboardDays(ctx, camps, from, toExclusive)
+	if err != nil {
+		return nil, err
+	}
+	return &DashboardCampaignsResult{Campaigns: stats, Days: days}, nil
+}
+
+// DashboardCampaignsResult 见上。
+type DashboardCampaignsResult struct {
+	Campaigns []DashboardCampaignStat `json:"campaigns"`
+	Days      []DashboardDay          `json:"days"`
+}
+
+// dashboardDays 按 UTC 日分组：对 [from,toEx) 内每一天，列出当日有活动的广告任务及其素材明细。
+// 单条 SQL 批量拉取窗口内 ad_events / ad_conversions，按 (任务,日,素材) 在 Go 侧归集，
+// 避免 N天×M任务 的笛卡尔查询。仅当日全指标为 0 的任务不出现在该日。
+func (s *Store) dashboardDays(
+	ctx context.Context, camps []CampaignDashInfo, from, toExclusive time.Time,
+) ([]DashboardDay, error) {
+	type evKey struct {
+		camp int
+		day  string
+		cr   string
+	}
+	crToCamp := make(map[string]int, len(camps))
+	allCr := make([]string, 0)
+	for i, c := range camps {
+		for _, cr := range c.CreativeIDs {
+			if _, seen := crToCamp[cr]; !seen {
+				crToCamp[cr] = i
+				allCr = append(allCr, cr)
+			}
+		}
+	}
+
+	evImp := make(map[evKey]int64)
+	evClk := make(map[evKey]int64)
+	if len(allCr) > 0 {
+		lit := "{" + strings.Join(allCr, ",") + "}"
+		rows, err := s.pool.Query(ctx, `
+			SELECT creative_id::text, to_char(ts AT TIME ZONE 'UTC', 'YYYY-MM-DD'), event_type, COUNT(*)::bigint
+			FROM ad_events
+			WHERE ts >= $1 AND ts < $2 AND event_type IN ('impression', 'click')
+			      AND creative_id = ANY($3::bigint[])
+			GROUP BY creative_id, to_char(ts AT TIME ZONE 'UTC', 'YYYY-MM-DD'), event_type`, from, toExclusive, lit)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var cr, day, et string
+			var n int64
+			if err := rows.Scan(&cr, &day, &et, &n); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			ci, ok := crToCamp[cr]
+			if !ok {
+				continue
+			}
+			k := evKey{ci, day, cr}
+			if et == "impression" {
+				evImp[k] += n
+			} else {
+				evClk[k] += n
+			}
+		}
+		rows.Close()
+	}
+
+	// 转化事件按 (任务,日) 归集
+	conv := make(map[evKey]map[string]int64)
+	campIDs := make([]string, 0, len(camps))
+	for _, c := range camps {
+		campIDs = append(campIDs, c.ID)
+	}
+	if len(campIDs) > 0 {
+		lit := "{" + strings.Join(campIDs, ",") + "}"
+		rows, err := s.pool.Query(ctx, `
+			SELECT campaign_id::text, to_char(ts AT TIME ZONE 'UTC', 'YYYY-MM-DD'), event_type, COUNT(*)::bigint
+			FROM ad_conversions
+			WHERE ts >= $1 AND ts < $2 AND campaign_id = ANY($3::text[])
+			GROUP BY campaign_id, to_char(ts AT TIME ZONE 'UTC', 'YYYY-MM-DD'), event_type`, from, toExclusive, lit)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var cid, day, et string
+			var n int64
+			if err := rows.Scan(&cid, &day, &et, &n); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			ci := -1
+			for i, c := range camps {
+				if c.ID == cid {
+					ci = i
+					break
+				}
+			}
+			if ci < 0 {
+				continue
+			}
+			k := evKey{ci, day, ""}
+			if conv[k] == nil {
+				conv[k] = make(map[string]int64)
+			}
+			conv[k][et] += n
+		}
+		rows.Close()
+	}
+
+	out := make([]DashboardDay, 0)
+	for d := from; d.Before(toExclusive); d = d.AddDate(0, 0, 1) {
+		dayStr := d.Format("2006-01-02")
+		dd := DashboardDay{Date: dayStr}
+		for ci, c := range camps {
+			imp, clk := int64(0), int64(0)
+			for _, cr := range c.CreativeIDs {
+				imp += evImp[evKey{ci, dayStr, cr}]
+				clk += evClk[evKey{ci, dayStr, cr}]
+			}
+			cv := conv[evKey{ci, dayStr, ""}]
+			inst := mapVal(cv, "install")
+			act := mapVal(cv, "activate")
+			reg := mapVal(cv, "register")
+			conv1 := mapVal(cv, "first_purchase")
+			pay := mapVal(cv, "purchase")
+			if imp == 0 && clk == 0 && inst == 0 && act == 0 && reg == 0 && conv1 == 0 && pay == 0 {
+				continue
+			}
+			creatives := make([]DashboardCreativeDaily, 0)
+			for _, cr := range c.CreativeIDs {
+				ci2 := evImp[evKey{ci, dayStr, cr}]
+				cc2 := evClk[evKey{ci, dayStr, cr}]
+				if ci2 == 0 && cc2 == 0 {
+					continue
+				}
+				ctr := 0.0
+				if ci2 > 0 {
+					ctr = float64(cc2) / float64(ci2)
+				}
+				creatives = append(creatives, DashboardCreativeDaily{
+					CreativeID:  cr,
+					Name:        c.CreativeNames[cr],
+					Impressions: ci2,
+					Clicks:      cc2,
+					Ctr:         ctr,
+				})
+			}
+			dd.Campaigns = append(dd.Campaigns, DashboardCampaignDay{
+				CampaignID:  c.ID,
+				Name:        c.Name,
+				Timezone:    c.Timezone,
+				Status:      c.Status,
+				Impressions: imp,
+				Clicks:      clk,
+				Install:     inst,
+				Activate:    act,
+				Register:    reg,
+				Conversion:  conv1,
+				Pay:         pay,
+				Creatives:   creatives,
+			})
+		}
+		if len(dd.Campaigns) > 0 {
+			out = append(out, dd)
+		}
 	}
 	return out, nil
+}
+
+func mapVal(m map[string]int64, k string) int64 {
+	if m == nil {
+		return 0
+	}
+	return m[k]
+}
+
+// CreativeNameMap 批量取素材 id -> 名称（含已停止/非活跃素材，供明细展示）。
+func (s *Store) CreativeNameMap(ctx context.Context, ids []string) (map[string]string, error) {
+	lit := "{" + strings.Join(ids, ",") + "}"
+	rows, err := s.pool.Query(ctx, `SELECT id::text, name FROM creatives WHERE id = ANY($1::text[])`, lit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]string, len(ids))
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, err
+		}
+		out[id] = name
+	}
+	return out, rows.Err()
 }
 
 // campaignConversions 按 campaign_id 聚合 ad_conversions 的各 event_type 计数。
