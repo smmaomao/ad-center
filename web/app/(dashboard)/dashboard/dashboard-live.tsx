@@ -13,7 +13,11 @@ import {
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { loadDashboardAction, type DashboardPayload } from "./actions";
-import type { DashboardCampaignDaily, DashboardDay } from "@/lib/go-api";
+import type {
+  DashboardCampaignDaily,
+  DashboardCreativeDaily,
+  DashboardDay,
+} from "@/lib/go-api";
 
 const WARNING_LABEL: Record<string, { text: string; cls: string }> = {
   paused: { text: "已暂停", cls: "bg-zinc-500/15 text-zinc-300" },
@@ -172,7 +176,7 @@ export function DashboardLive() {
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="text-left text-muted-foreground">
-              <tr className="border-b border-white/10">
+              <tr className="border-b border-border">
                 <th className="py-2 pr-4 font-medium">广告主</th>
                 <th className="py-2 pr-4 font-medium">状态</th>
                 <th className="py-2 pr-4 font-medium">日预算</th>
@@ -193,7 +197,7 @@ export function DashboardLive() {
               {advertisers.map((a) => {
                 const w = WARNING_LABEL[a.warning];
                 return (
-                  <tr key={a.id} className="border-b border-white/5">
+                  <tr key={a.id} className="border-b border-border/60 transition-colors hover:bg-muted/30">
                     <td className="py-2 pr-4 text-foreground">{a.name}</td>
                     <td className="py-2 pr-4 text-muted-foreground">{a.status}</td>
                     <td className="py-2 pr-4">{fmtMoney(a.daily_budget)}</td>
@@ -220,51 +224,94 @@ export function DashboardLive() {
       </section>
 
       {/* 广告任务维度分析（按日分组，每天一行，可展开到素材明细） */}
-      <section className="surface-card rise-1 p-5">
-        <h2 className="mb-1 text-sm font-semibold text-foreground">广告任务维度分析（按日）</h2>
-        <p className="mb-4 text-xs text-muted-foreground">
-          按各任务统计时区（UTC-12 ~ UTC+12）分组，区间 {from} ~ {to}；展开某天查看当日各广告任务，再展开任务查看关联素材明细。
-          含已停止但窗口内有活动的任务。日期倒序（最新在上）。
-        </p>
-        <div className="divide-y divide-white/10">
+      <section className="surface-card rise-2 p-5 sm:p-6">
+        <div className="mb-5">
+          <h2 className="text-[15px] font-semibold tracking-tight text-foreground">
+            广告任务维度分析
+            <span className="ml-2 rounded-full bg-brand/10 px-2 py-0.5 align-middle text-[10px] font-semibold uppercase tracking-wider text-brand">
+              按日
+            </span>
+          </h2>
+          <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
+            按各任务统计时区切分本地日 · 区间{" "}
+            <span className="font-mono text-foreground/80">{from}</span>
+            {" ~ "}
+            <span className="font-mono text-foreground/80">{to}</span>
+            {" · "}日期倒序（最新在上）· 含已停止但窗口内有活动的任务
+          </p>
+        </div>
+
+        <div className="space-y-2.5">
           {sortedDays.length === 0 && (
-            <div className="py-6 text-center text-sm text-muted-foreground">暂无数据</div>
+            <div className="flex flex-col items-center gap-1.5 rounded-xl border border-dashed py-12 text-sm text-muted-foreground">
+              <span className="font-mono text-lg text-muted-foreground/40">∅</span>
+              所选区间暂无数据
+            </div>
           )}
-          {sortedDays.map((day) => {
+          {sortedDays.map((day, di) => {
             const dayOpen = openDays.has(day.date);
             const dayImp = day.campaigns.reduce((a, c) => a + c.impressions, 0);
             const dayClk = day.campaigns.reduce((a, c) => a + c.clicks, 0);
+            const dayCtr = dayImp > 0 ? dayClk / dayImp : 0;
             return (
-              <div key={day.date} className="py-3 first:pt-0">
+              <div
+                key={day.date}
+                className={`overflow-hidden rounded-xl border transition-colors duration-200 ${
+                  dayOpen ? "border-brand/35 bg-brand/[0.03]" : "border-border/80 hover:border-border"
+                }`}
+                style={{ animationDelay: `${Math.min(di, 8) * 40}ms` }}
+              >
                 <button
                   type="button"
                   onClick={() => toggleSet(setOpenDays, day.date)}
-                  className="flex w-full items-center justify-between px-1 py-2 text-left hover:bg-white/5"
+                  className="flex w-full items-center gap-3 px-3.5 py-3 text-left transition-colors hover:bg-muted/40 sm:gap-4 sm:px-4"
                 >
-                  <span className="flex items-center gap-2 text-sm font-medium text-foreground">
-                    <span className="text-muted-foreground">{dayOpen ? "▾" : "▸"}</span>
-                    {day.date}
-                    <span className="text-xs text-muted-foreground">任务 {day.campaigns.length}</span>
+                  <span
+                    className={`flex size-7 shrink-0 items-center justify-center rounded-lg border transition-all duration-200 ${
+                      dayOpen
+                        ? "rotate-90 border-brand/40 bg-brand/15 text-brand"
+                        : "border-border text-muted-foreground"
+                    }`}
+                  >
+                    <ChevronIcon className="size-3.5" />
                   </span>
-                  <span className="text-xs text-muted-foreground">
-                    曝光 {fmtInt(dayImp)} · 点击 {fmtInt(dayClk)}
+                  <span className="min-w-0">
+                    <span className="flex items-baseline gap-2">
+                      <span className="font-mono text-[15px] font-semibold tracking-tight text-foreground">
+                        {day.date}
+                      </span>
+                      <span className="rounded bg-muted px-1.5 py-px text-[10px] font-medium text-muted-foreground">
+                        {weekdayCn(day.date)}
+                      </span>
+                    </span>
+                    <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                      {day.campaigns.length} 个广告任务
+                    </span>
+                  </span>
+                  <span className="ml-auto flex shrink-0 items-center gap-5 sm:gap-8">
+                    <MiniStat label="曝光" value={fmtInt(dayImp)} />
+                    <MiniStat label="点击" value={fmtInt(dayClk)} />
+                    <span className="hidden sm:block">
+                      <MiniStat label="CTR" value={fmtRate(dayCtr)} accent />
+                    </span>
                   </span>
                 </button>
+
                 {dayOpen && (
-                  <div className="overflow-x-auto px-1 pb-1">
+                  <div className="animate-in fade-in slide-in-from-top-1 overflow-x-auto border-t border-border/70 duration-200">
                     <table className="w-full text-sm">
-                      <thead className="text-left text-muted-foreground">
-                        <tr className="border-b border-white/10">
-                          <th className="py-2 pr-4 font-medium">广告任务</th>
-                          <th className="py-2 pr-4 font-medium">状态</th>
-                          <th className="py-2 pr-4 font-medium">时区</th>
-                          <th className="py-2 pr-4 font-medium">曝光</th>
-                          <th className="py-2 pr-4 font-medium">点击</th>
-                          <th className="py-2 pr-4 font-medium">安装</th>
-                          <th className="py-2 pr-4 font-medium">激活</th>
-                          <th className="py-2 pr-4 font-medium">注册</th>
-                          <th className="py-2 pr-4 font-medium">转化</th>
-                          <th className="py-2 font-medium">付费</th>
+                      <thead>
+                        <tr className="text-left text-[11px] uppercase tracking-wider text-muted-foreground/80">
+                          <th className="py-2 pl-4 pr-3 font-medium sm:pl-[3.75rem]">广告任务</th>
+                          <th className="px-3 py-2 font-medium">状态</th>
+                          <th className="px-3 py-2 font-medium">时区</th>
+                          <th className="px-3 py-2 text-right font-medium">曝光</th>
+                          <th className="px-3 py-2 text-right font-medium">点击</th>
+                          <th className="px-3 py-2 text-right font-medium">安装</th>
+                          <th className="px-3 py-2 text-right font-medium">激活</th>
+                          <th className="px-3 py-2 text-right font-medium">注册</th>
+                          <th className="px-3 py-2 text-right font-medium">转化</th>
+                          <th className="py-2 pl-3 pr-4 text-right font-medium">付费</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -273,72 +320,42 @@ export function DashboardLive() {
                           const cOpen = openCamps.has(key);
                           return (
                             <Fragment key={c.campaign_id}>
-                              <tr className="border-b border-white/5">
-                                <td className="py-2 pr-4 text-foreground">
+                              <tr className="border-t border-border/50 transition-colors hover:bg-muted/30">
+                                <td className="py-2.5 pl-4 pr-3 sm:pl-[3.75rem]">
                                   <button
                                     type="button"
                                     onClick={() => toggleSet(setOpenCamps, key)}
-                                    className="flex items-center gap-1 hover:underline"
+                                    className="group/c flex items-center gap-1.5 text-left"
                                   >
-                                    <span className="text-muted-foreground">{cOpen ? "▾" : "▸"}</span>
-                                    {c.name}
+                                    <ChevronIcon
+                                      className={`size-3 shrink-0 text-muted-foreground/60 transition-transform duration-200 ${
+                                        cOpen ? "rotate-90" : ""
+                                      }`}
+                                    />
+                                    <span className="font-medium text-foreground group-hover/c:text-brand">
+                                      {c.name}
+                                    </span>
                                   </button>
                                 </td>
-                                <td className="py-2 pr-4">
-                                  {c.status === "active" ? (
-                                    <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs text-emerald-300">
-                                      投放中
-                                    </span>
-                                  ) : (
-                                    <span className="rounded-full bg-zinc-500/15 px-2 py-0.5 text-xs text-zinc-300">
-                                      已停止
-                                    </span>
-                                  )}
+                                <td className="px-3 py-2.5">
+                                  <StatusDot status={c.status} />
                                 </td>
-                                <td className="py-2 pr-4 text-muted-foreground">{c.timezone}</td>
-                                <td className="py-2 pr-4">{fmtInt(c.impressions)}</td>
-                                <td className="py-2 pr-4">{fmtInt(c.clicks)}</td>
-                                <td className="py-2 pr-4">{fmtInt(c.install)}</td>
-                                <td className="py-2 pr-4">{fmtInt(c.activate)}</td>
-                                <td className="py-2 pr-4">{fmtInt(c.register)}</td>
-                                <td className="py-2 pr-4">{fmtInt(c.conversion)}</td>
-                                <td className="py-2">{fmtInt(c.pay)}</td>
+                                <td className="px-3 py-2.5 font-mono text-xs text-muted-foreground">
+                                  {c.timezone}
+                                </td>
+                                <td className="px-3 py-2.5 text-right"><Num v={c.impressions} /></td>
+                                <td className="px-3 py-2.5 text-right"><Num v={c.clicks} /></td>
+                                <td className="px-3 py-2.5 text-right"><Num v={c.install} /></td>
+                                <td className="px-3 py-2.5 text-right"><Num v={c.activate} /></td>
+                                <td className="px-3 py-2.5 text-right"><Num v={c.register} /></td>
+                                <td className="px-3 py-2.5 text-right"><Num v={c.conversion} /></td>
+                                <td className="py-2.5 pl-3 pr-4 text-right"><Num v={c.pay} /></td>
                               </tr>
                               {cOpen && (
                                 <tr>
-                                  <td colSpan={10} className="py-2 pr-4">
-                                    <div className="ml-4 rounded border border-white/10 bg-black/20 p-3">
-                                      <div className="mb-2 text-xs text-muted-foreground">
-                                        关联素材明细（{c.creatives.length}）
-                                      </div>
-                                      {c.creatives.length === 0 ? (
-                                        <div className="text-xs text-muted-foreground">
-                                          当日无素材曝光/点击（仅有转化回传）
-                                        </div>
-                                      ) : (
-                                        <table className="w-full text-sm">
-                                          <thead className="text-left text-muted-foreground">
-                                            <tr className="border-b border-white/10">
-                                              <th className="py-1 pr-4 font-medium">素材</th>
-                                              <th className="py-1 pr-4 font-medium">曝光</th>
-                                              <th className="py-1 pr-4 font-medium">点击</th>
-                                              <th className="py-1 font-medium">CTR</th>
-                                            </tr>
-                                          </thead>
-                                          <tbody>
-                                            {c.creatives.map((cr) => (
-                                              <tr key={cr.creative_id} className="border-b border-white/5">
-                                                <td className="py-1 pr-4 text-foreground">
-                                                  {cr.name || cr.creative_id}
-                                                </td>
-                                                <td className="py-1 pr-4">{fmtInt(cr.impressions)}</td>
-                                                <td className="py-1 pr-4">{fmtInt(cr.clicks)}</td>
-                                                <td className="py-1">{fmtRate(cr.ctr)}</td>
-                                              </tr>
-                                            ))}
-                                          </tbody>
-                                        </table>
-                                      )}
+                                  <td colSpan={10} className="bg-muted/20 p-0">
+                                    <div className="animate-in fade-in slide-in-from-top-1 px-4 pb-4 pt-1 duration-200 sm:pl-[3.75rem]">
+                                      <CreativeDetail creatives={c.creatives} />
                                     </div>
                                   </td>
                                 </tr>
@@ -367,7 +384,7 @@ export function DashboardLive() {
             <div className="py-6 text-center text-muted-foreground">暂无数据</div>
           )}
           {campaigns.map((c) => (
-            <div key={c.campaign_id} className="rounded-lg border border-white/10 p-3">
+            <div key={c.campaign_id} className="rounded-lg border border-border p-3 transition-colors hover:border-brand/30">
               <div className="mb-1 flex items-center justify-between gap-2">
                 <span className="truncate text-sm font-medium text-foreground">{c.name}</span>
                 <span className="ml-2 shrink-0 text-[10px] text-muted-foreground">{c.timezone}</span>
@@ -561,6 +578,129 @@ function KpiCard({ label, value, hint }: { label: string; value: string; hint?: 
       <div className="text-xs text-muted-foreground">{label}</div>
       <div className="mt-1 text-lg font-semibold text-foreground">{value}</div>
       {hint && <div className="mt-0.5 text-[11px] text-muted-foreground/70">{hint}</div>}
+    </div>
+  );
+}
+
+/* ---- 按日分析区块的子组件 ---- */
+
+const WEEKDAYS_CN = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+function weekdayCn(date: string): string {
+  const d = new Date(date + "T00:00:00Z");
+  return Number.isNaN(d.getTime()) ? "" : WEEKDAYS_CN[d.getUTCDay()];
+}
+
+function ChevronIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" className={className} aria-hidden="true">
+      <path
+        d="M6 4l4 4-4 4"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+// 数字单元格：0 显示为淡横杠，减少满屏 0 的视觉噪音
+function Num({ v }: { v: number }) {
+  if (!v) return <span className="text-muted-foreground/35">—</span>;
+  return <span className="font-mono tabular-nums text-foreground">{fmtInt(v)}</span>;
+}
+
+// 日头部右侧的迷你指标
+function MiniStat({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
+  return (
+    <span className="text-right">
+      <span className="block text-[10px] font-medium uppercase tracking-wider text-muted-foreground/70">
+        {label}
+      </span>
+      <span
+        className={`block font-mono text-sm font-semibold tabular-nums ${
+          accent ? "text-brand" : "text-foreground"
+        }`}
+      >
+        {value}
+      </span>
+    </span>
+  );
+}
+
+// 状态：色点 + 文案（替代亮色下发灰的胶囊徽章）
+function StatusDot({ status }: { status: string }) {
+  const active = status === "active";
+  return (
+    <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+      <span
+        className={`size-1.5 rounded-full ${
+          active ? "bg-emerald-500 shadow-[0_0_6px] shadow-emerald-500/40" : "bg-muted-foreground/40"
+        }`}
+      />
+      <span className={`text-xs ${active ? "text-foreground" : "text-muted-foreground"}`}>
+        {active ? "投放中" : "已停止"}
+      </span>
+    </span>
+  );
+}
+
+// CTR：数值 + 相对当日最高 CTR 的微型条形图
+function CtrBar({ ctr, max }: { ctr: number; max: number }) {
+  const pct = Math.max(2, Math.min(100, (ctr / max) * 100));
+  return (
+    <span className="inline-flex items-center justify-end gap-2">
+      <span className="font-mono tabular-nums">{fmtRate(ctr)}</span>
+      <span className="hidden h-1.5 w-16 overflow-hidden rounded-full bg-muted sm:block">
+        <span
+          className="block h-full rounded-full bg-brand/80"
+          style={{ width: `${ctr > 0 ? pct : 0}%` }}
+        />
+      </span>
+    </span>
+  );
+}
+
+// 关联素材明细面板
+function CreativeDetail({ creatives }: { creatives: DashboardCreativeDaily[] }) {
+  const maxCtr = Math.max(1e-4, ...creatives.map((cr) => cr.ctr));
+  return (
+    <div className="rounded-xl border border-border/60 bg-card p-4 shadow-xs">
+      <div className="mb-3 flex items-center gap-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+        <span className="h-3 w-0.5 rounded-full bg-brand" />
+        关联素材明细
+        <span className="rounded bg-muted px-1.5 py-px font-mono text-[10px] normal-case tracking-normal">
+          {creatives.length}
+        </span>
+      </div>
+      {creatives.length === 0 ? (
+        <p className="py-1 text-xs text-muted-foreground">当日无素材曝光/点击（仅有转化回传）</p>
+      ) : (
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-[11px] uppercase tracking-wider text-muted-foreground/80">
+              <th className="pb-2 pr-4 font-medium">素材</th>
+              <th className="px-3 pb-2 text-right font-medium">曝光</th>
+              <th className="px-3 pb-2 text-right font-medium">点击</th>
+              <th className="pb-2 pl-3 text-right font-medium">CTR</th>
+            </tr>
+          </thead>
+          <tbody>
+            {creatives.map((cr) => (
+              <tr key={cr.creative_id} className="border-t border-border/50">
+                <td className="py-2 pr-4">
+                  <span className="line-clamp-1 text-foreground">{cr.name || cr.creative_id}</span>
+                </td>
+                <td className="px-3 py-2 text-right"><Num v={cr.impressions} /></td>
+                <td className="px-3 py-2 text-right"><Num v={cr.clicks} /></td>
+                <td className="py-2 pl-3 text-right">
+                  <CtrBar ctr={cr.ctr} max={maxCtr} />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </div>
   );
 }
