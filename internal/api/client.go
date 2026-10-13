@@ -724,6 +724,10 @@ func (s *Server) chargeClientEvent(app *config.App, advID, creativeID, campaignI
 		AppID: app.ID, Style: style, AdvertiserID: advID,
 		CreativeID: creativeID, DeviceID: deviceID,
 		EventType: event, Revenue: charged,
+		// 权威任务归属：素材可能被多个任务引用（老任务下线、新任务沿用同批素材），
+		// 仅凭 creative_id 无法区分归属，故写入下发/计费时确定的 campaign，
+		// 报表据此按任务精确拆分（历史缺失该列的数据回退素材归属）。
+		CampaignID: campaignID,
 	})
 	// 任务级频控：仅在真实观看（impression）时累加计数。计数失败一律 fail-open
 	// （不挡广告）——最坏是少限一次，不影响曝光。
