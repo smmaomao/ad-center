@@ -30,9 +30,7 @@ export default async function CampaignsPage() {
   }
 
   return (
-    <div className="space-y-4">
-      <h1 className="text-2xl font-semibold">广告任务管理</h1>
-      <CampaignsClient
+    <CampaignsClient
       campaigns={campaigns}
       advertisers={advertisers}
       creatives={creatives}
@@ -40,6 +38,5 @@ export default async function CampaignsPage() {
       error={error}
       canWrite={canWrite}
     />
-    </div>
   );
 }

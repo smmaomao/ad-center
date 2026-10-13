@@ -103,6 +103,11 @@ export function DashboardLive() {
   const advertisers = data?.overview.advertisers ?? [];
   const campaigns = data?.campaigns.campaigns ?? [];
   const days = data?.campaigns.days ?? [];
+  // 按日期倒序展示（最新一天在最上面）
+  const sortedDays = useMemo(
+    () => [...days].sort((a, b) => b.date.localeCompare(a.date)),
+    [days],
+  );
 
   return (
     <div className="space-y-6">
@@ -218,23 +223,23 @@ export function DashboardLive() {
       <section className="surface-card rise-1 p-5">
         <h2 className="mb-1 text-sm font-semibold text-foreground">广告任务维度分析（按日）</h2>
         <p className="mb-4 text-xs text-muted-foreground">
-          按日分组（UTC，区间 {from} ~ {to}）；展开某天查看当日各广告任务，再展开任务查看关联素材明细。
-          含已停止但 7 天内有活动的任务。
+          按各任务统计时区（UTC-12 ~ UTC+12）分组，区间 {from} ~ {to}；展开某天查看当日各广告任务，再展开任务查看关联素材明细。
+          含已停止但窗口内有活动的任务。日期倒序（最新在上）。
         </p>
-        <div className="space-y-2">
-          {days.length === 0 && (
+        <div className="divide-y divide-white/10">
+          {sortedDays.length === 0 && (
             <div className="py-6 text-center text-sm text-muted-foreground">暂无数据</div>
           )}
-          {days.map((day) => {
+          {sortedDays.map((day) => {
             const dayOpen = openDays.has(day.date);
             const dayImp = day.campaigns.reduce((a, c) => a + c.impressions, 0);
             const dayClk = day.campaigns.reduce((a, c) => a + c.clicks, 0);
             return (
-              <div key={day.date} className="rounded-lg border border-white/10">
+              <div key={day.date} className="py-3 first:pt-0">
                 <button
                   type="button"
                   onClick={() => toggleSet(setOpenDays, day.date)}
-                  className="flex w-full items-center justify-between px-4 py-2 text-left hover:bg-white/5"
+                  className="flex w-full items-center justify-between px-1 py-2 text-left hover:bg-white/5"
                 >
                   <span className="flex items-center gap-2 text-sm font-medium text-foreground">
                     <span className="text-muted-foreground">{dayOpen ? "▾" : "▸"}</span>
@@ -246,7 +251,7 @@ export function DashboardLive() {
                   </span>
                 </button>
                 {dayOpen && (
-                  <div className="overflow-x-auto px-2 pb-2">
+                  <div className="overflow-x-auto px-1 pb-1">
                     <table className="w-full text-sm">
                       <thead className="text-left text-muted-foreground">
                         <tr className="border-b border-white/10">

@@ -2,7 +2,10 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"math"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -159,20 +162,26 @@ func (s *Store) DashboardCampaigns(
 	ctx context.Context, camps []CampaignDashInfo, from, to time.Time,
 ) (*DashboardCampaignsResult, error) {
 	toExclusive := to.AddDate(0, 0, 1)
+	// 素材唯一归属：一个 creative 只归属一个任务（优先 active），避免多任务共用素材时
+	// 互相串号/重复统计（如旧测试任务继承活跃任务的数据）。
+	_, owned := buildCreativeOwnership(camps)
+	allCr := make([]string, 0)
+	for _, cs := range owned {
+		allCr = append(allCr, cs...)
+	}
+	crImpClk, err := s.creativeImpClick(ctx, allCr, from, toExclusive)
+	if err != nil {
+		return nil, err
+	}
 	stats := make([]DashboardCampaignStat, 0, len(camps))
-	for _, c := range camps {
+	for ci, c := range camps {
 		st := DashboardCampaignStat{
 			CampaignID: c.ID, Name: c.Name, Timezone: c.Timezone, Status: c.Status,
 		}
-		if len(c.CreativeIDs) > 0 {
-			cs, err := s.CreativeStats(ctx, c.CreativeIDs, from, toExclusive)
-			if err != nil {
-				return nil, err
-			}
-			for _, v := range cs {
-				st.Impressions += v.Impressions
-				st.Clicks += v.Clicks
-			}
+		for _, cr := range owned[ci] {
+			v := crImpClk[cr]
+			st.Impressions += v[0]
+			st.Clicks += v[1]
 		}
 		conv, err := s.campaignConversions(ctx, c.ID, from, toExclusive)
 		if err != nil {
@@ -184,7 +193,7 @@ func (s *Store) DashboardCampaigns(
 		st.Conversion = conv["first_purchase"]
 		st.Pay = conv["purchase"]
 
-		daily, err := s.campaignDaily(ctx, c.CreativeIDs, c.Timezone, from, to)
+		daily, err := s.campaignDaily(ctx, owned[ci], c.Timezone, from, to)
 		if err != nil {
 			return nil, err
 		}
@@ -205,38 +214,73 @@ type DashboardCampaignsResult struct {
 	Days      []DashboardDay          `json:"days"`
 }
 
-// dashboardDays 按 UTC 日分组：对 [from,toEx) 内每一天，列出当日有活动的广告任务及其素材明细。
-// 单条 SQL 批量拉取窗口内 ad_events / ad_conversions，按 (任务,日,素材) 在 Go 侧归集，
-// 避免 N天×M任务 的笛卡尔查询。仅当日全指标为 0 的任务不出现在该日。
+// dashboardDays 按各任务「本地日」分组：对窗口（外扩 1 天以覆盖时区边界）内每一天，
+// 列出当日有活动的广告任务及其关联素材明细。
+// 曝光/点击按素材(creative_id) 归属到其唯一所属任务（见 buildCreativeOwnership），再归并到
+// 该任务配置的时区「本地日」；转化按 ad_conversions.campaign_id。单条 SQL 批量拉取，按
+// (任务,本地日,素材) 在 Go 侧归集，避免 N天×M任务 的笛卡尔查询。一个素材被多任务共用时
+// 只计一次、归到归属任务，避免旧/测试任务串到活跃任务数据。
 func (s *Store) dashboardDays(
 	ctx context.Context, camps []CampaignDashInfo, from, toExclusive time.Time,
 ) ([]DashboardDay, error) {
-	type evKey struct {
-		camp int
-		day  string
-		cr   string
+	if len(camps) == 0 {
+		return nil, nil
 	}
-	crToCamp := make(map[string]int, len(camps))
-	allCr := make([]string, 0)
-	for i, c := range camps {
-		for _, cr := range c.CreativeIDs {
-			if _, seen := crToCamp[cr]; !seen {
-				crToCamp[cr] = i
-				allCr = append(allCr, cr)
+	_, owned := buildCreativeOwnership(camps)
+	// 收集被归属素材及其所属任务索引与时区，构造 CTE：creative_id -> (campaign 索引, tz)
+	type crOwn struct {
+		ci int
+		tz string
+	}
+	crMap := make(map[string]crOwn)
+	crVals := make([]string, 0)
+	campIDs := make([]string, 0, len(camps))
+	tzVals := make([]string, 0, len(camps))
+	ciByID := make(map[string]int, len(camps))
+	for ci, c := range camps {
+		ciByID[c.ID] = ci
+		campIDs = append(campIDs, c.ID)
+		tzVals = append(tzVals, fmt.Sprintf("(%s,%s)", quoteStr(c.ID), quoteTZ(c.Timezone)))
+		for _, cr := range owned[ci] {
+			if _, seen := crMap[cr]; seen {
+				continue
 			}
+			crMap[cr] = crOwn{ci, c.Timezone}
+			crVals = append(crVals, fmt.Sprintf("(%s,%s,%s)", quoteStr(cr), quoteStr(c.ID), quoteTZ(c.Timezone)))
 		}
 	}
+	if len(crVals) == 0 {
+		return []DashboardDay{}, nil
+	}
+	crList := make([]string, 0, len(crMap))
+	for cr := range crMap {
+		crList = append(crList, cr)
+	}
+	crLit := "{" + strings.Join(crList, ",") + "}"
+	campLit := "{" + strings.Join(campIDs, ",") + "}"
+	cte := "WITH co(crid, cid, tz) AS (VALUES " + strings.Join(crVals, ",") +
+		"), tz(cid, tz) AS (VALUES " + strings.Join(tzVals, ",") + ")"
 
-	evImp := make(map[evKey]int64)
-	evClk := make(map[evKey]int64)
-	if len(allCr) > 0 {
-		lit := "{" + strings.Join(allCr, ",") + "}"
-		rows, err := s.pool.Query(ctx, `
-			SELECT creative_id::text, to_char(ts AT TIME ZONE 'UTC', 'YYYY-MM-DD'), event_type, COUNT(*)::bigint
-			FROM ad_events
-			WHERE ts >= $1 AND ts < $2 AND event_type IN ('impression', 'click')
-			      AND creative_id = ANY($3::bigint[])
-			GROUP BY creative_id, to_char(ts AT TIME ZONE 'UTC', 'YYYY-MM-DD'), event_type`, from, toExclusive, lit)
+	qFrom := from.AddDate(0, 0, -1)
+	qToEx := toExclusive.AddDate(0, 0, 1)
+
+	// 曝光/点击：按 (归属任务索引, 本地日, creative_id, event_type) 归集
+	type crKey struct {
+		ci  int
+		day string
+		cr  string
+	}
+	evImp := make(map[crKey]int64)
+	evClk := make(map[crKey]int64)
+	{
+		rows, err := s.pool.Query(ctx, cte+`
+			SELECT co.crid, to_char(ae.ts AT TIME ZONE co.tz, 'YYYY-MM-DD'),
+			       ae.event_type, COUNT(*)::bigint
+			FROM ad_events ae JOIN co ON co.crid = ae.creative_id::text
+			WHERE ae.ts >= $1 AND ae.ts < $2 AND ae.event_type IN ('impression', 'click')
+			      AND ae.creative_id = ANY($3::bigint[])
+			GROUP BY co.crid, to_char(ae.ts AT TIME ZONE co.tz, 'YYYY-MM-DD'), ae.event_type`,
+			qFrom, qToEx, crLit)
 		if err != nil {
 			return nil, err
 		}
@@ -247,11 +291,11 @@ func (s *Store) dashboardDays(
 				rows.Close()
 				return nil, err
 			}
-			ci, ok := crToCamp[cr]
+			o, ok := crMap[cr]
 			if !ok {
 				continue
 			}
-			k := evKey{ci, day, cr}
+			k := crKey{o.ci, day, cr}
 			if et == "impression" {
 				evImp[k] += n
 			} else {
@@ -261,19 +305,16 @@ func (s *Store) dashboardDays(
 		rows.Close()
 	}
 
-	// 转化事件按 (任务,日) 归集
-	conv := make(map[evKey]map[string]int64)
-	campIDs := make([]string, 0, len(camps))
-	for _, c := range camps {
-		campIDs = append(campIDs, c.ID)
-	}
-	if len(campIDs) > 0 {
-		lit := "{" + strings.Join(campIDs, ",") + "}"
-		rows, err := s.pool.Query(ctx, `
-			SELECT campaign_id::text, to_char(ts AT TIME ZONE 'UTC', 'YYYY-MM-DD'), event_type, COUNT(*)::bigint
-			FROM ad_conversions
-			WHERE ts >= $1 AND ts < $2 AND campaign_id = ANY($3::text[])
-			GROUP BY campaign_id, to_char(ts AT TIME ZONE 'UTC', 'YYYY-MM-DD'), event_type`, from, toExclusive, lit)
+	// 转化：按 (campaign_id, 本地日, event_type) 归集
+	conv := make(map[string]map[string]int64) // key: "<ci>|<day>"
+	{
+		rows, err := s.pool.Query(ctx, cte+`
+			SELECT ac.campaign_id::text, to_char(ac.ts AT TIME ZONE tz.tz, 'YYYY-MM-DD'),
+			       ac.event_type, COUNT(*)::bigint
+			FROM ad_conversions ac JOIN tz ON tz.cid = ac.campaign_id::text
+			WHERE ac.ts >= $1 AND ac.ts < $2 AND ac.campaign_id = ANY($3::text[])
+			GROUP BY ac.campaign_id, to_char(ac.ts AT TIME ZONE tz.tz, 'YYYY-MM-DD'), ac.event_type`,
+			qFrom, qToEx, campLit)
 		if err != nil {
 			return nil, err
 		}
@@ -284,17 +325,11 @@ func (s *Store) dashboardDays(
 				rows.Close()
 				return nil, err
 			}
-			ci := -1
-			for i, c := range camps {
-				if c.ID == cid {
-					ci = i
-					break
-				}
-			}
-			if ci < 0 {
+			ci, ok := ciByID[cid]
+			if !ok {
 				continue
 			}
-			k := evKey{ci, day, ""}
+			k := fmt.Sprintf("%d|%s", ci, day)
 			if conv[k] == nil {
 				conv[k] = make(map[string]int64)
 			}
@@ -303,41 +338,90 @@ func (s *Store) dashboardDays(
 		rows.Close()
 	}
 
-	out := make([]DashboardDay, 0)
-	for d := from; d.Before(toExclusive); d = d.AddDate(0, 0, 1) {
-		dayStr := d.Format("2006-01-02")
-		dd := DashboardDay{Date: dayStr}
+	type acc struct {
+		imp, clk              int64
+		conv                  map[string]int64
+		creatives             map[string]*DashboardCreativeDaily
+	}
+	byDay := make(map[string]map[int]*acc)
+	addAcc := func(day string, ci int) *acc {
+		if byDay[day] == nil {
+			byDay[day] = make(map[int]*acc)
+		}
+		if byDay[day][ci] == nil {
+			byDay[day][ci] = &acc{conv: map[string]int64{}, creatives: map[string]*DashboardCreativeDaily{}}
+		}
+		return byDay[day][ci]
+	}
+	for k, n := range evImp {
+		clkN := evClk[k]
+		a := addAcc(k.day, k.ci)
+		a.imp += n
+		a.clk += clkN
+		cr := a.creatives[k.cr]
+		if cr == nil {
+			cr = &DashboardCreativeDaily{CreativeID: k.cr}
+			a.creatives[k.cr] = cr
+		}
+		cr.Impressions += n
+		cr.Clicks += clkN
+	}
+	for k, n := range evClk {
+		// 仅点击（无曝光）的素材：避免与上面的 evImp 重复累加
+		a := addAcc(k.day, k.ci)
+		if _, ok := a.creatives[k.cr]; ok {
+			continue
+		}
+		cr := &DashboardCreativeDaily{CreativeID: k.cr}
+		a.creatives[k.cr] = cr
+		cr.Clicks += n
+		a.clk += n
+	}
+	for k, m := range conv {
+		parts := strings.SplitN(k, "|", 2)
+		ci, _ := strconv.Atoi(parts[0])
+		day := parts[1]
+		a := addAcc(day, ci)
+		for et, n := range m {
+			a.conv[et] += n
+		}
+	}
+
+	lo := from.Format("2006-01-02")
+	hi := toExclusive.AddDate(0, 0, -1).Format("2006-01-02")
+	out := make([]DashboardDay, 0, len(byDay))
+	for day, m := range byDay {
+		if day < lo || day > hi {
+			continue // 丢弃外扩边界日
+		}
+		dd := DashboardDay{Date: day}
 		for ci, c := range camps {
-			imp, clk := int64(0), int64(0)
-			for _, cr := range c.CreativeIDs {
-				imp += evImp[evKey{ci, dayStr, cr}]
-				clk += evClk[evKey{ci, dayStr, cr}]
-			}
-			cv := conv[evKey{ci, dayStr, ""}]
-			inst := mapVal(cv, "install")
-			act := mapVal(cv, "activate")
-			reg := mapVal(cv, "register")
-			conv1 := mapVal(cv, "first_purchase")
-			pay := mapVal(cv, "purchase")
-			if imp == 0 && clk == 0 && inst == 0 && act == 0 && reg == 0 && conv1 == 0 && pay == 0 {
+			a := m[ci]
+			if a == nil {
 				continue
 			}
-			creatives := make([]DashboardCreativeDaily, 0)
-			for _, cr := range c.CreativeIDs {
-				ci2 := evImp[evKey{ci, dayStr, cr}]
-				cc2 := evClk[evKey{ci, dayStr, cr}]
-				if ci2 == 0 && cc2 == 0 {
+			inst := mapVal(a.conv, "install")
+			act := mapVal(a.conv, "activate")
+			reg := mapVal(a.conv, "register")
+			conv1 := mapVal(a.conv, "first_purchase")
+			pay := mapVal(a.conv, "purchase")
+			if a.imp == 0 && a.clk == 0 && inst == 0 && act == 0 && reg == 0 && conv1 == 0 && pay == 0 {
+				continue
+			}
+			creatives := make([]DashboardCreativeDaily, 0, len(a.creatives))
+			for _, cr := range a.creatives {
+				if cr.Impressions == 0 && cr.Clicks == 0 {
 					continue
 				}
 				ctr := 0.0
-				if ci2 > 0 {
-					ctr = float64(cc2) / float64(ci2)
+				if cr.Impressions > 0 {
+					ctr = float64(cr.Clicks) / float64(cr.Impressions)
 				}
 				creatives = append(creatives, DashboardCreativeDaily{
-					CreativeID:  cr,
-					Name:        c.CreativeNames[cr],
-					Impressions: ci2,
-					Clicks:      cc2,
+					CreativeID:  cr.CreativeID,
+					Name:        c.CreativeNames[cr.CreativeID],
+					Impressions: cr.Impressions,
+					Clicks:      cr.Clicks,
 					Ctr:         ctr,
 				})
 			}
@@ -346,8 +430,8 @@ func (s *Store) dashboardDays(
 				Name:        c.Name,
 				Timezone:    c.Timezone,
 				Status:      c.Status,
-				Impressions: imp,
-				Clicks:      clk,
+				Impressions: a.imp,
+				Clicks:      a.clk,
 				Install:     inst,
 				Activate:    act,
 				Register:    reg,
@@ -360,6 +444,7 @@ func (s *Store) dashboardDays(
 			out = append(out, dd)
 		}
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Date < out[j].Date })
 	return out, nil
 }
 
@@ -414,46 +499,156 @@ func (s *Store) campaignConversions(
 	return out, rows.Err()
 }
 
-// campaignDaily 按任务时区切分 [from,to) 内每日曝光/点击（补齐连续日，无数据补 0）。
+// campaignDaily 按任务时区切分 [from,to]（含 to 当天）内每日曝光/点击（补齐连续本地日，无数据补 0）。
+// 仅统计该任务「归属」的素材（owned），避免共用素材被多任务重复计入。
 func (s *Store) campaignDaily(
 	ctx context.Context, creativeIDs []string, tz string, from, to time.Time,
 ) ([]DashboardCampaignDaily, error) {
 	if len(creativeIDs) == 0 {
 		return []DashboardCampaignDaily{}, nil
 	}
-	loc, err := time.LoadLocation(tz)
-	if err != nil {
-		loc = time.UTC
-	}
-	// 任务时区下的起止「本地日」边界（绝对时刻），generate_series 据此展开连续日
+	loc := parseTZ(tz)
 	localStart := time.Date(from.In(loc).Year(), from.In(loc).Month(), from.In(loc).Day(), 0, 0, 0, 0, loc)
 	localEnd := time.Date(to.In(loc).Year(), to.In(loc).Month(), to.In(loc).Day(), 0, 0, 0, 0, loc)
 	lit := "{" + strings.Join(creativeIDs, ",") + "}"
-
+	// 查询窗口外扩，确保本地日边界完整（GROUP BY 本地日后仅保留 [localStart,localEnd]）
 	rows, err := s.pool.Query(ctx, `
-		SELECT to_char(d.day AT TIME ZONE $4, 'YYYY-MM-DD'),
+		SELECT to_char(ae.ts AT TIME ZONE $2, 'YYYY-MM-DD'),
 		       COALESCE(SUM(CASE WHEN ae.event_type = 'impression' THEN 1 ELSE 0 END), 0)::bigint,
 		       COALESCE(SUM(CASE WHEN ae.event_type = 'click' THEN 1 ELSE 0 END), 0)::bigint
-		FROM generate_series($1::timestamptz, $2::timestamptz, interval '1 day') AS d(day)
-		LEFT JOIN ad_events ae
-		       ON ae.ts >= d.day AND ae.ts < d.day + interval '1 day'
+		FROM ad_events ae
+		WHERE ae.creative_id = ANY($1::bigint[]) AND ae.ts >= $3 AND ae.ts < $4
 		      AND ae.event_type IN ('impression', 'click')
-		      AND ae.creative_id = ANY($3::bigint[])
-		GROUP BY d.day
-		ORDER BY d.day`, localStart, localEnd, lit, tz)
+		GROUP BY to_char(ae.ts AT TIME ZONE $2, 'YYYY-MM-DD')`,
+		lit, tz, from.AddDate(0, 0, -1), to.AddDate(0, 0, 2))
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := make([]DashboardCampaignDaily, 0)
+	got := make(map[string][2]int64)
 	for rows.Next() {
-		var d DashboardCampaignDaily
-		if err := rows.Scan(&d.Date, &d.Impressions, &d.Clicks); err != nil {
+		var d string
+		var imp, clk int64
+		if err := rows.Scan(&d, &imp, &clk); err != nil {
 			return nil, err
 		}
-		out = append(out, d)
+		got[d] = [2]int64{imp, clk}
+	}
+	out := make([]DashboardCampaignDaily, 0)
+	for d := localStart; !d.After(localEnd); d = d.AddDate(0, 0, 1) {
+		key := d.Format("2006-01-02")
+		v := got[key]
+		out = append(out, DashboardCampaignDaily{Date: key, Impressions: v[0], Clicks: v[1]})
 	}
 	return out, rows.Err()
+}
+
+// parseTZ 解析任务统计时区：优先按 IANA 名（如 Asia/Bangkok、UTC），否则按固定偏移
+// "UTC+7" / "UTC-12" / "UTC+12" 形式解析为 FixedZone。非法值回退 UTC。
+func parseTZ(tz string) *time.Location {
+	if tz == "" {
+		return time.UTC
+	}
+	if loc, err := time.LoadLocation(tz); err == nil {
+		return loc
+	}
+	s := strings.TrimSpace(tz)
+	s = strings.TrimPrefix(s, "UTC")
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.UTC
+	}
+	off, err := strconv.Atoi(s)
+	if err != nil || off < -12 || off > 12 {
+		return time.UTC
+	}
+	return time.FixedZone(tz, off*3600)
+}
+
+// quoteTZ 把时区字符串安全地拼进 SQL 的 VALUES()（内部数据，仍做单引号转义）。
+func quoteTZ(tz string) string {
+	if tz == "" {
+		return "'UTC'"
+	}
+	return "'" + strings.ReplaceAll(tz, "'", "''") + "'"
+}
+
+// quoteStr 把字符串安全地拼进 SQL 的 VALUES()。
+func quoteStr(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
+// creativeImpClick 批量取各素材在 [from,to) 的曝光/点击（按 creative_id 归属）。
+// 返回 map[creativeID][2]int64，下标 0=曝光、1=点击。
+func (s *Store) creativeImpClick(
+	ctx context.Context, crIDs []string, from, to time.Time,
+) (map[string][2]int64, error) {
+	out := make(map[string][2]int64, len(crIDs))
+	if len(crIDs) == 0 {
+		return out, nil
+	}
+	lit := "{" + strings.Join(crIDs, ",") + "}"
+	rows, err := s.pool.Query(ctx, `
+		SELECT creative_id::text, event_type, COUNT(*)::bigint
+		FROM ad_events
+		WHERE ts >= $1 AND ts < $2 AND event_type IN ('impression', 'click')
+		      AND creative_id = ANY($3::bigint[])
+		GROUP BY creative_id, event_type`, from, to, lit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cr, et string
+		var n int64
+		if err := rows.Scan(&cr, &et, &n); err != nil {
+			return nil, err
+		}
+		v := out[cr]
+		if et == "impression" {
+			v[0] += n
+		} else if et == "click" {
+			v[1] += n
+		}
+		out[cr] = v
+	}
+	return out, rows.Err()
+}
+
+// buildCreativeOwnership 决定每个素材唯一归属到哪个任务：
+// 优先 active 状态的任务；若被多个任务引用，按 camps 顺序（名称已排序）取第一个，
+// 但若遇到 active 任务且当前归属为非 active，则抢占归 active。返回
+// ownerOf[creative]=campaign 索引，owned[ci]=该任务归属的素材列表（用于聚合与趋势，
+// 避免共用素材被重复统计 / 旧测试任务串到活跃任务数据）。
+func buildCreativeOwnership(camps []CampaignDashInfo) (map[string]int, [][]string) {
+	ownerOf := make(map[string]int)
+	owned := make([][]string, len(camps))
+	for ci, c := range camps {
+		for _, cr := range c.CreativeIDs {
+			cur, exists := ownerOf[cr]
+			if !exists {
+				ownerOf[cr] = ci
+				owned[ci] = append(owned[ci], cr)
+				continue
+			}
+			if c.Status == "active" && camps[cur].Status != "active" {
+				ownerOf[cr] = ci
+				owned[cur] = removeStr(owned[cur], cr)
+				owned[ci] = append(owned[ci], cr)
+			}
+		}
+	}
+	return ownerOf, owned
+}
+
+func removeStr(s []string, v string) []string {
+	out := s[:0]
+	for _, x := range s {
+		if x != v {
+			out = append(out, x)
+		}
+	}
+	return out
 }
 
 // DashboardAdvertiser 广告主 KPI 监控行（含预警标识）。
