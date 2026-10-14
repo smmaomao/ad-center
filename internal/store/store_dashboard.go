@@ -196,7 +196,7 @@ func (s *Store) DashboardCampaigns(
 
 		// 趋势按该任务时区的连续本地日补齐；汇总取趋势之和，保证两者口径一致，
 		// 且不受查询窗口外扩（±1 天覆盖时区边界）的影响。
-		st.Daily = fillDaily(byCamp[ci], c.Timezone, from, to)
+		st.Daily = fillDaily(byCamp[ci], c.Timezone, from, toExclusive)
 		for _, d := range st.Daily {
 			st.Impressions += d.Impressions
 			st.Clicks += d.Clicks
@@ -237,8 +237,8 @@ func (s *Store) dashboardDays(
 	cte := "WITH tz(cid, tz) AS (VALUES " + strings.Join(tzVals, ",") + ")"
 	campLit := "{" + strings.Join(campIDs, ",") + "}"
 
-	qFrom := from.AddDate(0, 0, -1)
-	qToEx := toExclusive.AddDate(0, 0, 1)
+	qFrom := from
+	qToEx := toExclusive
 
 	// 转化：按 (campaign_id, 本地日, event_type) 归集
 	conv := make(map[string]map[string]int64) // key: "<ci>|<day>"
@@ -310,13 +310,10 @@ func (s *Store) dashboardDays(
 		}
 	}
 
-	lo := from.Format("2006-01-02")
-	hi := toExclusive.AddDate(0, 0, -1).Format("2006-01-02")
+	// 不再按本地日字符串裁剪：行已由 UTC 窗口 [from,to) 限定，本地日只是
+	// 展示用的换算结果（正偏移时区的当地今天会落在 UTC 昨天，裁剪会丢数据）。
 	out := make([]DashboardDay, 0, len(byDay))
 	for day, m := range byDay {
-		if day < lo || day > hi {
-			continue // 丢弃外扩边界日
-		}
 		dd := DashboardDay{Date: day}
 		for ci, c := range camps {
 			a := m[ci]
@@ -424,11 +421,14 @@ func (s *Store) campaignConversions(
 	return out, rows.Err()
 }
 
-// fillDaily 把「本地日 -> 曝光/点击」补齐为 [from,to] 内连续的本地日序列（无数据补 0）。
-func fillDaily(got map[string][2]int64, tz string, from, to time.Time) []DashboardCampaignDaily {
+// fillDaily 把「本地日 -> 曝光/点击」补齐为 UTC 窗口 [from,toExclusive) 覆盖到的
+// 连续本地日序列（无数据补 0）。toExclusive 为开区间，末日取 toExclusive-1ns 所在的
+// 本地日——正偏移时区的「当地今天」对应 UTC 昨天，故末日会自然地多出一天。
+func fillDaily(got map[string][2]int64, tz string, from, toExclusive time.Time) []DashboardCampaignDaily {
 	loc := parseTZ(tz)
 	localStart := time.Date(from.In(loc).Year(), from.In(loc).Month(), from.In(loc).Day(), 0, 0, 0, 0, loc)
-	localEnd := time.Date(to.In(loc).Year(), to.In(loc).Month(), to.In(loc).Day(), 0, 0, 0, 0, loc)
+	last := toExclusive.Add(-time.Nanosecond).In(loc)
+	localEnd := time.Date(last.Year(), last.Month(), last.Day(), 0, 0, 0, 0, loc)
 	out := make([]DashboardCampaignDaily, 0)
 	for d := localStart; !d.After(localEnd); d = d.AddDate(0, 0, 1) {
 		key := d.Format("2006-01-02")
@@ -460,12 +460,39 @@ func parseTZ(tz string) *time.Location {
 	return time.FixedZone(tz, off*3600)
 }
 
-// quoteTZ 把时区字符串安全地拼进 SQL 的 VALUES()（内部数据，仍做单引号转义）。
+// quoteTZ 把任务时区转成 SQL 的 interval 字面量，供 AT TIME ZONE 使用。
+//
+// 注意：不能直接把 'UTC+7' 当 timezone 名称传给 AT TIME ZONE —— Postgres 对这种
+// 名称采用 POSIX 约定，符号是相反的（'UTC+7' 实际是 -7 小时），会让按日切分整整
+// 偏 14 小时。必须显式用 INTERVAL（正值为东，与业务语义一致）。
 func quoteTZ(tz string) string {
-	if tz == "" {
-		return "'UTC'"
+	off := tzOffsetSeconds(tz)
+	sign := "+"
+	if off < 0 {
+		sign = "-"
+		off = -off
 	}
-	return "'" + strings.ReplaceAll(tz, "'", "''") + "'"
+	return fmt.Sprintf("INTERVAL '%s%02d:%02d'", sign, off/3600, (off%3600)/60)
+}
+
+// tzOffsetSeconds 返回时区相对 UTC 的偏移秒数（东为正）。支持 IANA 名（如
+// Asia/Bangkok，取当前实际偏移）与 "UTC+7" / "UTC-12" 固定偏移写法。
+func tzOffsetSeconds(tz string) int {
+	if tz == "" {
+		return 0
+	}
+	if loc, err := time.LoadLocation(tz); err == nil {
+		_, off := time.Now().In(loc).Zone()
+		return off
+	}
+	s := strings.TrimSpace(strings.TrimPrefix(tz, "UTC"))
+	if s == "" {
+		return 0
+	}
+	if n, err := strconv.Atoi(s); err == nil && n >= -12 && n <= 12 {
+		return n * 3600
+	}
+	return 0
 }
 
 // quoteStr 把字符串安全地拼进 SQL 的 VALUES()。
@@ -500,7 +527,8 @@ func (s *Store) campaignEventRows(
 	for ci, c := range camps {
 		ciByID[c.ID] = ci
 	}
-	// 窗口外扩 1 天：覆盖时区边界（本地日可能落在 UTC 窗口之外）
+	// 窗口严格取 UTC [from, to)：本地日由 AT TIME ZONE 换算得出，正偏移时区的
+	// 「当地今天 00:00~07:00」落在 UTC 昨天，若按本地日字符串再裁一次会把它们丢掉。
 	rows, err := s.pool.Query(ctx, cte+`
 		SELECT COALESCE(NULLIF(ae.campaign_id, ''), co.cid) AS cid,
 		       to_char(ae.ts AT TIME ZONE COALESCE(tz.tz, co.tz), 'YYYY-MM-DD') AS d,
@@ -513,7 +541,7 @@ func (s *Store) campaignEventRows(
 		WHERE ae.ts >= $1 AND ae.ts < $2 AND ae.event_type IN ('impression', 'click')
 		      AND (ae.campaign_id = ANY($3::text[]) OR ae.creative_id = ANY($4::bigint[]))
 		GROUP BY 1, 2, 3`,
-		from.AddDate(0, 0, -1), to.AddDate(0, 0, 1),
+		from, to,
 		"{"+strings.Join(campIDs, ",")+"}", "{"+strings.Join(crList, ",")+"}")
 	if err != nil {
 		return nil, err
@@ -559,7 +587,7 @@ func buildAttribCTE(camps []CampaignDashInfo, owned [][]string) (cte string, crL
 	}
 	var coSrc string
 	if len(crVals) == 0 {
-		coSrc = "SELECT NULL::text, NULL::text, NULL::text WHERE false"
+		coSrc = "SELECT NULL::text, NULL::text, NULL::interval WHERE false"
 	} else {
 		coSrc = "VALUES " + strings.Join(crVals, ",")
 	}
