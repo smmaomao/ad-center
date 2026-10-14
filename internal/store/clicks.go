@@ -14,6 +14,9 @@ import (
 type ClickRecord struct {
 	AppID, AdvertiserID, Style string
 	DeviceID, CreativeID       string
+	// CampaignID 点击发生时的归属任务（取自下发 bid 上下文）。固化在此，
+	// 使 S2S 转化归因不再依赖「素材→任务」运行时快照（任务暂停/删除后反查会落空）。
+	CampaignID string
 }
 
 // ClickTTL 点击登记的有效归因窗口：超过则视为不可归因，防止 clicks 表无限增长
@@ -23,11 +26,11 @@ const ClickTTL = 30 * 24 * time.Hour
 // RegisterClick 登记一次点击（幂等：同 click_id 不覆盖，避免重复上报覆盖上下文）。
 func (s *Store) RegisterClick(ctx context.Context, clickID string, c ClickRecord) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO clicks (click_id, app_code, advertiser_id, style, device_id, creative_id)
-		VALUES ($1, $2, $3::bigint, $4, $5, $6::bigint)
+		INSERT INTO clicks (click_id, app_code, advertiser_id, style, device_id, creative_id, campaign_id)
+		VALUES ($1, $2, $3::bigint, $4, $5, $6::bigint, $7)
 		ON CONFLICT (click_id) DO NOTHING`,
 		clickID, c.AppID, nilIfEmpty(c.AdvertiserID), c.Style,
-		nilIfEmpty(c.DeviceID), nilIfEmpty(c.CreativeID))
+		nilIfEmpty(c.DeviceID), nilIfEmpty(c.CreativeID), nilIfEmpty(c.CampaignID))
 	return err
 }
 
@@ -37,9 +40,11 @@ func (s *Store) ResolveClick(ctx context.Context, clickID string) (*ClickRecord,
 	var c ClickRecord
 	var createdAt time.Time
 	err := s.pool.QueryRow(ctx, `
-		SELECT app_code, advertiser_id, style, device_id, creative_id, created_at
+		SELECT app_code, advertiser_id, style, device_id, creative_id,
+		       COALESCE(campaign_id, ''), created_at
 		FROM clicks WHERE click_id = $1`, clickID).
-		Scan(&c.AppID, &c.AdvertiserID, &c.Style, &c.DeviceID, &c.CreativeID, &createdAt)
+		Scan(&c.AppID, &c.AdvertiserID, &c.Style, &c.DeviceID, &c.CreativeID,
+			&c.CampaignID, &createdAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, false, nil

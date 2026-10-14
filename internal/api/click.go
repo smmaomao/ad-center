@@ -78,6 +78,9 @@ func (s *Server) handleAdClick(w http.ResponseWriter, r *http.Request) {
 	if err := s.Store.RegisterClick(r.Context(), clickID, store.ClickRecord{
 		AppID: app.ID, AdvertiserID: bid.AdvertiserID,
 		Style: bid.Style, DeviceID: bid.DeviceID, CreativeID: bid.CreativeID,
+		// 固化归属任务：后续 S2S 转化回传据此归因，不再依赖运行时快照
+		// （任务暂停/删除后快照反查会落空，导致转化无归属）。
+		CampaignID: bid.CampaignID,
 	}); err != nil {
 		s.Log.Error("register click failed", "err", err)
 		writeError(w, http.StatusInternalServerError, "register click failed")

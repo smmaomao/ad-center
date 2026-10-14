@@ -20,6 +20,9 @@ import (
 type ClickContext struct {
 	AppID, AdvertiserID, Style string
 	DeviceID, CreativeID       string
+	// CampaignID 点击登记时固化的归属任务。加列（000065）之前登记的历史点击
+	// 为空，此时回退到素材反查。
+	CampaignID string
 }
 
 // ClickResolver 按 clickid 还原点击上下文（点击登记表的存储实现）。
@@ -108,12 +111,20 @@ func (s *Server) handleS2SEvent(w http.ResponseWriter, r *http.Request) {
 	var charged float64
 	var campaignID string
 	// 计费执行粒度 = campaign：出价 / 计费方式 / CPA 单价均在任务级，广告主只做钱包。
-	if campID, ok := snap.CreativeCampaign[ctx.CreativeID]; ok && campID != "" {
-		campaignID = campID
-		if camp := snap.Campaigns[campID]; camp != nil {
+	// 归因优先用点击登记时固化的任务（000065），不依赖运行时快照——因此任务被
+	// 暂停/删除后产生的转化仍能正确归属到投放时那个任务；加列之前登记的历史
+	// 点击该值为空，回退到「素材→任务」反查。
+	campaignID = ctx.CampaignID
+	if campaignID == "" {
+		if campID, ok := snap.CreativeCampaign[ctx.CreativeID]; ok && campID != "" {
+			campaignID = campID
+		}
+	}
+	if campaignID != "" {
+		if camp := snap.Campaigns[campaignID]; camp != nil {
 			if amt, ok := camp.BillingAmount(eventName); ok {
 				// campaign 日预算闸 + 广告主总钱包闸：任一不足即不扣费
-				if s.Budget.TryDeduct(campID, amt) && s.Budget.WalletDeduct(ctx.AdvertiserID, amt) {
+				if s.Budget.TryDeduct(campaignID, amt) && s.Budget.WalletDeduct(ctx.AdvertiserID, amt) {
 					charged = amt
 				}
 			}

@@ -26,5 +26,6 @@ func (r *StoreResolver) Resolve(clickID string) (*ClickContext, bool) {
 	return &ClickContext{
 		AppID: rec.AppID, AdvertiserID: rec.AdvertiserID,
 		Style: rec.Style, DeviceID: rec.DeviceID, CreativeID: rec.CreativeID,
+		CampaignID: rec.CampaignID,
 	}, true
 }
