@@ -64,21 +64,21 @@ definitions:
       loopable:
         description: |-
           Loopable 整个广告列表是否允许在客户端缓存期内循环播放。
-          当且仅当列表内所有素材均可循环（视频）时为 true，任一图片素材出现则为 false。
+          后台若配置了 ad_loopable 总开关，则以开关为准（enabled 直接决定 true/false）；
+          未配置时回退到按素材类型推导：当且仅当列表内所有素材均可循环（视频）时为 true，
+          任一图片素材出现则为 false。
         example: true
         type: boolean
     type: object
   api.AdListItem:
     properties:
       ad_style:
-        description: AdStyle 广告样式 → 最小播放秒数映射（单条广告当前生效样式及其要求的最小播放时长，秒）。
-        type: object
         additionalProperties:
           type: integer
+        description: AdStyle 广告样式 → 最小播放秒数映射（单条广告当前生效样式及其要求的最小播放时长，秒）。
         example:
-          REWARDED_VIDEO: 15
-          SPLASH: 3
-          FEED: 3
+          REWARDED_VIDEO: 30
+        type: object
       bid_id:
         example: bid_20260908_0001
         type: string
@@ -99,9 +99,10 @@ definitions:
         type: string
       required_duration:
         description: |-
-          RequiredDuration 客户端须满足的最大展示时长（秒），取 ad_style 各样式最小播放秒数之最大值：
-          REWARDED_VIDEO=素材时长钳制到[15,30]；
-          SPLASH/INTERSTITIAL/FEED=固定 3；BANNER=0。
+          RequiredDuration 客户端须满足的展示时长（秒），按样式取值：
+          REWARDED_VIDEO=素材时长（看满才可上报 video-complete 发奖）；
+          FEED=素材时长（客户端据此锁定列表滑动，满 N 秒后才可划走，图片素材兜底 3）；
+          SPLASH=固定 3；其余样式为 0。
         example: 15
         type: integer
       target_scene:
@@ -146,6 +147,15 @@ definitions:
         example: success
         type: string
     type: object
+  api.AdNonceResponse:
+    properties:
+      nonce:
+        example: 1c71ba2a95b6c597574ab087fadf001f
+        type: string
+      ttl_seconds:
+        example: 300
+        type: integer
+    type: object
   api.AdVideoCompleteRequest:
     properties:
       ad_app_id:
@@ -160,6 +170,38 @@ definitions:
       timestamp:
         example: 1774213495
         type: integer
+      user_id:
+        example: user_abc_12345
+        type: string
+    type: object
+  api.AdVideoCompleteSignedRequest:
+    properties:
+      ad_app_id:
+        example: app_10001
+        type: string
+      adjust_adid:
+        example: adj_xyz_9988
+        type: string
+      nonce:
+        example: 1c71ba2a95b6c597574ab087fadf001f
+        type: string
+      sign:
+        description: Sign 对 (ad_app_id|user_id|adjust_adid|nonce) 做 HMAC-SHA256（密钥
+          = App 的 secret_key）得到的 hex 串。
+        example: a3f1c0...hmac_sha256_hex
+        type: string
+      user_id:
+        example: user_abc_12345
+        type: string
+    type: object
+  api.AdVideoCompleteSignedResponse:
+    properties:
+      ad_app_id:
+        example: app_10001
+        type: string
+      adjust_adid:
+        example: adj_xyz_9988
+        type: string
       user_id:
         example: user_abc_12345
         type: string
@@ -262,6 +304,27 @@ paths:
       summary: 批量获取广告
       tags:
       - 客户端接口
+  /v1/ad/nonce:
+    post:
+      consumes:
+      - application/json
+      description: 客户端在发起「看完广告」签名回调前先取一个一次性 nonce；nonce 用后即废（TTL 默认 5 分钟），不可复用或预生成后批量使用。
+      parameters:
+      - description: App API Key
+        in: header
+        name: X-Api-Key
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.AdNonceResponse'
+      summary: 获取一次性 nonce（防重放）
+      tags:
+      - 客户端接口
   /v1/ad/video-complete:
     post:
       consumes:
@@ -287,6 +350,43 @@ paths:
           schema:
             $ref: '#/definitions/api.ClientSimpleResponse'
       summary: 视频播放完毕
+      tags:
+      - 客户端接口
+  /v1/ad/video-complete-signed:
+    post:
+      consumes:
+      - application/json
+      description: 在 /v1/ad/nonce 取 nonce 后，对 (ad_app_id|user_id|adjust_adid|nonce)
+        做 HMAC-SHA256（密钥 = App 的 secret_key）得 sign 再回调；服务端依次校验 ad_app_id 一致 → 签名恒定时间比对
+        → nonce 单次有效，全过才发奖并原样回带三个字段。签名错→401，nonce 无效/已用/过期→400，ad_app_id 不符→400。
+      parameters:
+      - description: App API Key
+        in: header
+        name: X-Api-Key
+        required: true
+        type: string
+      - description: 带签名完播回调请求
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/api.AdVideoCompleteSignedRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.AdVideoCompleteSignedResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.ClientSimpleResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.ClientSimpleResponse'
+      summary: 视频播放完毕（防重放签名版，推荐）
       tags:
       - 客户端接口
 schemes:

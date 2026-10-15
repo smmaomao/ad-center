@@ -151,6 +151,15 @@ func randHex(n int) string {
 // 路由处理
 // ---------------------------------------------------------------------------
 
+//	@Summary      获取一次性 nonce（防重放）
+//	@Description  客户端在发起「看完广告」签名回调前先取一个一次性 nonce；nonce 用后即废（TTL 默认 5 分钟），不可复用或预生成后批量使用。
+//	@Tags         客户端接口
+//	@Accept       json
+//	@Produce      json
+//	@Param        X-Api-Key header string true "App API Key"
+//	@Success      200 {object} AdNonceResponse
+//	@Router       /v1/ad/nonce [post]
+//
 // handleGetNonce 发放一次性 nonce：客户端在发起「看完广告」回调前先取。
 func (s *Server) handleGetNonce(w http.ResponseWriter, r *http.Request) {
 	app := s.authenticateApp(w, r)
@@ -173,6 +182,18 @@ func (s *Server) handleGetNonce(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+//	@Summary      视频播放完毕（防重放签名版，推荐）
+//	@Description  在 /v1/ad/nonce 取 nonce 后，对 (ad_app_id|user_id|adjust_adid|nonce) 做 HMAC-SHA256（密钥 = App 的 secret_key）得 sign 再回调；服务端依次校验 ad_app_id 一致 → 签名恒定时间比对 → nonce 单次有效，全过才发奖并原样回带三个字段。签名错→401，nonce 无效/已用/过期→400，ad_app_id 不符→400。
+//	@Tags         客户端接口
+//	@Accept       json
+//	@Produce      json
+//	@Param        X-Api-Key header string true "App API Key"
+//	@Param        request body AdVideoCompleteSignedRequest true "带签名完播回调请求"
+//	@Success      200 {object} AdVideoCompleteSignedResponse
+//	@Failure      400 {object} ClientSimpleResponse
+//	@Failure      401 {object} ClientSimpleResponse
+//	@Router       /v1/ad/video-complete-signed [post]
+//
 // handleAdVideoCompleteSigned 带签名 + nonce 的激励视频完播回调（防重放 / 防伪造）。
 //
 // 与 /v1/ad/video-complete 的区别：必须携带服务端刚发的 nonce 与对

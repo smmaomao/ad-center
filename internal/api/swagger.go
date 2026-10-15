@@ -23,21 +23,21 @@ type AdListRequest struct {
 
 // AdListItem 单条广告素材（ad_list 数组元素）。
 type AdListItem struct {
-	BidID            string   `json:"bid_id" example:"bid_20260908_0001"`
-	CreativeID       string   `json:"creative_id" example:"cr_90002"`
+	BidID      string `json:"bid_id" example:"bid_20260908_0001"`
+	CreativeID string `json:"creative_id" example:"cr_90002"`
 	// AdStyle 广告样式 → 最小播放秒数映射（单条广告当前生效样式及其要求的最小播放时长，秒）。
-	AdStyle          map[string]int `json:"ad_style" example:"REWARDED_VIDEO:30"`
-	MaterialType     string   `json:"material_type" example:"VIDEO"`
-	MaterialURL      string   `json:"material_url" example:"https://cdn.example.com/creatives/abc123.mp4"`
-	Width            int      `json:"width" example:"1080"`
-	Height           int      `json:"height" example:"1920"`
-	TargetScene      []string `json:"target_scene" example:"APP_LAUNCH"`
+	AdStyle      map[string]int `json:"ad_style" example:"REWARDED_VIDEO:30"`
+	MaterialType string         `json:"material_type" example:"VIDEO"`
+	MaterialURL  string         `json:"material_url" example:"https://cdn.example.com/creatives/abc123.mp4"`
+	Width        int            `json:"width" example:"1080"`
+	Height       int            `json:"height" example:"1920"`
+	TargetScene  []string       `json:"target_scene" example:"APP_LAUNCH"`
 	// RequiredDuration 客户端须满足的展示时长（秒），按样式取值：
 	// REWARDED_VIDEO=素材时长（看满才可上报 video-complete 发奖）；
 	// FEED=素材时长（客户端据此锁定列表滑动，满 N 秒后才可划走，图片素材兜底 3）；
 	// SPLASH=固定 3；其余样式为 0。
-	RequiredDuration int      `json:"required_duration" example:"15"`
-	ClickURL         string   `json:"click_url" example:"https://landing.com?click_id={CLICK_ID}"`
+	RequiredDuration int    `json:"required_duration" example:"15"`
+	ClickURL         string `json:"click_url" example:"https://landing.com?click_id={CLICK_ID}"`
 }
 
 // AdListData ad_list 包装。
@@ -95,4 +95,27 @@ type AdVideoCompleteRequest struct {
 	CreativeID string `json:"creative_id" example:"cr_90002"`
 	UserID     string `json:"user_id" example:"user_abc_12345"`
 	Timestamp  int64  `json:"timestamp" example:"1774213495"`
+}
+
+// AdNonceResponse 获取一次性 nonce 响应。
+type AdNonceResponse struct {
+	Nonce      string `json:"nonce" example:"1c71ba2a95b6c597574ab087fadf001f"`
+	TTLSeconds int    `json:"ttl_seconds" example:"300"`
+}
+
+// AdVideoCompleteSignedRequest 带签名完播回调请求（防重放）。
+type AdVideoCompleteSignedRequest struct {
+	AdAppID    string `json:"ad_app_id" example:"app_10001"`
+	UserID     string `json:"user_id" example:"user_abc_12345"`
+	AdjustAdid string `json:"adjust_adid" example:"adj_xyz_9988"`
+	Nonce      string `json:"nonce" example:"1c71ba2a95b6c597574ab087fadf001f"`
+	// Sign 对 (ad_app_id|user_id|adjust_adid|nonce) 做 HMAC-SHA256（密钥 = App 的 secret_key）得到的 hex 串。
+	Sign string `json:"sign" example:"a3f1c0...hmac_sha256_hex"`
+}
+
+// AdVideoCompleteSignedResponse 带签名完播回调响应（原样回带三个字段）。
+type AdVideoCompleteSignedResponse struct {
+	AdAppID    string `json:"ad_app_id" example:"app_10001"`
+	UserID     string `json:"user_id" example:"user_abc_12345"`
+	AdjustAdid string `json:"adjust_adid" example:"adj_xyz_9988"`
 }

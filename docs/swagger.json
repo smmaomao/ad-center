@@ -134,6 +134,38 @@
                 }
             }
         },
+        "/v1/ad/nonce": {
+            "post": {
+                "description": "客户端在发起「看完广告」签名回调前先取一个一次性 nonce；nonce 用后即废（TTL 默认 5 分钟），不可复用或预生成后批量使用。",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "客户端接口"
+                ],
+                "summary": "获取一次性 nonce（防重放）",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "App API Key",
+                        "name": "X-Api-Key",
+                        "in": "header",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.AdNonceResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/v1/ad/video-complete": {
             "post": {
                 "description": "仅 REWARDED_VIDEO 样式：观看达到 required_duration 秒或自然播完时上报，触发 S2S 回调发奖。",
@@ -168,6 +200,59 @@
                 "responses": {
                     "200": {
                         "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.ClientSimpleResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/ad/video-complete-signed": {
+            "post": {
+                "description": "在 /v1/ad/nonce 取 nonce 后，对 (ad_app_id|user_id|adjust_adid|nonce) 做 HMAC-SHA256（密钥 = App 的 secret_key）得 sign 再回调；服务端依次校验 ad_app_id 一致 → 签名恒定时间比对 → nonce 单次有效，全过才发奖并原样回带三个字段。签名错→401，nonce 无效/已用/过期→400，ad_app_id 不符→400。",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "客户端接口"
+                ],
+                "summary": "视频播放完毕（防重放签名版，推荐）",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "App API Key",
+                        "name": "X-Api-Key",
+                        "in": "header",
+                        "required": true
+                    },
+                    {
+                        "description": "带签名完播回调请求",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.AdVideoCompleteSignedRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.AdVideoCompleteSignedResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.ClientSimpleResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
                         "schema": {
                             "$ref": "#/definitions/api.ClientSimpleResponse"
                         }
@@ -266,7 +351,7 @@
                     }
                 },
                 "loopable": {
-                    "description": "Loopable 整个广告列表是否允许在客户端缓存期内循环播放。\n当且仅当列表内所有素材均可循环（视频）时为 true，任一图片素材出现则为 false。",
+                    "description": "Loopable 整个广告列表是否允许在客户端缓存期内循环播放。\n后台若配置了 ad_loopable 总开关，则以开关为准（enabled 直接决定 true/false）；\n未配置时回退到按素材类型推导：当且仅当列表内所有素材均可循环（视频）时为 true，\n任一图片素材出现则为 false。",
                     "type": "boolean",
                     "example": true
                 }
@@ -310,7 +395,7 @@
                     "example": "https://cdn.example.com/creatives/abc123.mp4"
                 },
                 "required_duration": {
-                    "description": "RequiredDuration 客户端须满足的最大展示时长（秒），取 ad_style 各样式最小播放秒数之最大值：\nREWARDED_VIDEO=素材时长钳制到[15,30]；\nSPLASH/INTERSTITIAL/FEED=固定 3；BANNER=0。",
+                    "description": "RequiredDuration 客户端须满足的展示时长（秒），按样式取值：\nREWARDED_VIDEO=素材时长（看满才可上报 video-complete 发奖）；\nFEED=素材时长（客户端据此锁定列表滑动，满 N 秒后才可划走，图片素材兜底 3）；\nSPLASH=固定 3；其余样式为 0。",
                     "type": "integer",
                     "example": 15
                 },
@@ -374,6 +459,19 @@
                 }
             }
         },
+        "api.AdNonceResponse": {
+            "type": "object",
+            "properties": {
+                "nonce": {
+                    "type": "string",
+                    "example": "1c71ba2a95b6c597574ab087fadf001f"
+                },
+                "ttl_seconds": {
+                    "type": "integer",
+                    "example": 300
+                }
+            }
+        },
         "api.AdVideoCompleteRequest": {
             "type": "object",
             "properties": {
@@ -392,6 +490,49 @@
                 "timestamp": {
                     "type": "integer",
                     "example": 1774213495
+                },
+                "user_id": {
+                    "type": "string",
+                    "example": "user_abc_12345"
+                }
+            }
+        },
+        "api.AdVideoCompleteSignedRequest": {
+            "type": "object",
+            "properties": {
+                "ad_app_id": {
+                    "type": "string",
+                    "example": "app_10001"
+                },
+                "adjust_adid": {
+                    "type": "string",
+                    "example": "adj_xyz_9988"
+                },
+                "nonce": {
+                    "type": "string",
+                    "example": "1c71ba2a95b6c597574ab087fadf001f"
+                },
+                "sign": {
+                    "description": "Sign 对 (ad_app_id|user_id|adjust_adid|nonce) 做 HMAC-SHA256（密钥 = App 的 secret_key）得到的 hex 串。",
+                    "type": "string",
+                    "example": "a3f1c0...hmac_sha256_hex"
+                },
+                "user_id": {
+                    "type": "string",
+                    "example": "user_abc_12345"
+                }
+            }
+        },
+        "api.AdVideoCompleteSignedResponse": {
+            "type": "object",
+            "properties": {
+                "ad_app_id": {
+                    "type": "string",
+                    "example": "app_10001"
+                },
+                "adjust_adid": {
+                    "type": "string",
+                    "example": "adj_xyz_9988"
                 },
                 "user_id": {
                     "type": "string",
