@@ -14,13 +14,14 @@ import (
 
 // App 客户端 App 注册信息（多租户隔离锚点）。
 type App struct {
-	ID             string `json:"id"`
-	Name           string `json:"name"`
-	APIKeyHash     string `json:"-"`                      // sha256 hex，用于 X-Api-Key 匹配
-	Status         string `json:"status"`                 // active / paused
-	CallbackURL    string `json:"callback_url,omitempty"` // 业务后端 S2S 接收地址（激励视频完播回调用）
-	AdWatchParams  string `json:"ad_watch_params,omitempty"` // 激励视频完播回传业务后端的附加参数（JSON 对象，扩展用，如鉴权）
-	AddServerID    string `json:"add_server_id,omitempty"`   // app 服务端侧的应用 id（转发 reward 回调时作为 app_id 发送）
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	APIKeyHash    string `json:"-"`                         // sha256 hex，用于 X-Api-Key 匹配
+	Status        string `json:"status"`                    // active / paused
+	CallbackURL   string `json:"callback_url,omitempty"`    // 业务后端 S2S 接收地址（激励视频完播回调用）
+	AdWatchParams string `json:"ad_watch_params,omitempty"` // 激励视频完播回传业务后端的附加参数（JSON 对象，扩展用，如鉴权）
+	AddServerID   string `json:"add_server_id,omitempty"`   // app 服务端侧的应用 id（转发 reward 回调时作为 app_id 发送）
+	SecretKey     string `json:"-"`                         // 客户端回调签名密钥（与 S2S secret_key 同源，NOT NULL 有默认）
 }
 
 // Active 报告该 App 是否可服务。
@@ -51,9 +52,9 @@ func contains(list []string, s string) bool { return slices.Contains(list, s) }
 // 出价 / 计费方式 / CPA 单价 / KPI / 排期 / 频控 / 下发有效期等**所有投放与计费
 // 公式一律在广告任务（campaign）级**，广告主不参与任何排序或扣费计算。
 type Advertiser struct {
-	ID          string       `json:"id"`
-	Name        string       `json:"name"`
-	Status      string       `json:"status"` // active / paused / budget_exhausted
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Status    string    `json:"status"` // active / paused / budget_exhausted
 	Targeting Targeting `json:"targeting"`
 }
 
@@ -218,9 +219,9 @@ type Campaign struct {
 	Status             string                `json:"status"` // active / paused
 	DailyBudget        float64               `json:"daily_budget"`
 	SpentToday         float64               `json:"spent_today"`
-	ConsumeSpeed       int                   `json:"consume_speed"` // 曝光系数 1-10（默认 5）：影响下发节奏
-	TargetKPIType      string                `json:"target_kpi_type"` // KPI 指标类型（与 billing_mode 同枚举，通常与其一致）
-	TargetKPIValue     float64               `json:"target_kpi_value"` // 目标 KPI 值（如目标 CPI=$1.80）
+	ConsumeSpeed       int                   `json:"consume_speed"`               // 曝光系数 1-10（默认 5）：影响下发节奏
+	TargetKPIType      string                `json:"target_kpi_type"`             // KPI 指标类型（与 billing_mode 同枚举，通常与其一致）
+	TargetKPIValue     float64               `json:"target_kpi_value"`            // 目标 KPI 值（如目标 CPI=$1.80）
 	BillingMode        string                `json:"billing_mode"`                // cpm / cpc / cpa（唯一计费方式：决定按什么事件扣费 + 打分标准线）
 	BiddingPrice       float64               `json:"bidding_price"`               // 出价（该计费方式的单价上限；cpm=每千次、cpc/cpa=每事件）
 	BiddingPriceMin    float64               `json:"bidding_price_min,omitempty"` // 出价下限：0=固定单价(=BiddingPrice)，>0 则在 [min,max] 随机
@@ -282,7 +283,7 @@ type Snapshot struct {
 	Slots                 map[string]*Slot       // slot_code → Slot
 	SlotsByKey            map[string]*Slot       // slot_key → Slot
 	CreativesByAdvertiser map[string][]*Creative // advertiser_id → 活跃素材（保留：素材管理/诊断；投放候选不再按广告主遍历）
-	CreativesByID         map[string]*Creative  // creative_id → Creative（投放候选按 ID 命中任务 creative_ids）
+	CreativesByID         map[string]*Creative   // creative_id → Creative（投放候选按 ID 命中任务 creative_ids）
 	Campaigns             map[string]*Campaign   // campaign_id → Campaign（预算闸执行粒度）
 	CreativeCampaign      map[string]string      // creative_id → campaign_id（创意归属，预算闸/扣费按 campaign）
 	PricingBenchmark      *PricingBenchmark      // 平台计费标准线（系统设置，全局一份）

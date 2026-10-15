@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	"adcenter"
 	"adcenter/internal/api"
 	"adcenter/internal/budget"
@@ -280,6 +282,29 @@ func main() {
 			log.Info("bid registry enabled (redis)")
 		}
 	}
+	// 一次性 nonce 存储（完播回调防重放）：复用同一 REDIS_URL；未配置
+	// REDIS_URL 或连接失败则降级为进程内内存版（仅单实例本地开发有效）。
+	nonceTTL := 5 * time.Minute
+	if v := os.Getenv("NONCE_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			nonceTTL = d
+		}
+	}
+	var nonceStore api.NonceStore = api.NewMemNonceStore(nonceTTL)
+	if redisURL != "" {
+		if nc, err := redis.ParseURL(redisURL); err == nil {
+			ncClient := redis.NewClient(nc)
+			if perr := ncClient.Ping(ctx).Err(); perr != nil {
+				_ = ncClient.Close()
+				log.Warn("redis ping failed, nonce store falls back to in-memory", "err", perr)
+			} else {
+				nonceStore = api.NewRedisNonceStore(ncClient, nonceTTL)
+				log.Info("nonce store enabled (redis)")
+			}
+		}
+	}
+	srv.Nonce = nonceStore
+
 	// 消费失败必须可见：Redis 后端不 ACK（留在 PEL 重试），此处负责打日志
 	go evtQueue.Run(ctx, func(ctx context.Context, batch []store.AdEvent) error {
 		if err := srv.ConsumeEvents(ctx, batch); err != nil {

@@ -61,6 +61,7 @@ type Server struct {
 	Queue         queue.Backend       // 事件队列（M2：memory / redis streams）；nil = 丢弃事件
 	Freq          frequency.Store     // 任务级频控（与引擎共用同一实例）
 	Bids          BidStore            // 下发交易上下文登记表（客户端接口 bid_id → 上下文，Redis/内存）
+	Nonce         NonceStore          // 一次性 nonce 发放/核销（完播回调防重放；nil = 未配置）
 }
 
 // NewRouter 返回根路由（Go 1.26 方法路由），外层包了请求计时日志中间件。
@@ -75,6 +76,10 @@ func (s *Server) NewRouter() http.Handler {
 	mux.HandleFunc("POST /v1/ad/impression", s.handleAdImpression)
 	mux.HandleFunc("POST /v1/ad/click", s.handleAdClick) // 生成 clickid + 落登记表（跳转前调用）
 	mux.HandleFunc("POST /v1/ad/video-complete", s.handleAdVideoComplete)
+	// 防重放/防伪造的完播回调：先 GET /v1/ad/nonce 取一次性 nonce，再对
+	// (ad_app_id|user_id|adjust_adid|nonce) 做 HMAC 签名后回传（见 nonce.go）。
+	mux.HandleFunc("POST /v1/ad/nonce", s.handleGetNonce)
+	mux.HandleFunc("POST /v1/ad/video-complete-signed", s.handleAdVideoCompleteSigned)
 
 	// 归因方 S2S 转化回调（无 App Key，暂时无独立密钥）。
 	// 同时支持 GET 与 POST：参数既可走 query，也可走 JSON / 表单 body —— 适配
@@ -237,7 +242,7 @@ type healthzResponse struct {
 	ConfigLoaded  bool      `json:"config_loaded"`
 	ConfigApps    int       `json:"config_apps"`
 	ConfigAdv     int       `json:"config_advertisers"`
-	MetricsBuffer int `json:"metrics_buffer"`
+	MetricsBuffer int       `json:"metrics_buffer"`
 }
 
 var startTime = time.Now().UTC()
