@@ -19,7 +19,7 @@ type Loader interface {
 // 刷新失败时保留旧快照继续服务（Prebid RateConverter 的 staleness 策略），
 // 仅日志告警——配置旧一点好过没有。
 // OnReloadFunc 快照刷新成功后的回调。reason 为触发原因，便于日志与排障
-// （"notify:<表名>" 来自 LISTEN/NOTIFY，"reconcile" 来自 60s 对账，"initial" 为首次加载）。
+// （"notify:<表名>" 来自 LISTEN/NOTIFY，"reconcile" 来自定时对账，"initial" 为首次加载）。
 //
 // 用途：配置快照之外的进程内状态（如 budget.Memory 的日预算表）需要跟随
 // 配置变更一起刷新，否则会出现"配置热更新了、依赖它的状态没有"的不一致
@@ -82,7 +82,7 @@ func (c *Cache) reload(ctx context.Context, reason string) error {
 	return nil
 }
 
-// RunReconcile 定时对账兜底：NOTIFY 丢失（监听连接断线瞬间有变更）时最多 60s 自愈。
+// RunReconcile 定时对账兜底：NOTIFY 丢失（监听连接断线瞬间有变更）时最多 interval 自愈。
 func (c *Cache) RunReconcile(ctx context.Context, interval time.Duration) {
 	t := time.NewTicker(interval)
 	defer t.Stop()

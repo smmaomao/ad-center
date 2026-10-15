@@ -23,7 +23,7 @@
 ## 各模块具体 Redis 操作
 
 ### 1. 预算控制 `budget/redis.go`（`{bud}` / `{wal}`）
-- 读：`Stats`（Lua 跨日重置 → 读 `budget`/`spent`）、`StatsAll`（BatchStats，决策热路径 1 次/请求，跨样式只取 1 次）、`WalletBalance`（EXISTS + HGET 钱包余额，按广告主预取一次）
+- 读：`Stats`（Lua 跨日重置 → 读 `budget`/`spent`）、`StatsAll`（BatchStats，决策热路径 1 次/请求，跨样式只取 1 次）、`WalletBalance`（EXISTS + HGET 钱包余额，按广告主预取一次；**读走进程内短缓存** `WALLET_CACHE_TTL`，命中则 0 命令）
 - 写：`TryDeduct`（Lua 原子扣费）、`WalletDeduct`（Lua 扣总钱包）、`WalletCredit`（HINCRBYFLOAT 充值）
 - 后台对账：`SyncBalances`（pipeline `SADD {bud}:ids` + `HSET`）、`SyncWallets`、`sweepDeleted`（`SMEMBERS {bud}:ids` → `DEL` + `SREM`）、`sweepWallets`（`SMEMBERS {wal}:ids` → `DEL` + `SREM`）
 - 命令族：EVALSHA、HGET / HSET / SADD / SMEMBERS / DEL / SREM / EXISTS / HINCRBYFLOAT、GET / SETNX（dayKey）
@@ -31,6 +31,7 @@
 ### 2. 频控 `frequency/redis.go`（`{fr}`）
 - ZSET 滑动窗口，key：`{fr}:{app}:{dev}:slot:{slot}`、`:adv:{adv}`、`:recent:{slot}`
 - 读+写（Lua 原子：ZREMRANGEBYSCORE → ZCARD → 判断 → ZADD）：`CheckSlot`、`RecordSlot`、`CheckAndIncr`、`Check`（只读）、`Record`（仅记账）
+- **批量只读 `CheckBatch`**（`BatchChecker`，可选能力）：一次 Lua 往返完成决策里 N 个候选的 `Check`，替代 N 条 `Check`；返回 nil 时调用方回退逐条。决策热路径默认走这里
 - 命令族：EVALSHA、EXPIRE
 
 ### 3. 事件队列 `queue/redis.go`（Redis Streams）
@@ -60,3 +61,26 @@
 - `ad/list` 的 `metrics` 步骤是本地 `*metrics.Agg`（内存聚合），**不走 Redis**。
 - 5 个 client 共用一个 Upstash SG 端点，连接都是**懒建**的——首次执行命令才建连（DNS + TLS ≈ 2.4s）。所以部署后 30s 内的首个请求会付一次冷建连代价，之后全部 < 6ms。日志里那条 `xreadgroup ... dur_ms≈30004` 是后台阻塞读，与请求延迟无关，可忽略。
 - 对账 key：`{bud}:ids`、`{wal}:ids`（SMEMBERS 枚举）、`{fr}:*`、`adcenter:decision:*`、`adcenter:bid:*`。
+
+## 命令量模型（Upstash 按命令计费）
+
+**命令数 ≈ 请求数 × 每请求命令数，与曝光量无直接关系。** 10-12 实测 42 万条/天对应后台 6,853 曝光，就是因为这个。
+
+优化前每次 `/v1/ad/list` 的固定开销：
+
+| 步骤 | 命令数 |
+|---|---|
+| `BudgetSnapshot` → `StatsAll` | 1（Lua 批量，已最优） |
+| `WalletBalances`（遍历全部广告主） | 广告主数 ×1（未启用钱包只 EXISTS；启用则 EXISTS+HGET） |
+| **频控 `materialize` → `Freq.Check`** | **5 样式 × 每候选 1 条 Lua**（实测可达 20+，最大单项） |
+| 每条下发 `Bids.Put` | 1 SET/条 |
+
+事件路径：`impression` ≈ 5 条（bid GET + TryDeduct + WalletDeduct + Freq.Record + XADD）、`click`/`video-complete` ≈ 2 条。后台：`SyncBalances`+`SyncWallets` 约 30 条/轮（现 300s，原 60s）、`XREADGROUP` 1 条/30s。
+
+已做的三项削减：
+
+1. **频控批量化**：`frequency.BatchChecker` + `checkBatchScript`，一次决策的 N 个候选合成 1 条 Lua（键都在 `{fr}` hash tag 下，Cluster 同 slot）。未实现/失败自动回退逐条 `Check`，fail-open 语义不变。
+2. **钱包余额进程内缓存**：`budget.Redis` 读走短 TTL 缓存（`WALLET_CACHE_TTL`，默认 2s，0=关闭），`WalletDeduct`/`WalletCredit`/`SyncWallets`/`sweepWallets` 主动失效。跨实例最坏陈旧一个 TTL。
+3. **对账间隔 60s → 300s**（`cmd/server/main.go`）：NOTIFY 是主通道，reconcile 只兜底断线丢失；周期命令降 5 倍（≈4.3 万/天 → 0.9 万/天）。
+
+放量与优化后的量级：每请求从 ~25 条降到 ~8 条（剩 `StatsAll` 1 + bid SET ≤5 + 事件入队）。

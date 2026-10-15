@@ -165,6 +165,50 @@ end
 return 1
 `)
 
+// checkBatchScript 一次往返完成 N 个候选的**只读**频控检查（决策热路径批量化）。
+//
+// 与 checkOnlyScript 逐条语义完全一致（疲劳窗口 + 多窗口 ZCOUNT），只是把 N 次
+// 脚本调用合并成 1 次：N 个候选共享 appID+deviceID，键互不相同但都在 {fr} hash
+// tag 下（Cluster 同一 slot）。
+//
+// KEYS: 每个候选 2 个 —— KEYS[2i-1]=recentKey，KEYS[2i]=advKey
+// ARGV: 1=nowMs, 2=候选数 N；其后每候选一段：
+//
+//	advertiserID, fatigueN, 窗口数 wcount，然后 wcount 对 (windowMs, maxCount)
+//
+// 返回：N 个 0/1，顺序与入参一致。
+var checkBatchScript = redis.NewScript(`
+local now = tonumber(ARGV[1])
+local n = tonumber(ARGV[2])
+local out = {}
+local a = 3
+for i = 1, n do
+  local advID = ARGV[a]
+  local fatigueN = tonumber(ARGV[a + 1])
+  local wcount = tonumber(ARGV[a + 2])
+  a = a + 3
+  local ok = 1
+  if fatigueN > 0 then
+    local recent = redis.call('ZREVRANGE', KEYS[2 * i - 1], 0, fatigueN - 1)
+    local pfx = advID .. ':'
+    local plen = string.len(pfx)
+    for _, m in ipairs(recent) do
+      if string.sub(m, 1, plen) == pfx then ok = 0 end
+    end
+  end
+  for _ = 1, wcount do
+    local wms = tonumber(ARGV[a])
+    local maxc = tonumber(ARGV[a + 1])
+    a = a + 2
+    if ok == 1 and wms > 0 and maxc > 0 then
+      if redis.call('ZCOUNT', KEYS[2 * i], now - wms, now) >= maxc then ok = 0 end
+    end
+  end
+  out[i] = ok
+end
+return out
+`)
+
 // recordOnlyScript 仅记账（与 checkAndIncrScript 后段一致）。
 var recordOnlyScript = redis.NewScript(`
 local now = tonumber(ARGV[1])
@@ -247,6 +291,44 @@ func (s *RedisStore) Check(appID, deviceID, slotID, advertiserID string, policy 
 	return !ok || n == 1
 }
 
+// CheckBatch 批量只读检查（frequency.BatchChecker）：一次脚本往返完成 N 个候选。
+//
+// 失败一律返回 nil —— 调用方逐个回退 Check，语义与原来完全一致（fail-open）。
+func (s *RedisStore) CheckBatch(appID, deviceID string, items []CheckItem, now time.Time) []bool {
+	if len(items) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+	defer cancel()
+
+	keys := make([]string, 0, len(items)*2)
+	args := make([]any, 0, 3+len(items)*3)
+	args = append(args, now.UnixMilli(), len(items))
+	for _, it := range items {
+		keys = append(keys,
+			s.recentKey(appID, deviceID, it.SlotID),
+			s.advKey(appID, deviceID, it.AdvertiserID))
+		args = append(args, it.AdvertiserID, it.Policy.FatigueN, len(it.Policy.Windows))
+		for _, w := range it.Policy.Windows {
+			args = append(args, int64(w.WindowMinutes)*60_000, w.MaxCount)
+		}
+	}
+	res, err := checkBatchScript.Run(ctx, s.client, keys, args...).Result()
+	if err != nil {
+		return nil // 调用方逐个回退
+	}
+	arr, ok := res.([]interface{})
+	if !ok || len(arr) != len(items) {
+		return nil
+	}
+	out := make([]bool, len(arr))
+	for i, v := range arr {
+		n, ok := v.(int64)
+		out[i] = !ok || n == 1 // 解析异常也放行（与 Check 一致）
+	}
+	return out
+}
+
 func (s *RedisStore) Record(appID, deviceID, slotID, advertiserID string, policy AdvPolicy, now time.Time) {
 	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
 	defer cancel()
@@ -256,4 +338,7 @@ func (s *RedisStore) Record(appID, deviceID, slotID, advertiserID string, policy
 }
 
 // 编译期接口实现检查。
-var _ Store = (*RedisStore)(nil)
+var (
+	_ Store        = (*RedisStore)(nil)
+	_ BatchChecker = (*RedisStore)(nil)
+)

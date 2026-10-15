@@ -171,7 +171,10 @@ func main() {
 		}
 	})
 	go cache.RunListener(ctx, dsn, log)
-	go cache.RunReconcile(ctx, 60*time.Second)
+	// 对账间隔 300s（原 60s）：NOTIFY 是配置/预算变更的主通道，reconcile 只兜底
+	// 监听断线瞬间的丢失。每轮对账会跑 SyncBalances+SyncWallets（各一轮 pipeline +
+	// SMEMBERS，约 30 条命令），60s 一轮 ≈ 4.3 万条/天，放宽 5 倍后降到 ~0.9 万条/天。
+	go cache.RunReconcile(ctx, 300*time.Second)
 
 	// ④ 频控 + 引擎 + 指标
 	var freqStore frequency.Store = frequency.NewMemory(24 * time.Hour)

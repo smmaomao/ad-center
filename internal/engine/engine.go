@@ -164,13 +164,25 @@ func (e *Engine) DecideWith(snap *config.Snapshot, req Request, campBudgets map[
 		return cands[i].creative.ID < cands[j].creative.ID
 	})
 
+	// ④' 频控批量预取：一次 Redis 往返拿全部候选的只读检查结果（见 freqResults）。
+	//
+	// 原来逐条 materialize 里各调一次 Check = 每候选一条 EVALSHA（一次 /v1/ad/list
+	// 跨 5 个样式，实测可达 20+ 条/请求，是 Redis 用量最大单项）。批量后降为 1 条；
+	// 取不到批量结果时 freqOK 为 nil，自动回退成逐条 Check，语义不变。
+	freqOK := e.freqResults(req, cands)
+
 	// ④ 逐条物化：频控 / 预算闸挡住的跳过，至多取 count 条
 	var items []Item
-	for _, c := range cands {
+	for i := range cands {
 		if len(items) >= req.Count {
 			break
 		}
-		if item, ok := e.materialize(req, c, wallets); ok {
+		var pass *bool
+		if freqOK != nil {
+			p := freqOK[i]
+			pass = &p
+		}
+		if item, ok := e.materialize(req, cands[i], wallets, pass); ok {
 			items = append(items, item)
 		}
 	}
@@ -336,20 +348,76 @@ func CampaignFreqWindows(camp *config.Campaign) []frequency.Window {
 	return windows
 }
 
+// freqResults 批量只读频控检查（frequency.BatchChecker）。
+//
+// 返回与 cands 等长的放行标记；**nil 表示未取到批量结果**，调用方须回退逐条
+// Check（未实现 BatchChecker 的内存版、调用失败、无候选需要检查都走这条路）。
+// 没有频控窗口的候选不进批量入参，对应位置直接放行。
+func (e *Engine) freqResults(req Request, cands []candidate) []bool {
+	if e.Freq == nil || len(cands) == 0 {
+		return nil
+	}
+	bc, ok := e.Freq.(frequency.BatchChecker)
+	if !ok {
+		return nil
+	}
+	items := make([]frequency.CheckItem, 0, len(cands))
+	idx := make([]int, 0, len(cands))
+	for i, c := range cands {
+		if c.camp == nil || c.creative == nil {
+			continue
+		}
+		windows := CampaignFreqWindows(c.camp)
+		if len(windows) == 0 {
+			continue // 不限频：无需往返
+		}
+		items = append(items, frequency.CheckItem{
+			SlotID:       c.creative.ID,
+			AdvertiserID: c.camp.ID,
+			Policy:       frequency.AdvPolicy{Windows: windows},
+		})
+		idx = append(idx, i)
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	got := bc.CheckBatch(req.App.ID, req.DeviceID, items, req.Now)
+	if len(got) != len(items) {
+		return nil // 失败：回退逐条 Check（fail-open 语义不变）
+	}
+	out := make([]bool, len(cands))
+	for i := range out {
+		out[i] = true // 无频控窗口的候选默认放行
+	}
+	for k, i := range idx {
+		out[i] = got[k]
+	}
+	return out
+}
+
 // materialize 单条物化：任务级滑动窗口频控（app:device:campaign）→ 预算只读闸。
+//
+// freqOK 为批量预取的结果：非 nil 时直接用它（不再逐条读 Redis）；nil 时才回退
+// 调用 frequency.Store.Check（未启用批量 / 批量失败 / 单独调用本方法的场景）。
 //
 // 注意：频控的"计数"不在这里做，计数发生在用户真实观看（impression）时由 api
 // 层调用 frequency.Store.Record（见 CampaignFreqWindows 的同款窗口）。materialize
 // 只通过 frequency.Store.Check 读取计数，据此隐藏已达上限的素材——决策缓存命中
 // 也不会误增计数，上限始终以真实观看次数为准。
-func (e *Engine) materialize(req Request, c candidate, wallets map[string]float64) (Item, bool) {
+func (e *Engine) materialize(req Request, c candidate, wallets map[string]float64, freqOK *bool) (Item, bool) {
 	// 任务级滑动窗口频控（每个 campaign 独立；广告主级 freq_windows 已弃用）。
 	// 计数时机改为真实观看（impression），此处仅做只读检查。
 	if c.camp != nil {
 		windows := CampaignFreqWindows(c.camp)
 		if len(windows) > 0 {
-			if !e.Freq.Check(req.App.ID, req.DeviceID, c.creative.ID, c.camp.ID,
-				frequency.AdvPolicy{Windows: windows}, req.Now) {
+			ok := true
+			if freqOK != nil {
+				ok = *freqOK
+			} else {
+				ok = e.Freq.Check(req.App.ID, req.DeviceID, c.creative.ID, c.camp.ID,
+					frequency.AdvPolicy{Windows: windows}, req.Now)
+			}
+			if !ok {
 				return Item{}, false
 			}
 		}
@@ -374,8 +442,6 @@ func (e *Engine) materialize(req Request, c candidate, wallets map[string]float6
 		ExpireAt:     req.Now.Add(time.Duration(c.ttl) * time.Minute).Unix(),
 	}, true
 }
-
-
 
 // materializeBlockedReason 返回某候选在物化阶段被挡的原因（只读，不影响状态）。
 func materializeBlockedReason(e *Engine, req Request, c candidate, wallets map[string]float64) string {

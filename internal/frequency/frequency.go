@@ -59,3 +59,25 @@ type Store interface {
 	// Record 仅记账（多窗口 + 疲劳序列）；在真实观看/曝光时调用。
 	Record(appID, deviceID, slotID, advertiserID string, policy AdvPolicy, now time.Time)
 }
+
+// CheckItem 批量只读检查的一条入参（一次决策中的单个候选）。
+type CheckItem struct {
+	SlotID       string    // 频控维度：素材（等价旧广告位）
+	AdvertiserID string    // 频控维度：广告任务 campaign
+	Policy       AdvPolicy // 由调用方从 campaign 配置推导
+}
+
+// BatchChecker 批量只读频控检查（**可选能力**，与 budget.BatchStats 同款模式）。
+//
+// 背景：决策热路径里原来是「每候选一次 Check」= 每候选一条 EVALSHA。一次
+// /v1/ad/list 跨 5 个样式、每样式 N 个候选，命令数 = 候选×样式数（实测可达
+// 20+ 条/请求），是 Redis 用量的最大单项。批量版把「同一 app+device 下 N 个
+// 候选」压成一次脚本往返——这些键都带 {fr} hash tag，Cluster 下同一 slot，
+// 不会有 CROSSSLOT。
+//
+// 调用方约定：返回 nil / 长度不符 = 未提供或失败，必须逐个回退 Check，
+// 保持既有 fail-open 语义不变。
+type BatchChecker interface {
+	// CheckBatch 返回与 items 等长的结果切片（true = 放行）；失败返回 nil。
+	CheckBatch(appID, deviceID string, items []CheckItem, now time.Time) []bool
+}
