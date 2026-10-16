@@ -18,10 +18,9 @@ import (
 
 func slogDiscard() *slog.Logger { return slog.New(slog.DiscardHandler) }
 
-func newTestApp(t *testing.T) (*Server, string, string) {
+func newTestApp(t *testing.T) (*Server, string) {
 	t.Helper()
 	const apiKey = "adc_test_0000000000000000000000000009"
-	const secret = "sec_test_0123456789abcdef"
 	sum := sha256.Sum256([]byte(apiKey))
 	keyHash := hex.EncodeToString(sum[:])
 
@@ -29,7 +28,7 @@ func newTestApp(t *testing.T) (*Server, string, string) {
 		Apps:         map[string]*config.App{},
 		AppByKeyHash: map[string]*config.App{},
 	}
-	app := &config.App{ID: "app_t", Status: "active", SecretKey: secret}
+	app := &config.App{ID: "app_t", Status: "active"}
 	snap.Apps[app.ID] = app
 	snap.AppByKeyHash[keyHash] = app
 
@@ -43,7 +42,7 @@ func newTestApp(t *testing.T) (*Server, string, string) {
 		Nonce: NewMemNonceStore(5 * time.Minute),
 		Queue: queue.NewMemory(1024, 50, time.Second),
 	}
-	return s, apiKey, secret
+	return s, apiKey
 }
 
 func TestSignReward(t *testing.T) {
@@ -81,7 +80,7 @@ func TestMemNonceSingleUse(t *testing.T) {
 }
 
 func TestSignedVideoCompleteFlow(t *testing.T) {
-	s, apiKey, secret := newTestApp(t)
+	s, apiKey := newTestApp(t)
 
 	// ① 取 nonce
 	nr := httptest.NewRequest("POST", "/v1/ad/nonce", nil)
@@ -99,8 +98,8 @@ func TestSignedVideoCompleteFlow(t *testing.T) {
 		t.Fatal("empty nonce")
 	}
 
-	// ② 正常签名回调
-	sign := signReward(secret, "app_t", "u1", "adj1", nb.Nonce)
+	// ② 正常签名回调（签名密钥 = 请求所用的 X-Api-Key）
+	sign := signReward(apiKey, "app_t", "u1", "adj1", nb.Nonce)
 	body := `{"ad_app_id":"app_t","user_id":"u1","adjust_adid":"adj1","nonce":"` + nb.Nonce + `","sign":"` + sign + `"}`
 	req := httptest.NewRequest("POST", "/v1/ad/video-complete-signed", strings.NewReader(body))
 	req.Header.Set("X-Api-Key", apiKey)
@@ -139,7 +138,7 @@ func TestSignedVideoCompleteFlow(t *testing.T) {
 	}
 
 	// ⑤ ad_app_id 冒用他人 → 拒绝
-	sign2 := signReward(secret, "other", "u1", "adj1", "x")
+	sign2 := signReward(apiKey, "other", "u1", "adj1", "x")
 	bad2 := `{"ad_app_id":"other","user_id":"u1","adjust_adid":"adj1","nonce":"x","sign":"` + sign2 + `"}`
 	req4 := httptest.NewRequest("POST", "/v1/ad/video-complete-signed", strings.NewReader(bad2))
 	req4.Header.Set("X-Api-Key", apiKey)

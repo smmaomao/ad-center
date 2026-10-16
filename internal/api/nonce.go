@@ -20,7 +20,8 @@ import (
 // 背景：激励视频完播回调原本只带 user_id，脚本可无限重放。引入「服务端发放
 // nonce + 客户端对 (ad_app_id|user_id|adjust_adid|nonce) 做 HMAC 签名」后，
 // 每条有效回调都必须用服务端刚发的、且只能用一次的 nonce —— nonce 核销即废，
-// 抓包重放直接 400；伪造签名还需 App 的 secret_key，curl 脚本拿不到。
+// 抓包重放直接 400；伪造签名还需 App 的 X-Api-Key（adc_...，客户端本就持有），
+// 抬高门槛、消灭直 curl / 重放的脚本。
 type NonceStore interface {
 	// Issue 发放一个绑定 appID 的 nonce（单次有效），返回 nonce 与有效期。
 	Issue(appID string) (nonce string, ttl time.Duration, err error)
@@ -132,9 +133,11 @@ func (s *memNonceStore) sweep() {
 // 签名
 // ---------------------------------------------------------------------------
 
-// signReward 对 (ad_app_id|user_id|adjust_adid|nonce) 做 HMAC-SHA256（密钥 = App
-// 的 secret_key）。nonce 必须纳入签名，否则攻击者可拿一个旧 sign 配服务端新发的
-// nonce 复用（nonce 虽单次有效但 sign 不绑 nonce → 仍能持续伪造）。
+// signReward 对 (ad_app_id|user_id|adjust_adid|nonce) 做 HMAC-SHA256。密钥直接用
+// 客户端请求里的 X-Api-Key（adc_...）——与鉴权同密钥，客户端本就持有，无需再下发
+// 第二个密钥，也不会把 S2S 密钥暴露到客户端。nonce 必须纳入签名，否则攻击者可拿
+// 一个旧 sign 配服务端新发的 nonce 复用（nonce 虽单次有效但 sign 不绑 nonce → 仍
+// 能持续伪造）。
 func signReward(secret, adAppID, userID, adjustAdid, nonce string) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(strings.Join([]string{adAppID, userID, adjustAdid, nonce}, "|")))
@@ -183,7 +186,7 @@ func (s *Server) handleGetNonce(w http.ResponseWriter, r *http.Request) {
 }
 
 //	@Summary      视频播放完毕（防重放签名版，推荐）
-//	@Description  在 /v1/ad/nonce 取 nonce 后，对 (ad_app_id|user_id|adjust_adid|nonce) 做 HMAC-SHA256（密钥 = App 的 secret_key）得 sign 再回调；服务端依次校验 ad_app_id 一致 → 签名恒定时间比对 → nonce 单次有效，全过才发奖并原样回带三个字段。签名错→401，nonce 无效/已用/过期→400，ad_app_id 不符→400。
+//	@Description  在 /v1/ad/nonce 取 nonce 后，对 (ad_app_id|user_id|adjust_adid|nonce) 做 HMAC-SHA256（密钥 = 请求所用的 X-Api-Key，即 adc_...）得 sign 再回调；服务端依次校验 ad_app_id 一致 → 签名恒定时间比对 → nonce 单次有效，全过才发奖并原样回带三个字段。签名错→401，nonce 无效/已用/过期→400，ad_app_id 不符→400。
 //	@Tags         客户端接口
 //	@Accept       json
 //	@Produce      json
@@ -197,7 +200,7 @@ func (s *Server) handleGetNonce(w http.ResponseWriter, r *http.Request) {
 // handleAdVideoCompleteSigned 带签名 + nonce 的激励视频完播回调（防重放 / 防伪造）。
 //
 // 与 /v1/ad/video-complete 的区别：必须携带服务端刚发的 nonce 与对
-// (ad_app_id|user_id|adjust_adid|nonce) 的 HMAC 签名（密钥 = App 的 secret_key）。
+// (ad_app_id|user_id|adjust_adid|nonce) 的 HMAC 签名（密钥 = 请求所用的 X-Api-Key，即 adc_...）。
 // 校验顺序：① ad_app_id 与鉴权 App 一致 → ② 签名恒定时间比对 → ③ nonce 核销
 // （顺序很关键：签名不过不消耗 nonce，避免有人用合法 api_key 批量领 nonce 来"烧"
 // 合法客户端的 nonce 池）。全部通过才 fireRewardCallback，并原样回带三个字段。
@@ -229,8 +232,10 @@ func (s *Server) handleAdVideoCompleteSigned(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, "ad_app_id mismatch")
 		return
 	}
-	// ① 签名恒定时间比对（先验签名，不消耗 nonce）。
-	expect := signReward(app.SecretKey, req.AdAppID, req.UserID, req.AdjustAdid, req.Nonce)
+	// ① 签名恒定时间比对（先验签名，不消耗 nonce）。密钥直接用本次请求的 X-Api-Key
+	// （adc_...，与鉴权同密钥）——客户端本就持有，无需再下发第二个密钥，也不会把
+	// S2S 密钥暴露到客户端。
+	expect := signReward(r.Header.Get("X-Api-Key"), req.AdAppID, req.UserID, req.AdjustAdid, req.Nonce)
 	if subtle.ConstantTimeCompare([]byte(expect), []byte(req.Sign)) != 1 {
 		writeError(w, http.StatusUnauthorized, "invalid signature")
 		return

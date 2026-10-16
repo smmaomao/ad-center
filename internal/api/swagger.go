@@ -109,7 +109,7 @@ type AdVideoCompleteSignedRequest struct {
 	UserID     string `json:"user_id" example:"user_abc_12345"`
 	AdjustAdid string `json:"adjust_adid" example:"adj_xyz_9988"`
 	Nonce      string `json:"nonce" example:"1c71ba2a95b6c597574ab087fadf001f"`
-	// Sign 对 (ad_app_id|user_id|adjust_adid|nonce) 做 HMAC-SHA256（密钥 = App 的 secret_key）得到的 hex 串。
+	// Sign 对 (ad_app_id|user_id|adjust_adid|nonce) 做 HMAC-SHA256（密钥 = 请求所用的 X-Api-Key，即 adc_...）得到的 hex 串。
 	Sign string `json:"sign" example:"a3f1c0...hmac_sha256_hex"`
 }
 

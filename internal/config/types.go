@@ -21,7 +21,6 @@ type App struct {
 	CallbackURL   string `json:"callback_url,omitempty"`    // 业务后端 S2S 接收地址（激励视频完播回调用）
 	AdWatchParams string `json:"ad_watch_params,omitempty"` // 激励视频完播回传业务后端的附加参数（JSON 对象，扩展用，如鉴权）
 	AddServerID   string `json:"add_server_id,omitempty"`   // app 服务端侧的应用 id（转发 reward 回调时作为 app_id 发送）
-	SecretKey     string `json:"-"`                         // 客户端回调签名密钥（与 S2S secret_key 同源，NOT NULL 有默认）
 }
 
 // Active 报告该 App 是否可服务。

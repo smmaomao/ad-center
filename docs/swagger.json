@@ -209,7 +209,7 @@
         },
         "/v1/ad/video-complete-signed": {
             "post": {
-                "description": "在 /v1/ad/nonce 取 nonce 后，对 (ad_app_id|user_id|adjust_adid|nonce) 做 HMAC-SHA256（密钥 = App 的 secret_key）得 sign 再回调；服务端依次校验 ad_app_id 一致 → 签名恒定时间比对 → nonce 单次有效，全过才发奖并原样回带三个字段。签名错→401，nonce 无效/已用/过期→400，ad_app_id 不符→400。",
+                "description": "在 /v1/ad/nonce 取 nonce 后，对 (ad_app_id|user_id|adjust_adid|nonce) 做 HMAC-SHA256（密钥 = 请求所用的 X-Api-Key，即 adc_...）得 sign 再回调；服务端依次校验 ad_app_id 一致 → 签名恒定时间比对 → nonce 单次有效，全过才发奖并原样回带三个字段。签名错→401，nonce 无效/已用/过期→400，ad_app_id 不符→400。",
                 "consumes": [
                     "application/json"
                 ],
@@ -513,7 +513,7 @@
                     "example": "1c71ba2a95b6c597574ab087fadf001f"
                 },
                 "sign": {
-                    "description": "Sign 对 (ad_app_id|user_id|adjust_adid|nonce) 做 HMAC-SHA256（密钥 = App 的 secret_key）得到的 hex 串。",
+                    "description": "Sign 对 (ad_app_id|user_id|adjust_adid|nonce) 做 HMAC-SHA256（密钥 = 请求所用的 X-Api-Key，即 adc_...）得到的 hex 串。",
                     "type": "string",
                     "example": "a3f1c0...hmac_sha256_hex"
                 },
