@@ -163,12 +163,15 @@ func main() {
 
 	// ③' 配置刷新 → 预算同步：后台新建广告主 / 调整日预算无需重启即生效。
 	// 必须在启动 listener 与 reconcile 之前注册，否则首轮刷新时预算表还没就绪。
-	// 预算只绑 advertisers 表：仅广告主相关变更、定时对账、断线重连才需重查
-	// 预算；apps/slots/creatives 的变更不触碰日预算，跳过整表查询（每次 NOTIFY
-	// 都全量 LoadBudgetBalances 是浪费且会与扣费路径抢同一把预算锁）。
+	// 预算单元是 campaign（不是 advertiser）：campaigns 表变更**必须**触发同步，
+	// 否则 Redis 里没有该任务的预算键 → 引擎闸放行但 TryDeduct 扣不到钱（白送
+	// 广告），最长要等 300s 定时对账才补上。advertisers 保留仅为兼容历史配置；
+	// apps/slots/creatives 的变更不触碰日预算，跳过整表查询（每次 NOTIFY 都全量
+	// LoadBudgetBalances 是浪费且会与扣费路径抢同一把预算锁）。
 	cache.OnChange(func(reason string) {
 		if reason == "reconcile" || reason == "reconnect" || reason == "initial" ||
-			strings.HasPrefix(reason, "notify:advertisers") {
+			strings.HasPrefix(reason, "notify:advertisers") ||
+			strings.HasPrefix(reason, "notify:campaigns") {
 			syncBudgets(ctx, st, budgetCtrl, log, reason)
 		}
 	})
