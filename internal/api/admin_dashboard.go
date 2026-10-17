@@ -11,8 +11,8 @@ import (
 
 // dashboardOverviewResponse 总览页响应体：区间 KPI + 广告主 KPI 监控行。
 type dashboardOverviewResponse struct {
-	From        string                      `json:"from"`        // YYYY-MM-DD（含，当天 00:00:00 UTC 起）
-	To          string                      `json:"to"`          // YYYY-MM-DD（含，截至当天 23:59:59 UTC）
+	From        string                      `json:"from"` // YYYY-MM-DD（含，当天 00:00:00 UTC 起）
+	To          string                      `json:"to"`   // YYYY-MM-DD（含，截至当天 23:59:59 UTC）
 	Overview    *store.DashboardOverview    `json:"overview"`
 	Advertisers []store.DashboardAdvertiser `json:"advertisers"`
 }
@@ -67,7 +67,7 @@ func (s *Server) handleDashboardOverview(w http.ResponseWriter, r *http.Request)
 
 // dashboardDailyResponse 按日统计响应体（近 N 天每日全局聚合）。
 type dashboardDailyResponse struct {
-	Days int                    `json:"days"`
+	Days int                       `json:"days"`
 	Data []store.DashboardDailyRow `json:"data"`
 }
 
@@ -95,10 +95,10 @@ func (s *Server) handleDashboardDaily(w http.ResponseWriter, r *http.Request) {
 
 // dashboardCampaignsResponse 按广告任务维度的总览响应体。
 type dashboardCampaignsResponse struct {
-	From       string                      `json:"from"`
-	To         string                      `json:"to"`
-	Days       []store.DashboardDay        `json:"days"`       // 按日分组（UTC）+ 素材明细
-	Campaigns  []store.DashboardCampaignStat `json:"campaigns"` // 每任务汇总 + 按日趋势
+	From      string                        `json:"from"`
+	To        string                        `json:"to"`
+	Days      []store.DashboardDay          `json:"days"`      // 按日分组（UTC）+ 素材明细
+	Campaigns []store.DashboardCampaignStat `json:"campaigns"` // 每任务汇总 + 按日趋势
 }
 
 // handleDashboardCampaigns 总览页「按广告任务维度」统计：每个广告任务的

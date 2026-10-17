@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -101,26 +100,28 @@ func newTestServer(t *testing.T, snap *config.Snapshot, dec Decider, dc cache.De
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 }
 
+// doAdReq 直接驱动 resolveDecision（旧 /v1/ad/req handler 已废弃，决策缓存逻辑不变）：
+// 第一次 miss → 引擎计算 + 写入缓存；第二次 hit → 命中缓存，引擎不再计算。
 func doAdReq(t *testing.T, srv *Server) string {
 	t.Helper()
-	body := `{"style":"rewarded_video","deviceId":"d1","count":1}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/ad/req", strings.NewReader(body))
-	req.Header.Set("X-Api-Key", "test-key")
-	w := httptest.NewRecorder()
-	srv.NewRouter().ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status %d body %s", w.Code, w.Body.String())
+	snap := srv.Cache.Snapshot()
+	app := &config.App{ID: "app_t", Status: "active"}
+	req := adRequest{Style: "rewarded_video", DeviceID: "d1", Count: 1}
+	resp := srv.resolveDecision(httptest.NewRequest(http.MethodPost, "/x", nil), snap, app, req, time.Now())
+	b, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatal(err)
 	}
-	return w.Body.String()
+	return string(b)
 }
 
-func TestHandleAdRequest_DecisionCacheHit(t *testing.T) {
+func TestDecisionCache_Hit(t *testing.T) {
 	snap := testSnapshot()
 	dec := &countingDecider{resp: engine.Response{Items: []engine.Item{{AdvertiserID: "adv1", Advertiser: "A", Creative: &config.Creative{ID: "cr1"}}}}}
 	fc := &fakeCache{}
 	srv := newTestServer(t, snap, dec, fc)
 
-	doAdReq(t, srv) // miss → 计算 + 写入
+	doAdReq(t, srv)           // miss → 计算 + 写入
 	second := doAdReq(t, srv) // hit → 命中缓存
 
 	if dec.calls != 1 {
@@ -140,7 +141,7 @@ func TestHandleAdRequest_DecisionCacheHit(t *testing.T) {
 	}
 }
 
-func TestHandleAdRequest_NoCacheCallsEngineEachTime(t *testing.T) {
+func TestDecisionCache_NoCacheCallsEngineEachTime(t *testing.T) {
 	snap := testSnapshot()
 	dec := &countingDecider{resp: engine.Response{Items: []engine.Item{{AdvertiserID: "adv1", Creative: &config.Creative{ID: "cr1"}}}}}
 	srv := newTestServer(t, snap, dec, nil) // 无缓存

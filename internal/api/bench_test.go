@@ -6,8 +6,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
-	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -75,7 +73,7 @@ func benchAPIServer(b *testing.B) (*Server, string) {
 		snap.Campaigns[campID] = &config.Campaign{
 			ID: campID, AdvertiserID: id, Status: "active", DailyBudget: 1e9,
 			TargetKPIValue: 1 + float64(i%5)*0.2,
-			BillingMode: "cpm", BiddingPrice: 15,
+			BillingMode:    "cpm", BiddingPrice: 15,
 			CreativeIDs: []string{"cr_" + id},
 		}
 		snap.CreativeCampaign["cr_"+id] = campID
@@ -100,25 +98,4 @@ func benchAPIServer(b *testing.B) (*Server, string) {
 	// 事件队列：不启动消费协程，队列满即丢弃（基准只测入队成本）
 	s.Queue = queue.NewMemory(8192, 500, 2*time.Second)
 	return s, apiKey
-}
-
-func benchmarkHTTPAdRequest(b *testing.B, count int) {
-	s, apiKey := benchAPIServer(b)
-	body := fmt.Sprintf(`{"style":"rewarded_video","deviceId":"dev_bench","count":%d}`, count)
-
-	b.ReportAllocs()
-	for b.Loop() {
-		r := httptest.NewRequest("POST", "/v1/ad/req", strings.NewReader(body))
-		r.Header.Set("X-Api-Key", apiKey)
-		w := httptest.NewRecorder()
-		s.handleAdRequest(w, r)
-		if w.Code != 200 {
-			b.Fatalf("status %d: %s", w.Code, w.Body.String())
-		}
-	}
-}
-
-func BenchmarkHTTPAdRequest_Single(b *testing.B) { benchmarkHTTPAdRequest(b, 1) }
-func BenchmarkHTTPAdRequest_Batch10(b *testing.B) {
-	benchmarkHTTPAdRequest(b, 10)
 }

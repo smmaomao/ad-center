@@ -205,15 +205,15 @@ func (s *Store) ListSlots(ctx context.Context) ([]*AdminSlot, error) {
 
 // AdminApp App 管理视图（密钥仅展示当前值，用于复制）。
 type AdminApp struct {
-	ID             string  `json:"id"`
-	Name           string  `json:"name"`
-	Status         string  `json:"status"`
-	CallbackURL    *string `json:"callback_url"`    // 业务后端 S2S 接收地址
-	AdWatchParams  *string `json:"ad_watch_params"` // 激励视频完播回传附加参数（JSON 对象，扩展用，如鉴权）
-	AddServerID    *string `json:"add_server_id"`   // app 服务端侧的应用 id（转发时作为 app_id）
-	SecretKey      string  `json:"secret_key"`      // S2S 签名密钥（支持重置）
-	APIKey         *string `json:"api_key"`         // API Key 明文（仅展示/交付；鉴权走 hash）
-	CreatedAt      *string `json:"created_at"`      // 创建日期（YYYY-MM-DD）
+	ID            string  `json:"id"`
+	Name          string  `json:"name"`
+	Status        string  `json:"status"`
+	CallbackURL   *string `json:"callback_url"`    // 业务后端 S2S 接收地址
+	AdWatchParams *string `json:"ad_watch_params"` // 激励视频完播回传附加参数（JSON 对象，扩展用，如鉴权）
+	AddServerID   *string `json:"add_server_id"`   // app 服务端侧的应用 id（转发时作为 app_id）
+	SecretKey     string  `json:"secret_key"`      // S2S 签名密钥（支持重置）
+	APIKey        *string `json:"api_key"`         // API Key 明文（仅展示/交付；鉴权走 hash）
+	CreatedAt     *string `json:"created_at"`      // 创建日期（YYYY-MM-DD）
 }
 
 // ListApps App 列表（已软删的不展示）。

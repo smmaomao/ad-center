@@ -307,6 +307,8 @@ func main() {
 		}
 	}
 	srv.Nonce = nonceStore
+	// S2S 转化幂等去重：复用同一个 *store.Store（已有连接池），无独立配置。
+	srv.Conversions = st
 
 	// 消费失败必须可见：Redis 后端不 ACK（留在 PEL 重试），此处负责打日志
 	go evtQueue.Run(ctx, func(ctx context.Context, batch []store.AdEvent) error {

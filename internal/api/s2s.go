@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -32,6 +33,13 @@ type ClickContext struct {
 // Server.Clicks 未注入（nil）时 S2S 仍只确认不扣费（兜底）。
 type ClickResolver interface {
 	Resolve(clickID string) (*ClickContext, bool)
+}
+
+// ConversionChecker 判断 (click_id, event_type) 是否已记过账（S2S 转化幂等去重）。
+// 用 DB 落地真相而非 Redis：即使 Redis 被清空也不漏判；归因平台重试是串行的，
+// 首笔落库后重试必命中。接口由 *store.Store 实现。
+type ConversionChecker interface {
+	ConversionExists(ctx context.Context, clickID, eventType string) (bool, error)
 }
 
 // handleS2SEvent 归因方 S2S 转化回调（同时支持 GET 与 POST，用户决定暂不加独立密钥）。
@@ -103,6 +111,22 @@ func (s *Server) handleS2SEvent(w http.ResponseWriter, r *http.Request) {
 			"currency", currency, "value", value)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
+	}
+
+	// 幂等闸门：同一 (click_id, event_type) 只扣一次费。归因平台超时重试 / 重放
+	// 会带同一个 clickid，命中即确认收到、不再扣费不记账。查不到（DB 异常）时
+	// fail-open 放行（宁可漏拦也不吞正常转化），重放风险由唯一约束兜底。
+	if s.Conversions != nil {
+		dup, derr := s.Conversions.ConversionExists(r.Context(), clickID, eventName)
+		if derr != nil {
+			s.Log.Warn("s2s dedup check failed", "clickid", clickID,
+				"event_name", eventName, "err", derr)
+		} else if dup {
+			s.Log.Info("s2s duplicate conversion skipped", "clickid", clickID,
+				"event_name", eventName)
+			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+			return
+		}
 	}
 
 	// 按点击登记时的广告主扣费（只有 billing_mode=cpa 且该事件有单价才扣）

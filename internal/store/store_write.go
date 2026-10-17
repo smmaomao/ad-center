@@ -196,6 +196,8 @@ func splitEvents(events []AdEvent) (internal, conv []AdEvent) {
 
 // buildInsertConversions 批量写 S2S 转化回传明细（落 ad_conversions，与内部投放
 // 事件审计表 ad_events 解耦）。revenue 为服务端确认扣费；currency/value 仅记录。
+// ON CONFLICT (click_id, event_type) DO NOTHING：与 000066 唯一约束配合，重复转化的
+// 重放（已在前置 ConversionExists 闸门拦下扣费）落库时静默跳过，不报错。
 func buildInsertConversions(events []AdEvent) (string, []any, bool) {
 	if len(events) == 0 {
 		return "", nil, false
@@ -216,6 +218,7 @@ func buildInsertConversions(events []AdEvent) (string, []any, bool) {
 			e.DeviceID, e.Style, e.EventType, e.Revenue, e.PixelID,
 			nilIfEmpty(e.Currency), floatOrNil(e.Value))
 	}
+	sb.WriteString(` ON CONFLICT (click_id, event_type) DO NOTHING`)
 	return sb.String(), args, true
 }
 

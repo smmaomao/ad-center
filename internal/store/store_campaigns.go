@@ -242,12 +242,12 @@ func (s *Store) SoftDeleteCampaign(ctx context.Context, id string) error {
 // CampaignRollup 按广告主 / 产品归集的 KPI 汇总。
 // 达成率口径与 adminAdvertiserCols 保持一致（target/actual、actual≤0 取 1、clamp[0.25,4]）。
 type CampaignRollup struct {
-	CampaignCount int     `json:"campaign_count"`
-	DailyBudget   float64 `json:"daily_budget"`         // 各 campaign 日预算之和
-	SpentToday    float64 `json:"spent_today"`          // 今日消耗之和
-	TargetKPIValue float64 `json:"target_kpi_value"`    // 按花费加权的目标 KPI 值
-	Achievement   float64 `json:"achievement"`          // 汇总达成率
-	GuaranteedMin float64 `json:"guaranteed_min_share"` // 旗下最大保量份额
+	CampaignCount  int     `json:"campaign_count"`
+	DailyBudget    float64 `json:"daily_budget"`         // 各 campaign 日预算之和
+	SpentToday     float64 `json:"spent_today"`          // 今日消耗之和
+	TargetKPIValue float64 `json:"target_kpi_value"`     // 按花费加权的目标 KPI 值
+	Achievement    float64 `json:"achievement"`          // 汇总达成率
+	GuaranteedMin  float64 `json:"guaranteed_min_share"` // 旗下最大保量份额
 }
 
 // RollupAdvertiserKPIs 广告主维度 KPI 汇总（旗下所有 campaign）。

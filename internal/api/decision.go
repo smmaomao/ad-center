@@ -11,80 +11,15 @@ import (
 
 	"adcenter/internal/config"
 	"adcenter/internal/engine"
-	"adcenter/internal/store"
 )
 
-// adRequest POST /v1/ad/req 请求体。
+// adRequest 下发决策请求体（resolveDecision 使用；旧 /v1/ad/req 已废弃）。
 type adRequest struct {
 	Style    string `json:"style"`    // 展现样式：splash / rewarded_video / interstitial / feed / banner
 	DeviceID string `json:"deviceId"` // 设备 ID（频控主体）
 	Country  string `json:"country,omitempty"`
 	Language string `json:"language,omitempty"`
 	Count    int    `json:"count,omitempty"` // 批量条数（默认 1，上限 20）
-}
-
-// handleAdRequest 广告决策：全内存路径（鉴权查快照 + 引擎纯计算），
-// 目标 <10ms（不含网络）。
-func (s *Server) handleAdRequest(w http.ResponseWriter, r *http.Request) {
-	app := s.authenticateApp(w, r)
-	if app == nil {
-		return
-	}
-	var req adRequest
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	if req.DeviceID == "" || req.Style == "" {
-		writeError(w, http.StatusBadRequest, "style and deviceId required")
-		return
-	}
-	if !engine.ValidStyle(req.Style) {
-		writeError(w, http.StatusBadRequest, "unknown style: "+req.Style)
-		return
-	}
-
-	snap := s.Cache.Snapshot()
-
-	now := time.Now()
-	resp := s.resolveDecision(r, snap, app, req, now)
-
-	// 素材下载地址：配 CDN 自定义域时为纯净公开 URL；未配则 R2 预签名 GET（直连私有桶兜底）/ html 直链。
-	// 纯内存 HMAC（微秒级），不触碰决策延迟预算；未配置 R2 时省略字段。
-	// 命中缓存时也需重算（预签名短时效，且 expire_at 已在 resolveDecision 用
-	// 当前时间重算）。
-	if s.Storage != nil {
-		for i := range resp.Items {
-			it := &resp.Items[i]
-			if it.Creative == nil {
-				continue
-			}
-			if it.Creative.MediaType == "html" {
-				it.MediaURL = it.Creative.StoragePath // html 存完整 URL，不签名
-			} else {
-				it.MediaURL = s.Storage.PresignGET(it.Creative.StoragePath, s.Storage.DefaultExpiry())
-				it.CreativeHash = contentHash(it.Creative.StoragePath)
-			}
-		}
-	}
-
-	// 记账：fill 只是"下发成功"日志（填充率指标），不产生收入——
-	// 收入/扣费只发生在真实计费事件到达时（impression/click/S2S 转化），
-	// 见客户端埋点（impression/click）与 handleS2SEvent。revenue 一律 0。
-	var advID string
-	if len(resp.Items) > 0 {
-		advID = resp.Items[0].AdvertiserID
-	}
-	s.Metrics.Record(app.ID, req.Style, advID, len(resp.Items), 0, now)
-	if len(resp.Items) > 0 {
-		for _, it := range resp.Items {
-			s.enqueueEvent(store.AdEvent{
-				AppID: app.ID, Style: req.Style, AdvertiserID: it.AdvertiserID,
-				CreativeID: it.Creative.ID, DeviceID: req.DeviceID,
-				Country: req.Country, EventType: "fill",
-			})
-		}
-	}
-	writeJSON(w, http.StatusOK, resp)
 }
 
 // resolveDecision 决策 + 结果缓存（Redis）。

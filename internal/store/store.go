@@ -269,3 +269,15 @@ func (s *Store) UpsertSetting(ctx context.Context, key string, value json.RawMes
 		key, value)
 	return err
 }
+
+// ConversionExists 判断 (click_id, event_type) 是否已记过账——S2S 转化幂等去重的
+// 依据。同一 clickid 的重放会命中，从而不再重复扣费。
+func (s *Store) ConversionExists(ctx context.Context, clickID, eventType string) (bool, error) {
+	var exists bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM ads_center.ad_conversions WHERE click_id=$1 AND event_type=$2)`,
+		clickID, eventType).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists, nil
+}

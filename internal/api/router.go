@@ -62,14 +62,13 @@ type Server struct {
 	Freq          frequency.Store     // 任务级频控（与引擎共用同一实例）
 	Bids          BidStore            // 下发交易上下文登记表（客户端接口 bid_id → 上下文，Redis/内存）
 	Nonce         NonceStore          // 一次性 nonce 发放/核销（完播回调防重放；nil = 未配置）
+	Conversions   ConversionChecker   // S2S 转化幂等去重查询（nil = 不查，等同旧行为）
 }
 
 // NewRouter 返回根路由（Go 1.26 方法路由），外层包了请求计时日志中间件。
 func (s *Server) NewRouter() http.Handler {
 	mux := http.NewServeMux()
 
-	// 客户端 API（X-Api-Key 鉴权）
-	mux.HandleFunc("POST /v1/ad/req", s.handleAdRequest)
 	// 客户端接口（docs/客户端接口.md 契约）：bid_id 串联下发→曝光→点击→完播
 	mux.HandleFunc("POST /v1/ad/list", s.handleAdList)
 	mux.HandleFunc("POST /v1/ad/impression", s.handleAdImpression)

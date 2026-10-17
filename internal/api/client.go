@@ -31,7 +31,7 @@ import (
 //	POST /v1/ad/click         点击埋点，返回 click_id（接口 3）
 //	POST /v1/ad/video-complete 激励视频播放完毕（接口 4）
 //
-// 与内部既有 /v1/ad/req、/v1/ad/event 不同：用 bid_id 串联
+// 与内部旧链路（已废弃的 /v1/ad/req、/v1/ad/event）不同：用 bid_id 串联
 // 「下发 → 曝光 → 点击 → 完播」，click_url 携带 {CLICK_ID} 占位符。
 // ============================================================
 

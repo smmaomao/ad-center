@@ -303,12 +303,12 @@ func (s *Server) handleCreateMenu(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Code       string  `json:"code"`
-		Label      string  `json:"label"`
-		Href       string  `json:"href"`
-		ParentCode string  `json:"parent_code"`
-		SortOrder  int     `json:"sort_order"`
-		Enabled    *bool   `json:"enabled"`
+		Code       string `json:"code"`
+		Label      string `json:"label"`
+		Href       string `json:"href"`
+		ParentCode string `json:"parent_code"`
+		SortOrder  int    `json:"sort_order"`
+		Enabled    *bool  `json:"enabled"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return

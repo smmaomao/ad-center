@@ -247,7 +247,10 @@ const getMe = cache(async (): Promise<MeResponse | null> => {
 
 export const getNavTree = cache(async (): Promise<NavNode[]> => {
   const me = await getMe();
-  if (!me || !me.menu || me.menu.length === 0) return FALLBACK_TREE;
+  // 只有 RPC 报错才回退（与上方注释一致）；用户被禁用 / 角色未授权任何菜单时返回
+  // 空树——绝不能回退到 FALLBACK_TREE，否则等于给无权限账号放行全部页面。
+  if (!me) return FALLBACK_TREE;
+  if (!me.menu || me.menu.length === 0) return [];
   return buildTree(me.menu);
 });
 

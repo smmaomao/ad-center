@@ -271,7 +271,7 @@ func (s *Server) handleCreateCreative(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fields := map[string]any{
-		"name": req.Name,
+		"name":       req.Name,
 		"media_type": req.MediaType, "storage_path": req.StoragePath,
 		"file_size_bytes": req.FileSizeBytes, "updated_by": actor,
 	}
