@@ -69,7 +69,7 @@ func (s *Server) handleAdRequest(w http.ResponseWriter, r *http.Request) {
 
 	// 记账：fill 只是"下发成功"日志（填充率指标），不产生收入——
 	// 收入/扣费只发生在真实计费事件到达时（impression/click/S2S 转化），
-	// 见 handleAdEvent 与 handleS2SEvent。revenue 一律 0。
+	// 见客户端埋点（impression/click）与 handleS2SEvent。revenue 一律 0。
 	var advID string
 	if len(resp.Items) > 0 {
 		advID = resp.Items[0].AdvertiserID
@@ -172,80 +172,4 @@ func decisionCacheKey(appID, style string, req adRequest) string {
 	h.Write([]byte{0})
 	h.Write([]byte(strconv.Itoa(c)))
 	return "decision:" + hex.EncodeToString(h.Sum(nil))
-}
-
-// adEvent POST /v1/ad/event 请求体。
-// 仅 impression / click（转化走 S2S）。金额由服务端按计费配置计算，
-// 不接受客户端上报 revenue（防伪造刷量）。
-type adEvent struct {
-	Event        string `json:"event"` // impression / click
-	Style        string `json:"style"`
-	DeviceID     string `json:"deviceId"`
-	AdvertiserID string `json:"advertiserId,omitempty"`
-	CreativeID   string `json:"creativeId,omitempty"`
-}
-
-// handleAdEvent 客户端事件回执：记录 + 指标 + 按计费方式扣费。
-//
-// 客户端只回执两类事件：impression（真播了）/ click（被点了）。
-// 转化（安装/激活/注册/首充）由归因方（Adjust 等）或广告主服务器通过 S2S
-// postback 通知，走 GET /v1/s2s/event——客户端自报转化可被刷量（伪造 install
-// 虚增广告主消耗），且归因方也无法持有 App 的 API Key。
-//
-// 扣费锚点（migration 000008，由广告主 billing_mode 决定）：
-//
-//	cpm → impression 到达即扣 BiddingPrice/1000（真实曝光才花钱）
-//	cpc → click 到达即扣 BiddingPrice
-//	cpa → 这两个事件只是过程指标，不扣费（钱在 S2S 转化到达时扣）
-//
-// 金额以服务端配置为准，不接受客户端上报的 revenue（防伪造）。
-func (s *Server) handleAdEvent(w http.ResponseWriter, r *http.Request) {
-	app := s.authenticateApp(w, r)
-	if app == nil {
-		return
-	}
-	var req adEvent
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	switch req.Event {
-	case "impression", "click":
-	default:
-		writeError(w, http.StatusBadRequest,
-			"event must be impression/click (conversion goes through S2S postback)")
-		return
-	}
-
-	snap := s.Cache.Snapshot()
-
-	now := time.Now()
-	// 按计费方式确认扣费；余额不足时事件照记（真实曝光/点击已发生），本次不扣——
-	// 接受少量在途超发，req 路径的只读闸会在 spent >= budget 后停止下发。
-	var charged float64
-	// 计费执行粒度 = campaign：出价 / 计费方式 / CPA 单价均在任务级，广告主只做钱包。
-	// 未挂到任何 campaign 的素材不扣费（也不参与预算封顶）。
-	if campID, ok := snap.CreativeCampaign[req.CreativeID]; ok && campID != "" {
-		if camp := snap.Campaigns[campID]; camp != nil {
-			if amt, ok := camp.BillingAmount(req.Event); ok {
-				// campaign 日预算闸 + 广告主总钱包闸：任一不足即不扣费
-				if s.Budget.TryDeduct(campID, amt) && s.Budget.WalletDeduct(req.AdvertiserID, amt) {
-					charged = amt
-				}
-			}
-		}
-	}
-	s.Metrics.RecordEvent(app.ID, req.Style, req.AdvertiserID, req.Event, charged, now)
-	s.enqueueEvent(store.AdEvent{
-		AppID: app.ID, Style: req.Style, AdvertiserID: req.AdvertiserID,
-		CreativeID: req.CreativeID, DeviceID: req.DeviceID,
-		EventType: req.Event, Revenue: charged, // revenue = 实际扣费（服务端算），不是客户端上报
-	})
-
-	// 任务级频控：仅在真实观看（impression）时累加计数（详见 client.go 的
-	// recordCampaignImpression，二者共用同一逻辑，避免重复实现）。
-	if req.Event == "impression" {
-		s.recordCampaignImpression(snap, app.ID, req.CreativeID, "", req.DeviceID, now)
-	}
-
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

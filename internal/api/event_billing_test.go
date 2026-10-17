@@ -4,11 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"log/slog"
 	"math"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -81,101 +79,6 @@ func billTestServer(t *testing.T, campID string, camp *config.Campaign, balances
 }
 
 func near(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
-
-func postEvent(t *testing.T, s *Server, apiKey, body string) int {
-	t.Helper()
-	r := httptest.NewRequest("POST", "/v1/ad/event", strings.NewReader(body))
-	r.Header.Set("X-Api-Key", apiKey)
-	w := httptest.NewRecorder()
-	s.handleAdEvent(w, r)
-	return w.Code
-}
-
-const testAPIKey = "adc_test_0000000000000000000000000001"
-
-func TestEvent_CPM_impression扣费_click不扣(t *testing.T) {
-	camp := &config.Campaign{BillingMode: "cpm", BiddingPrice: 5.0} // CPM $5 → 每次曝光 $0.005
-	s := billTestServer(t, "a1", camp, map[string][2]float64{"a1": {100, 0}})
-
-	if code := postEvent(t, s, testAPIKey,
-		`{"event":"impression","style":"rewarded_video","deviceId":"d1","advertiserId":"a1","creativeId":"cr_t"}`); code != 200 {
-		t.Fatalf("impression 应 200，实际 %d", code)
-	}
-	spent, _ := s.Budget.Stats("a1")
-	if !near(spent, 0.005) {
-		t.Fatalf("cpm impression 应扣 5/1000=0.005，实际 %v", spent)
-	}
-	// click 不是 cpm 的计费事件 → 不扣
-	if code := postEvent(t, s, testAPIKey,
-		`{"event":"click","style":"rewarded_video","deviceId":"d1","advertiserId":"a1","creativeId":"cr_t"}`); code != 200 {
-		t.Fatalf("click 应 200，实际 %d", code)
-	}
-	if spent, _ := s.Budget.Stats("a1"); !near(spent, 0.005) {
-		t.Fatalf("cpm 任务 click 不应扣费，实际 %v", spent)
-	}
-}
-
-func TestEvent_CPC_click扣费_impression不扣(t *testing.T) {
-	camp := &config.Campaign{BillingMode: "cpc", BiddingPrice: 0.3}
-	s := billTestServer(t, "a2", camp, map[string][2]float64{"a2": {100, 0}})
-
-	if code := postEvent(t, s, testAPIKey,
-		`{"event":"impression","style":"rewarded_video","deviceId":"d1","advertiserId":"a2","creativeId":"cr_t"}`); code != 200 {
-		t.Fatal("impression 应 200")
-	}
-	if spent, _ := s.Budget.Stats("a2"); !near(spent, 0) {
-		t.Fatalf("cpc 任务 impression 不应扣费，实际 %v", spent)
-	}
-	if code := postEvent(t, s, testAPIKey,
-		`{"event":"click","style":"rewarded_video","deviceId":"d1","advertiserId":"a2","creativeId":"cr_t"}`); code != 200 {
-		t.Fatal("click 应 200")
-	}
-	if spent, _ := s.Budget.Stats("a2"); !near(spent, 0.3) {
-		t.Fatalf("cpc click 应扣 0.3，实际 %v", spent)
-	}
-}
-
-func TestEvent_CPA任务客户端事件不扣费(t *testing.T) {
-	camp := &config.Campaign{BillingMode: "cpa-activate", BiddingPrice: 1.0}
-	s := billTestServer(t, "a3", camp, map[string][2]float64{"a3": {100, 0}})
-
-	for _, evt := range []string{"impression", "click"} {
-		body := fmt.Sprintf(`{"event":%q,"style":"rewarded_video","deviceId":"d1","advertiserId":"a3","creativeId":"cr_t"}`, evt)
-		if code := postEvent(t, s, testAPIKey, body); code != 200 {
-			t.Fatalf("%s 应 200，实际 %d", evt, code)
-		}
-	}
-	if spent, _ := s.Budget.Stats("a3"); !near(spent, 0) {
-		t.Fatalf("cpa 任务客户端事件不应扣费（等 S2S 转化），实际 %v", spent)
-	}
-}
-
-func TestEvent_客户端conversion被拒(t *testing.T) {
-	camp := &config.Campaign{BillingMode: "cpa-activate", BiddingPrice: 1.0}
-	s := billTestServer(t, "a4", camp, map[string][2]float64{"a4": {100, 0}})
-
-	code := postEvent(t, s, testAPIKey,
-		`{"event":"conversion","style":"rewarded_video","deviceId":"d1","advertiserId":"a4"}`)
-	if code != 400 {
-		t.Fatalf("客户端上报 conversion 应 400（走 S2S），实际 %d", code)
-	}
-	if spent, _ := s.Budget.Stats("a4"); !near(spent, 0) {
-		t.Fatalf("被拒的 conversion 不应扣费，实际 %v", spent)
-	}
-}
-
-func TestEvent_余额不足_事件照记不扣费(t *testing.T) {
-	camp := &config.Campaign{BillingMode: "cpm", BiddingPrice: 1000.0}        // 单次曝光 $1
-	s := billTestServer(t, "a5", camp, map[string][2]float64{"a5": {10, 10}}) // 已花完
-
-	if code := postEvent(t, s, testAPIKey,
-		`{"event":"impression","style":"rewarded_video","deviceId":"d1","advertiserId":"a5","creativeId":"cr_t"}`); code != 200 {
-		t.Fatal("预算耗尽后真实曝光事件仍应 200（已发生，只是不扣）")
-	}
-	if spent, _ := s.Budget.Stats("a5"); !near(spent, 10) {
-		t.Fatalf("余额不足不应扣费，spent 保持 10，实际 %v", spent)
-	}
-}
 
 func s2sGet(t *testing.T, s *Server, query string) int {
 	t.Helper()

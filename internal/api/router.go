@@ -70,7 +70,6 @@ func (s *Server) NewRouter() http.Handler {
 
 	// 客户端 API（X-Api-Key 鉴权）
 	mux.HandleFunc("POST /v1/ad/req", s.handleAdRequest)
-	mux.HandleFunc("POST /v1/ad/event", s.handleAdEvent)
 	// 客户端接口（docs/客户端接口.md 契约）：bid_id 串联下发→曝光→点击→完播
 	mux.HandleFunc("POST /v1/ad/list", s.handleAdList)
 	mux.HandleFunc("POST /v1/ad/impression", s.handleAdImpression)
