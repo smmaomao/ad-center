@@ -59,11 +59,14 @@ type BidStore interface {
 	Put(ctx context.Context, c *BidContext) string
 	// Get 反查下发上下文；过期或不存在返回 false。
 	Get(ctx context.Context, id string) (*BidContext, bool)
+	// Consume 原子标记某 bid 的某事件类型已被处理：首次返回 true（可计费/归因），
+	// 重复返回 false（重放，调用方跳过计费与归因副作用）。用于防止 bid_id 重放重复报账。
+	Consume(ctx context.Context, bidID, eventType string) (bool, error)
 }
 
 // NewMemBidStore 构造进程内下发上下文登记表（默认 30 分钟 TTL），用于无 Redis 环境。
 func NewMemBidStore() BidStore {
-	return &memBidStore{m: map[string]*BidContext{}, ttl: 30 * time.Minute}
+	return &memBidStore{m: map[string]*BidContext{}, consumed: map[string]map[string]bool{}, ttl: 30 * time.Minute}
 }
 
 // NewRedisBidStore 从 REDIS_URL 构造 Redis 下发上下文登记表（TTL 默认 30 分钟）。
@@ -83,9 +86,10 @@ func NewRedisBidStore(redisURL string, ttl time.Duration) (*redisBidStore, error
 
 // memBidStore 进程内 bid_id → 上下文 映射（带 TTL）。
 type memBidStore struct {
-	mu  sync.Mutex
-	m   map[string]*BidContext
-	ttl time.Duration
+	mu       sync.Mutex
+	m        map[string]*BidContext
+	consumed map[string]map[string]bool // bid_id → 已消费事件类型集合（防重放报账）
+	ttl      time.Duration
 }
 
 func (r *memBidStore) Put(ctx context.Context, c *BidContext) string {
@@ -106,9 +110,24 @@ func (r *memBidStore) Get(ctx context.Context, id string) (*BidContext, bool) {
 	}
 	if time.Now().After(c.ExpiresAt) {
 		delete(r.m, id)
+		delete(r.consumed, id)
 		return nil, false
 	}
 	return c, true
+}
+
+// Consume 标记某 bid 的某事件类型已处理，重复调用返回 false（重放）。
+func (r *memBidStore) Consume(_ context.Context, bidID, eventType string) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.consumed[bidID] == nil {
+		r.consumed[bidID] = map[string]bool{}
+	}
+	if r.consumed[bidID][eventType] {
+		return false, nil
+	}
+	r.consumed[bidID][eventType] = true
+	return true, nil
 }
 
 // redisBidStore Redis 版下发上下文登记表，跨实例共享且重启不丢。
@@ -141,6 +160,21 @@ func (r *redisBidStore) Get(ctx context.Context, id string) (*BidContext, bool) 
 		return nil, false
 	}
 	return &c, true
+}
+
+// Consume 标记某 bid 的某事件类型已处理：用 Redis SET 的 SADD 原子性，仅首次
+// 返回 true（可计费/归因），重复返回 false（重放）。事件集合键 TTL 与 bid 一致。
+func (r *redisBidStore) Consume(ctx context.Context, bidID, eventType string) (bool, error) {
+	key := r.prefix + "events:" + bidID
+	n, err := r.client.SAdd(ctx, key, eventType).Result()
+	if err != nil {
+		return false, err // 调用方按 fail-open 处理（放行），避免漏扣正常事件
+	}
+	if n == 1 {
+		_ = r.client.Expire(ctx, key, r.ttl).Err()
+		return true, nil
+	}
+	return false, nil
 }
 
 // 编译期接口实现检查。
@@ -507,6 +541,19 @@ func (s *Server) handleAdImpression(w http.ResponseWriter, r *http.Request) {
 	if req.CreativeID != "" && req.CreativeID != bid.CreativeID {
 		writeError(w, http.StatusBadRequest, "creative_id mismatch")
 		return
+	}
+	// 幂等：同一 bid 的同一事件类型只计费一次，防止客户端/网络重放重复报账。
+	if s.Bids != nil {
+		first, derr := s.Bids.Consume(r.Context(), req.BidID, "impression")
+		if derr != nil {
+			s.Log.Warn("bid dedup check failed", "bid_id", req.BidID, "event", "impression", "err", derr)
+			first = true // fail-open：放行，避免漏扣正常曝光
+		}
+		if !first {
+			s.Log.Info("duplicate client event skipped", "bid_id", req.BidID, "event", "impression")
+			writeJSON(w, http.StatusOK, map[string]any{"code": 200, "msg": "success", "deduped": true})
+			return
+		}
 	}
 	charged := s.chargeClientEvent(app, bid.AdvertiserID, bid.CreativeID, bid.CampaignID, bid.Style, bid.DeviceID, "impression", time.Now())
 	s.Log.Info("ad impression",

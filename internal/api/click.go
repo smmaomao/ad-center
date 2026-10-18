@@ -69,6 +69,20 @@ func (s *Server) handleAdClick(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "creative_id mismatch")
 		return
 	}
+	// 幂等：同一 bid 的 click 只处理一次（生成 click_id + 归因 + 计费），防止重放
+	// 重复报账、并避免每次重放都生成新 click_id 污染转化归因。
+	if s.Bids != nil {
+		first, derr := s.Bids.Consume(r.Context(), req.BidID, "click")
+		if derr != nil {
+			s.Log.Warn("bid dedup check failed", "bid_id", req.BidID, "event", "click", "err", derr)
+			first = true // fail-open：放行，避免漏扣正常点击
+		}
+		if !first {
+			s.Log.Info("duplicate client event skipped", "bid_id", req.BidID, "event", "click")
+			writeJSON(w, http.StatusOK, map[string]any{"code": 200, "msg": "success", "deduped": true})
+			return
+		}
+	}
 
 	clickID, err := newClickID()
 	if err != nil {
