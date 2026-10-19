@@ -12,6 +12,7 @@ package queue
 
 import (
 	"context"
+	"log/slog"
 	"sync/atomic"
 	"time"
 
@@ -56,6 +57,8 @@ type Memory struct {
 	failed    atomic.Int64
 	batchSize int
 	interval  time.Duration
+
+	lastDropWarn atomic.Int64 // #9 入队失败告警节流（避免故障时日志洪水）
 }
 
 // NewMemory 创建进程内队列。size=缓冲容量，batchSize=落库批量，interval=攒批超时。
@@ -72,6 +75,23 @@ func (m *Memory) Publish(e store.AdEvent) {
 	case m.ch <- e:
 	default:
 		m.dropped.Add(1) // 队列满：丢弃并计数（决策路径绝不阻塞）
+		// #9 丢弃必须可见：事件永久丢失（落库/计费缺失），节流告警。
+		warnThrottled(&m.lastDropWarn, 30*time.Second,
+			"event queue full: 事件被丢弃（落库/计费缺失），需按 ad_events 补账",
+			"dropped_total", m.dropped.Load())
+	}
+}
+
+// warnThrottled 节流告警：同类故障每 interval 最多打一条日志，
+// 避免队列持续故障时日志洪水刷爆（入队在决策热路径，每请求都可能触发）。
+func warnThrottled(last *atomic.Int64, interval time.Duration, msg string, args ...any) {
+	now := time.Now().UnixNano()
+	prev := last.Load()
+	if prev != 0 && now-prev < int64(interval) {
+		return
+	}
+	if last.CompareAndSwap(prev, now) {
+		slog.Default().Warn(msg, args...)
 	}
 }
 

@@ -2,10 +2,12 @@ package budget
 
 import (
 	"context"
+	"log/slog"
 	"math"
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -45,6 +47,15 @@ type Redis struct {
 	walletMu    sync.RWMutex
 	walletCache map[string]walletCacheEntry
 	walletTTL   time.Duration
+
+	// #7 扣费/预算查询失败的可观测性：Redis 故障时 TryDeduct 返回 false（不扣钱）、
+	// Stats 返回 (0,0)（引擎闸 budget>0 不成立 → 放行），两者都导致「广告照投、
+	// 钱收不到」的免费投放。fail-open 语义按决策保留，但故障必须可见：计数 +
+	// 节流 WARN，便于事后按 ad_events 明细补账。
+	deductFailed   atomic.Int64
+	statsFailed    atomic.Int64
+	lastDeductWarn atomic.Int64
+	lastStatsWarn  atomic.Int64
 }
 
 type walletCacheEntry struct {
@@ -207,7 +218,14 @@ func (r *Redis) TryDeduct(advertiserID string, amount float64) bool {
 		[]string{r.key(advertiserID), r.dayKey(), r.idsKey()},
 		r.today(), r.prefix+"{bud}:", formatFloat(amount)).Result()
 	if err != nil {
-		return false // fail-open：扣费失败 = 不扣钱，事件照常确认
+		// fail-open：扣费失败 = 不扣钱，事件照常确认（等于免费投放）。
+		// #7：保留该语义，但必须可见——计数 + 节流 WARN，供事后按 ad_events 补账。
+		r.deductFailed.Add(1)
+		warnThrottled(&r.lastDeductWarn, 30*time.Second,
+			"budget deduct failed: Redis 故障导致未扣费（免费投放），需按 ad_events 补账",
+			"advertiser_id", advertiserID, "amount", amount,
+			"deduct_failed_total", r.deductFailed.Load(), "err", err)
+		return false
 	}
 	ok, resets := parseDeductResult(res)
 	r.emitResets(resets)
@@ -222,7 +240,14 @@ func (r *Redis) Stats(advertiserID string) (spent, budget float64) {
 		[]string{r.key(advertiserID), r.dayKey(), r.idsKey()},
 		r.today(), r.prefix+"{bud}:").Result()
 	if err != nil {
-		return 0, 0 // fail-open：未知/失败视同无预算数据（engine 只读闸放行）
+		// fail-open：未知/失败视同无预算数据（engine 只读闸 budget>0 才停投 → 放行）。
+		// #7：保留该语义，但这是另一条免费投放路径，必须可见。
+		r.statsFailed.Add(1)
+		warnThrottled(&r.lastStatsWarn, 30*time.Second,
+			"budget stats failed: Redis 故障导致预算闸放行（免费投放）",
+			"advertiser_id", advertiserID,
+			"stats_failed_total", r.statsFailed.Load(), "err", err)
+		return 0, 0
 	}
 	arr, ok := res.([]interface{})
 	if !ok || len(arr) == 0 {
@@ -280,6 +305,25 @@ func (r *Redis) emitResets(resets []resetEntry) {
 	}
 	for _, e := range resets {
 		r.ledger(e.id, "daily_reset", e.amount)
+	}
+}
+
+// Failures 返回扣费 / 预算查询的累计失败次数（#7 可观测性：Redis 故障 → 免费投放）。
+// fail-open 语义不变，仅让故障可见；供健康检查 / 监控接入，以及事后按 ad_events 补账。
+func (r *Redis) Failures() (deduct, stats int64) {
+	return r.deductFailed.Load(), r.statsFailed.Load()
+}
+
+// warnThrottled 节流告警：同类故障每 interval 最多打一条日志，避免 Redis 故障时
+// 日志洪水刷爆（决策路径每请求都会触发扣费/查询）。
+func warnThrottled(last *atomic.Int64, interval time.Duration, msg string, args ...any) {
+	now := time.Now().UnixNano()
+	prev := last.Load()
+	if prev != 0 && now-prev < int64(interval) {
+		return
+	}
+	if last.CompareAndSwap(prev, now) {
+		slog.Default().Warn(msg, args...)
 	}
 }
 

@@ -49,6 +49,8 @@ type Redis struct {
 	buf     []store.AdEvent // 生产端攒批
 	dropped atomic.Int64    // 入队失败
 	failed  atomic.Int64    // 消费处理失败
+
+	lastDropWarn atomic.Int64 // #9 入队失败告警节流（避免故障时日志洪水）
 }
 
 // NewRedis 构造 Streams 队列（必要时创建 group）。
@@ -126,6 +128,11 @@ func (r *Redis) flush(ctx context.Context) error {
 	}
 	if _, err := pipe.Exec(ctx); err != nil {
 		r.dropped.Add(int64(len(batch)))
+		// #9 入队失败必须可见：整批事件被静默丢弃（落库/计费都没了）。
+		// 节流 WARN 保证故障时能被发现，而非只体现在 Stats 计数里。
+		warnThrottled(&r.lastDropWarn, 30*time.Second,
+			"event queue flush failed: 整批事件丢弃（落库/计费缺失），需按 ad_events 补账",
+			"n", len(batch), "dropped_total", r.dropped.Load(), "err", err)
 		return err
 	}
 	return nil

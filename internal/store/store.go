@@ -108,6 +108,10 @@ func (s *Store) LoadSnapshot(ctx context.Context) (*config.Snapshot, error) {
 	}
 	rows.Close()
 
+	// ad_slots：三个 freq_* 列是**生效中的频控配置**，由 frequency.SlotPolicy 消费
+	// （广告位级最小展示间隔 / 24h 滑动日上限 / 疲劳窗口），改了会真实影响投放。
+	// 注意：本表不参与引擎的广告选择与排序（internal/engine 无引用），其附属的
+	// fill_priorities（Slot.Priorities）当前亦未被引擎消费 —— 属"已配置未启用"。
 	rows, err = s.pool.Query(ctx, `
 		SELECT id::text, app_code::text, slot_key, name, type, status,
 		       freq_daily_limit, freq_interval_minutes, freq_fatigue_window

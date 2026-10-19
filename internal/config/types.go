@@ -89,16 +89,27 @@ func clampAchievement(r float64) float64 {
 
 // Slot 广告位（归属 App，客户端以 slot_key 引用）。
 type Slot struct {
-	ID                  string         `json:"id"`
-	AppID               string         `json:"app_code"`
-	Key                 string         `json:"key"` // slot_key，客户端稳定标识
-	Name                string         `json:"name"`
-	Type                string         `json:"type"` // rewarded_video / splash / interstitial / feed
-	Status              string         `json:"status"`
-	FreqDailyLimit      int            `json:"freq_daily_limit"`      // 滑动 24h
-	FreqIntervalMinutes int            `json:"freq_interval_minutes"` // 最小展示间隔
-	FreqFatigueWindow   int            `json:"freq_fatigue_window"`   // 连续 N 次不重复
-	Priorities          []FillPriority `json:"priorities"`            // 仅 enabled，position 升序
+	ID     string `json:"id"`
+	AppID  string `json:"app_code"`
+	Key    string `json:"key"` // slot_key，客户端稳定标识
+	Name   string `json:"name"`
+	Type   string `json:"type"` // rewarded_video / splash / interstitial / feed
+	Status string `json:"status"`
+
+	// 以下三个 Freq* 字段是**生效中的配置**：由 frequency 包的 SlotPolicy 消费，
+	// 构成广告位级频控（最小展示间隔 / 24h 滑动日上限 / 疲劳窗口 N 次不重复）。
+	// 见 internal/frequency/frequency.go 与频控实现的 CheckAndIncr（按 slotID 判定）。
+	FreqDailyLimit      int `json:"freq_daily_limit"`      // 滑动 24h
+	FreqIntervalMinutes int `json:"freq_interval_minutes"` // 最小展示间隔
+	FreqFatigueWindow   int `json:"freq_fatigue_window"`   // 连续 N 次不重复
+
+	// Priorities 填充来源优先级（来自 fill_priorities 表，仅 enabled，position 升序）。
+	//
+	// ⚠️ 当前**未被引擎消费**：internal/engine 全量检索无任何 Slots/Priorities 引用，
+	// 实际投放排序与填充走竞价/权重逻辑，改 guaranteed_share / weight 不会影响线上
+	// 效果。保留字段与管理端入口是给未来"保量投放"预留——**当前等同未启用**，
+	// 勿据此调整投放预期（与"slot 是死功能"的说法不同：频控部分是真的在生效）。
+	Priorities []FillPriority `json:"priorities"`
 }
 
 // Active 报告广告位是否可服务。
