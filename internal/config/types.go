@@ -1,7 +1,7 @@
 // Package config 提供配置缓存：启动全量加载广告主/广告位/素材到内存，
 // 通过 Postgres LISTEN/NOTIFY 秒级热更新，60s 定时对账防通知丢失。
 //
-// 域模型（App/Advertiser/Slot/Creative）定义在此包——它们就是"被缓存的配置"；
+// 域模型（App/Advertiser/Creative）定义在此包——它们就是"被缓存的配置"；
 // store 依赖本包加载，engine 依赖本包读取快照，无环。
 package config
 
@@ -85,50 +85,6 @@ func clampAchievement(r float64) float64 {
 		return maxAchievement
 	}
 	return r
-}
-
-// Slot 广告位（归属 App，客户端以 slot_key 引用）。
-type Slot struct {
-	ID     string `json:"id"`
-	AppID  string `json:"app_code"`
-	Key    string `json:"key"` // slot_key，客户端稳定标识
-	Name   string `json:"name"`
-	Type   string `json:"type"` // rewarded_video / splash / interstitial / feed
-	Status string `json:"status"`
-
-	// ⚠️ ad_slots 整表已是**废弃遗留配置**，以下 Freq* 字段当前无人消费。
-	//
-	// 真正生效的频控配置在 campaigns 表：engine.go 用 camp.FreqIntervalMinute /
-	// FreqFatigueWindow / FreqDailyLimit 构造 frequency.AdvPolicy，再调 CheckAndIncr。
-	// 而唯一吃 SlotPolicy 的 CheckSlot/RecordSlot 在生产代码中**没有任何调用点**
-	// （仅存在于 frequency 自身测试与 engine/api 的测试替身），也没有任何生产代码
-	// 构造 SlotPolicy——故这里的 freq_* 永远不会转成可执行策略。
-	FreqDailyLimit      int `json:"freq_daily_limit"`      // 已废弃：未在链路中使用
-	FreqIntervalMinutes int `json:"freq_interval_minutes"` // 已废弃：未在链路中使用
-	FreqFatigueWindow   int `json:"freq_fatigue_window"`   // 已废弃：未在链路中使用
-
-	// Priorities 填充来源优先级（来自 fill_priorities 表，仅 enabled，position 升序）。
-	//
-	// ⚠️ 同样未被引擎消费：internal/engine 无任何 Slots/Priorities 引用，实际投放
-	// 排序与填充走竞价/权重逻辑，改 guaranteed_share / weight 不影响线上效果。
-	// ad_slots + fill_priorities 整体为遗产配置，保留仅为兼容历史数据与管理端页面。
-	Priorities []FillPriority `json:"priorities"`
-}
-
-// 注意：ad_slots / fill_priorities 已确认废弃（详见 Slot 注释）。
-// 配置快照不再加载这两张表（见 store.LoadSnapshot）；真正生效的频控在 campaigns。
-
-// Active 报告广告位是否可服务。
-func (s *Slot) Active() bool { return s.Status == "active" }
-
-// FillPriority 填充来源条目。
-type FillPriority struct {
-	ID              string  `json:"id"`
-	SourceType      string  `json:"source_type"` // advertiser / max / fallback
-	AdvertiserID    string  `json:"advertiser_id,omitempty"`
-	ExpectedECPM    float64 `json:"expected_ecpm"`
-	GuaranteedShare float64 `json:"guaranteed_share"` // [0,1]
-	Weight          float64 `json:"weight"`
 }
 
 // Creative 素材（纯资产：尺寸 / 时长 / 样式 / 定向；商业与策略在 campaign 维度）。
@@ -296,8 +252,6 @@ type Snapshot struct {
 	Apps                  map[string]*App        // app_code → App
 	AppByKeyHash          map[string]*App        // api_key_hash → App
 	Advertisers           map[string]*Advertiser // advertiser_id → Advertiser
-	Slots                 map[string]*Slot       // slot_code → Slot
-	SlotsByKey            map[string]*Slot       // slot_key → Slot
 	CreativesByAdvertiser map[string][]*Creative // advertiser_id → 活跃素材（保留：素材管理/诊断；投放候选不再按广告主遍历）
 	CreativesByID         map[string]*Creative   // creative_id → Creative（投放候选按 ID 命中任务 creative_ids）
 	Campaigns             map[string]*Campaign   // campaign_id → Campaign（预算闸执行粒度）

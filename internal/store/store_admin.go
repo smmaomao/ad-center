@@ -156,53 +156,6 @@ func (s *Store) SoftDeleteAdvertiser(ctx context.Context, id string) error {
 	return nil
 }
 
-// AdminSlot 广告位管理视图。
-type AdminSlot struct {
-	ID                  string `json:"id"`
-	AppID               string `json:"app_code"`
-	AppName             string `json:"app_name"`
-	Key                 string `json:"key"`
-	Name                string `json:"name"`
-	Type                string `json:"type"`
-	Status              string `json:"status"`
-	FreqDailyLimit      int    `json:"freq_daily_limit"`
-	FreqIntervalMinutes int    `json:"freq_interval_minutes"`
-	FreqFatigueWindow   int    `json:"freq_fatigue_window"`
-	FillCount           int    `json:"fill_count"` // 启用的填充来源数
-	AIAgentEnabled      bool   `json:"ai_agent_enabled"`
-	AIAgentGoal         string `json:"ai_agent_goal"`
-}
-
-const slotCols = `
-	s.id::text, s.app_code::text, a.name, s.slot_key, s.name, s.type, s.status,
-	s.freq_daily_limit, s.freq_interval_minutes, s.freq_fatigue_window, %s
-	s.ai_agent_enabled, s.ai_agent_goal`
-
-// ListSlots 广告位列表（带 App 名与填充来源计数）。
-func (s *Store) ListSlots(ctx context.Context) ([]*AdminSlot, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT `+fmt.Sprintf(slotCols, `
-		       (SELECT count(*) FROM fill_priorities f WHERE f.slot_code = s.id AND f.enabled),`)+`
-		FROM ad_slots s JOIN apps a ON a.code = s.app_code
-		WHERE s.deleted_at IS NULL
-		ORDER BY a.name, s.created_at`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []*AdminSlot
-	for rows.Next() {
-		sl := &AdminSlot{}
-		if err := rows.Scan(&sl.ID, &sl.AppID, &sl.AppName, &sl.Key, &sl.Name, &sl.Type, &sl.Status,
-			&sl.FreqDailyLimit, &sl.FreqIntervalMinutes, &sl.FreqFatigueWindow, &sl.FillCount,
-			&sl.AIAgentEnabled, &sl.AIAgentGoal); err != nil {
-			return nil, err
-		}
-		out = append(out, sl)
-	}
-	return out, rows.Err()
-}
-
 // AdminApp App 管理视图（密钥仅展示当前值，用于复制）。
 type AdminApp struct {
 	ID            string  `json:"id"`

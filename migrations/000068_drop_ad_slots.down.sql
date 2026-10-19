@@ -1,0 +1,1 @@
+-- 不可逆转：ad_slots / fill_priorities 已被删除，此迁移不提供回滚。

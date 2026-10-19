@@ -16,10 +16,6 @@ import (
 
 type benchFreq struct{}
 
-func (benchFreq) CheckSlot(string, string, string, frequency.SlotPolicy, int, time.Time) bool {
-	return true
-}
-func (benchFreq) RecordSlot(string, string, string, int, time.Time) {}
 func (benchFreq) CheckAndIncr(string, string, string, string, frequency.AdvPolicy, time.Time) bool {
 	return true
 }

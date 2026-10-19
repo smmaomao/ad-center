@@ -74,15 +74,12 @@ func testSnapshot() *config.Snapshot {
 	sum := sha256.Sum256([]byte(key))
 	hash := hex.EncodeToString(sum[:])
 	app := &config.App{ID: "app1", Status: "active"}
-	slot := &config.Slot{ID: "slot1", AppID: "app1", Key: "test_slot", Status: "active"}
 	return &config.Snapshot{
 		Apps:                  map[string]*config.App{"app1": app},
 		AppByKeyHash:          map[string]*config.App{hash: app},
 		Advertisers:           map[string]*config.Advertiser{"adv1": {ID: "adv1", Name: "A"}},
 		Campaigns:             map[string]*config.Campaign{"cmp1": {ID: "cmp1", Status: "active", DeliverTTLMinutes: 7, CreativeIDs: []string{"cr1"}}},
 		CreativeCampaign:      map[string]string{"cr1": "cmp1"},
-		Slots:                 map[string]*config.Slot{"slot1": slot},
-		SlotsByKey:            map[string]*config.Slot{"test_slot": slot},
 		CreativesByAdvertiser: map[string][]*config.Creative{},
 		CreativesByID:         map[string]*config.Creative{"cr1": {ID: "cr1", Status: "active", Styles: []string{"rewarded_video"}}},
 		Settings:              map[string]json.RawMessage{},

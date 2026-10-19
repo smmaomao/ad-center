@@ -39,51 +39,6 @@ func NewMemory(maxWindow time.Duration) *MemoryStore {
 	}
 }
 
-func (m *MemoryStore) CheckSlot(appID, deviceID, slotID string, policy SlotPolicy, count int, now time.Time) bool {
-	if count <= 0 {
-		return true
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	st := m.slots[appID+":"+deviceID+":"+slotID]
-	if st == nil {
-		return true // 该设备此广告位从未下发
-	}
-	// 最小展示间隔：对比请求前最后一次下发
-	if policy.Interval > 0 && !st.lastFill.IsZero() && now.Sub(st.lastFill) < policy.Interval {
-		return false
-	}
-	// 滑动 24h 日频控
-	if policy.DailyLimit > 0 {
-		n := countSince(st.fills, now.Add(-24*time.Hour))
-		if n+count > policy.DailyLimit {
-			return false
-		}
-	}
-	return true
-}
-
-func (m *MemoryStore) RecordSlot(appID, deviceID, slotID string, n int, now time.Time) {
-	if n <= 0 {
-		return
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	key := appID + ":" + deviceID + ":" + slotID
-	st := m.slots[key]
-	if st == nil {
-		st = &slotState{}
-		m.slots[key] = st
-	}
-	st.lastFill = now
-	for i := 0; i < n; i++ {
-		st.fills = append(st.fills, now)
-	}
-	st.fills = pruneBefore(st.fills, now.Add(-m.maxWindow))
-}
-
 func (m *MemoryStore) CheckAndIncr(appID, deviceID, slotID, advertiserID string, policy AdvPolicy, now time.Time) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()

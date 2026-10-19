@@ -17,10 +17,6 @@ type fakeFreq struct {
 	denyAll bool
 }
 
-func (f *fakeFreq) CheckSlot(_ string, _ string, _ string, _ frequency.SlotPolicy, _ int, _ time.Time) bool {
-	return true
-}
-func (f *fakeFreq) RecordSlot(string, string, string, int, time.Time) {}
 func (f *fakeFreq) CheckAndIncr(_, _, _, advID string, _ frequency.AdvPolicy, _ time.Time) bool {
 	if f.denyAll {
 		return false

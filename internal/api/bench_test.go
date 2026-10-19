@@ -26,10 +26,6 @@ import (
 
 type benchFreqPassthrough struct{}
 
-func (benchFreqPassthrough) CheckSlot(string, string, string, frequency.SlotPolicy, int, time.Time) bool {
-	return true
-}
-func (benchFreqPassthrough) RecordSlot(string, string, string, int, time.Time) {}
 func (benchFreqPassthrough) CheckAndIncr(string, string, string, string, frequency.AdvPolicy, time.Time) bool {
 	return true
 }

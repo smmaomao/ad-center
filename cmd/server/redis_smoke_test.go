@@ -139,14 +139,6 @@ func TestRedisBackedSubsystems(t *testing.T) {
 		if !fs.CheckAndIncr("app", "dev", "slot", "advB", pol, now) {
 			t.Fatal("different advertiser should allow")
 		}
-		slotPol := frequency.SlotPolicy{Interval: 0, DailyLimit: 1}
-		if !fs.CheckSlot("app", "dev", "slot2", slotPol, 1, now) {
-			t.Fatal("first slot daily check should allow")
-		}
-		fs.RecordSlot("app", "dev", "slot2", 1, now) // CheckSlot 只读，需 RecordSlot 才记账
-		if fs.CheckSlot("app", "dev", "slot2", slotPol, 1, now) {
-			t.Fatal("second slot daily should block after record")
-		}
 	})
 
 	t.Run("Budget", func(t *testing.T) {

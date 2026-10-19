@@ -46,17 +46,3 @@ func BenchmarkCheckAndIncr_MultiWindowFatigue_Topped(b *testing.B) {
 		}
 	}
 }
-
-// CheckSlot 稳态（日频控检查，fills 固定 10 条）。
-func BenchmarkCheckSlot_DailyLimit(b *testing.B) {
-	m := NewMemory(24 * time.Hour)
-	policy := SlotPolicy{Interval: 20 * time.Minute, DailyLimit: 10}
-	now := time.Now()
-	m.RecordSlot("app", "dev", "slot", 10, now.Add(-time.Minute))
-	b.ReportAllocs()
-	for b.Loop() {
-		if m.CheckSlot("app", "dev", "slot", policy, 1, now) {
-			b.Fatal("should be rejected")
-		}
-	}
-}

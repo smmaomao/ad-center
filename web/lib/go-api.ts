@@ -69,22 +69,6 @@ export const CPA_EVENTS = [
   { key: "purchase", label: "充值" },
 ] as const;
 
-export interface AdminSlot {
-  id: string;
-  app_id: string;
-  app_name: string;
-  key: string;
-  name: string;
-  type: string;
-  status: string;
-  freq_daily_limit: number;
-  freq_interval_minutes: number;
-  freq_fatigue_window: number;
-  fill_count: number;
-  ai_agent_enabled: boolean;
-  ai_agent_goal: string;
-}
-
 export interface AdminApp {
   id: string;
   name: string;
@@ -168,32 +152,6 @@ export const CREATIVE_STYLES = [
 ] as const;
 
 // CPA 计费事件复用上方的 CPA_EVENTS（安装 / 激活 / 注册 / 首充 / 充值）
-
-export interface AdminPriority {
-  id: string;
-  source_type: "advertiser" | "max" | "fallback";
-  advertiser_id?: string;
-  advertiser_name?: string;
-  expected_ecpm: number;
-  guaranteed_share: number;
-  weight: number;
-  enabled: boolean;
-  position: number;
-}
-
-export interface AdminSlotDetail extends AdminSlot {
-  priorities: AdminPriority[];
-}
-
-/** 填充优先级写入（保存时全量替换，position = 数组下标） */
-export interface PriorityInput {
-  source_type: "advertiser" | "max" | "fallback";
-  advertiser_id?: string;
-  expected_ecpm?: number;
-  guaranteed_share?: number;
-  weight?: number;
-  enabled: boolean;
-}
 
 // ============================================================
 // 便捷方法
@@ -429,40 +387,6 @@ export async function updatePricingBenchmark(
 // 控制1：window_minutes 分钟内同一用户看同一素材最多 window_max 次；
 // 控制2：每日（滚动24h）同一用户看同一素材最多 daily_max 次。
 // ============================================================
-
-export async function listSlots(actorEmail: string) {
-  return goApi<AdminSlot[]>("/v1/admin/slots", actorEmail);
-}
-
-export async function getSlot(actorEmail: string, id: string) {
-  return goApi<AdminSlotDetail>(`/v1/admin/slots/${id}`, actorEmail);
-}
-
-export interface SlotPayload {
-  app_id?: string;
-  slot_key?: string;
-  name?: string;
-  type?: string;
-  status?: string;
-  freq_daily_limit?: number;
-  freq_interval_minutes?: number;
-  freq_fatigue_window?: number;
-  ai_agent_enabled?: boolean;
-  ai_agent_goal?: string;
-  priorities?: PriorityInput[];
-}
-
-export async function createSlot(actorEmail: string, body: SlotPayload) {
-  return goSend<{ id: string }>("/v1/admin/slots", actorEmail, "POST", body);
-}
-
-export async function updateSlot(actorEmail: string, id: string, body: SlotPayload) {
-  return goSend<{ status: string }>(`/v1/admin/slots/${id}`, actorEmail, "PATCH", body);
-}
-
-export async function deleteSlot(actorEmail: string, id: string) {
-  return goSend<{ status: string }>(`/v1/admin/slots/${id}`, actorEmail, "DELETE");
-}
 
 /** 软删 App（保留历史归因与事件数据） */
 export async function deleteApp(actorEmail: string, id: string) {

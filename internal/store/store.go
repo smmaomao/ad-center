@@ -55,8 +55,6 @@ func (s *Store) LoadSnapshot(ctx context.Context) (*config.Snapshot, error) {
 		Apps:                  map[string]*config.App{},
 		AppByKeyHash:          map[string]*config.App{},
 		Advertisers:           map[string]*config.Advertiser{},
-		Slots:                 map[string]*config.Slot{},
-		SlotsByKey:            map[string]*config.Slot{},
 		CreativesByAdvertiser: map[string][]*config.Creative{},
 		CreativesByID:         map[string]*config.Creative{},
 		Campaigns:             map[string]*config.Campaign{},
@@ -108,14 +106,9 @@ func (s *Store) LoadSnapshot(ctx context.Context) (*config.Snapshot, error) {
 	}
 	rows.Close()
 
-	// ad_slots / fill_priorities 已确认废弃，**不再加载进配置快照**：
-	//   - 唯一吃 SlotPolicy 的 CheckSlot/RecordSlot 在生产代码中无任何调用点
-	//     （仅 frequency 自身测试与 engine/api 的测试替身实现过）；
-	//   - 真正生效的频控在 campaigns：engine 用 camp.Freq* 构造 AdvPolicy 调
-	//     CheckAndIncr；
-	//   - snap.Slots / SlotsByKey 无生产读取方（管理端 CRUD 走 DB 直查 store_slots.go）。
-	// 停掉后每次配置热更新（NOTIFY + 300s 对账）少两趟全表扫描。
-	// 快照中 Slots/SlotsByKey 字段保留（测试夹具仍用），但始终为空。
+	// ad_slots / fill_priorities 已删除（迁移 000068）：广告位/填充优先级是遗留死配置，
+	// 真正生效的频控在 campaigns 表（engine 用 camp.Freq* 构造 AdvPolicy 调 CheckAndIncr）。
+	// 快照不再加载这两张表（原 LoadSnapshot 的两趟查询已移除）。
 
 	rows, err = s.pool.Query(ctx, `
 		SELECT id::text, COALESCE(advertiser_id::text, ''), name, media_type, storage_path,

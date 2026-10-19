@@ -644,19 +644,6 @@ type DashboardAdvertiser struct {
 	Warning        string  `json:"warning"` // "" / "paused" / "budget" / "kpi"
 }
 
-// DashboardSlot 广告位实时状态行。
-type DashboardSlot struct {
-	Code          string `json:"code"`
-	SlotKey       string `json:"slot_key"`
-	Name          string `json:"name"`
-	Type          string `json:"type"`
-	Status        string `json:"status"`
-	AppName       string `json:"app_name"`
-	FillCount     int    `json:"fill_count"`     // 启用中的填充优先级条数
-	RequestsToday int64  `json:"requests_today"` // 今日请求
-	FillsToday    int64  `json:"fills_today"`    // 今日填充
-}
-
 func clampAchievement(target, actual float64) float64 {
 	if actual <= 0 || target <= 0 {
 		return 1
@@ -808,39 +795,6 @@ func (s *Store) DashboardAdvertisers(ctx context.Context) ([]DashboardAdvertiser
 			a.Warning = "kpi"
 		}
 		out = append(out, a)
-	}
-	return out, rows.Err()
-}
-
-// DashboardSlots 广告位实时状态（含今日请求/填充）。
-func (s *Store) DashboardSlots(ctx context.Context) ([]DashboardSlot, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT s.id::text, s.slot_key, s.name, s.type, s.status,
-		       COALESCE(app.name, ''),
-		       COALESCE((SELECT COUNT(*) FROM fill_priorities fp
-		                 WHERE fp.slot_code = s.slot_key AND fp.enabled = true), 0)::int,
-		       COALESCE(SUM(m.requests), 0)::bigint,
-		       COALESCE(SUM(m.fills), 0)::bigint
-		FROM ad_slots s
-		JOIN apps app ON app.code = s.app_code
-		-- 000022 起指标按「展现样式 style」聚合（metrics_minute.slot_id 已改名为 style），
-		-- 广告位监控按 ad_slots.type（=样式）关联当日分钟指标；多广告主同样式会汇总到该样式。
-		LEFT JOIN metrics_minute m ON m.style = s.type AND m.minute_ts >= date_trunc('day', now())
-		WHERE s.deleted_at IS NULL
-		GROUP BY s.id, s.slot_key, s.name, s.type, s.status, app.name
-		ORDER BY s.name`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := make([]DashboardSlot, 0)
-	for rows.Next() {
-		var sl DashboardSlot
-		if err := rows.Scan(&sl.Code, &sl.SlotKey, &sl.Name, &sl.Type, &sl.Status,
-			&sl.AppName, &sl.FillCount, &sl.RequestsToday, &sl.FillsToday); err != nil {
-			return nil, err
-		}
-		out = append(out, sl)
 	}
 	return out, rows.Err()
 }

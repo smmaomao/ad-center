@@ -3,7 +3,6 @@
 // 危险操作按钮：确认后调软删 Server Action（Go 侧仅 super_admin 放行）。
 import { useTransition } from "react";
 import { deleteAdvertiserAction } from "@/app/(dashboard)/advertisers/actions";
-import { deleteSlotAction } from "@/app/(dashboard)/slots/actions";
 import { Button } from "@/components/ui/button";
 
 export function DeleteEntityButton({
@@ -11,7 +10,7 @@ export function DeleteEntityButton({
   id,
   label,
 }: {
-  kind: "advertiser" | "slot";
+  kind: "advertiser";
   id: string;
   label: string;
 }) {
@@ -20,11 +19,7 @@ export function DeleteEntityButton({
   function onClick() {
     if (!confirm(`确认删除「${label}」？删除后立即生效，历史数据保留。`)) return;
     startTransition(async () => {
-      const run =
-        kind === "advertiser"
-          ? () => deleteAdvertiserAction(id)
-          : () => deleteSlotAction(id);
-      const res = await run();
+      const res = await deleteAdvertiserAction(id);
       if (res?.error) alert(res.error);
     });
   }

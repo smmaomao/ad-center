@@ -37,7 +37,6 @@ const FALLBACK_NAV: NavItem[] = [
   { href: "/campaigns", label: "广告任务管理" },
   { href: "/creatives", label: "素材管理" },
   { href: "/products", label: "产品管理" },
-  { href: "/slots", label: "广告位管理" },
   { href: "/ai-agent", label: "AI Agent 控制台" },
   { href: "/settings/pricing", label: "平台计费标准线" },
   { href: "/settings/cache", label: "决策结果缓存" },
@@ -48,8 +47,8 @@ const FALLBACK_NAV: NavItem[] = [
  * 现在仅作为兜底与 homeRoute 使用；侧边栏与可见性以库里的菜单授权为准（getNavItems）。
  */
 export const ROLE_ROUTES: Record<string, string[]> = {
-  super_admin: ["/dashboard", "/advertisers", "/campaigns", "/creatives", "/slots", "/ai-agent", "/settings"],
-  operator: ["/dashboard", "/advertisers", "/campaigns", "/creatives", "/slots", "/ai-agent", "/settings"],
+  super_admin: ["/dashboard", "/advertisers", "/campaigns", "/creatives", "/ai-agent", "/settings"],
+  operator: ["/dashboard", "/advertisers", "/campaigns", "/creatives", "/ai-agent", "/settings"],
   analyst: ["/dashboard", "/ai-agent"],
   strategy: ["/dashboard", "/ai-agent"],
 };
@@ -117,7 +116,6 @@ const FALLBACK_TREE: NavNode[] = [
       },
     ],
   },
-  { code: "slots", label: "广告位管理", href: "/slots", parentCode: null, sortOrder: 30, children: [] },
   { code: "ai-agent", label: "AI Agent 控制台", href: "/ai-agent", parentCode: null, sortOrder: 40, children: [] },
   {
     code: "other_config",

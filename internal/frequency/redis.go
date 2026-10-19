@@ -51,10 +51,6 @@ func (s *RedisStore) Ping(ctx context.Context) error { return s.client.Ping(ctx)
 // Close 关闭连接。
 func (s *RedisStore) Close() error { return s.client.Close() }
 
-func (s *RedisStore) slotKey(appID, deviceID, slotID string) string {
-	return s.prefix + "{fr}:" + appID + ":" + deviceID + ":slot:" + slotID
-}
-
 func (s *RedisStore) advKey(appID, deviceID, advertiserID string) string {
 	return s.prefix + "{fr}:" + appID + ":" + deviceID + ":adv:" + advertiserID
 }
@@ -62,41 +58,6 @@ func (s *RedisStore) advKey(appID, deviceID, advertiserID string) string {
 func (s *RedisStore) recentKey(appID, deviceID, slotID string) string {
 	return s.prefix + "{fr}:" + appID + ":" + deviceID + ":recent:" + slotID
 }
-
-// checkSlotScript 只读检查广告位额度（间隔 + 24h 日频控），不写状态。
-//
-// KEYS[1]=slotKey；ARGV: 1=nowMs, 2=intervalMs, 3=dailyLimit, 4=count。
-var checkSlotScript = redis.NewScript(`
-local now = tonumber(ARGV[1])
-local count = tonumber(ARGV[4])
-if count <= 0 then return 1 end
-local interval = tonumber(ARGV[2])
-if interval > 0 then
-  local last = redis.call('ZREVRANGE', KEYS[1], 0, 0, 'WITHSCORES')
-  if last[2] and (now - tonumber(last[2])) < interval then return 0 end
-end
-local daily = tonumber(ARGV[3])
-if daily > 0 then
-  if redis.call('ZCOUNT', KEYS[1], now - 86400000, now) + count > daily then return 0 end
-end
-return 1
-`)
-
-// recordSlotScript 记录 n 次下发（滑动窗口裁剪 + TTL）。
-var recordSlotScript = redis.NewScript(`
-local now = tonumber(ARGV[1])
-local n = tonumber(ARGV[2])
-local maxWindow = tonumber(ARGV[3])
-local ttl = math.ceil(maxWindow / 1000)
-for i = 1, n do
-  local seq = redis.call('INCR', KEYS[1] .. ':seq')
-  redis.call('ZADD', KEYS[1], now, now .. ':' .. seq)
-end
-redis.call('EXPIRE', KEYS[1] .. ':seq', ttl)
-redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now - maxWindow)
-redis.call('EXPIRE', KEYS[1], ttl)
-return n
-`)
 
 // checkAndIncrScript 原子「疲劳检查 → 多窗口检查 → 记账」。
 //
@@ -225,32 +186,6 @@ redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now - maxWindow)
 redis.call('EXPIRE', KEYS[2], ttl)
 return 1
 `)
-
-func (s *RedisStore) CheckSlot(appID, deviceID, slotID string, policy SlotPolicy, count int, now time.Time) bool {
-	if count <= 0 {
-		return true
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
-	defer cancel()
-
-	res, err := checkSlotScript.Run(ctx, s.client, []string{s.slotKey(appID, deviceID, slotID)},
-		now.UnixMilli(), policy.Interval.Milliseconds(), policy.DailyLimit, count).Result()
-	if err != nil {
-		return true // fail-open：Redis 不可用 → 放行，事后由对账修正
-	}
-	n, ok := res.(int64)
-	return !ok || n == 1 // 解析异常也放行
-}
-
-func (s *RedisStore) RecordSlot(appID, deviceID, slotID string, n int, now time.Time) {
-	if n <= 0 {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
-	defer cancel()
-	_ = recordSlotScript.Run(ctx, s.client, []string{s.slotKey(appID, deviceID, slotID)},
-		now.UnixMilli(), n, s.maxWindow.Milliseconds()).Err()
-}
 
 func (s *RedisStore) CheckAndIncr(appID, deviceID, slotID, advertiserID string, policy AdvPolicy, now time.Time) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)

@@ -14,40 +14,12 @@ func runStoreContract(t *testing.T, s Store) {
 	base := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
 	const app, dev, slot, advA, advB = "app1", "dev1", "slot1", "advA", "advB"
 
-	slotPolicy := SlotPolicy{Interval: 20 * time.Minute, DailyLimit: 8}
 	comboWindows := []Window{{WindowMinutes: 180, MaxCount: 3}, {WindowMinutes: 1440, MaxCount: 10}}
 	fatiguePolicy := AdvPolicy{FatigueN: 3} // 仅疲劳窗口，无广告主窗口
 
 	t.Run("首次请求无任何记录", func(t *testing.T) {
-		if !s.CheckSlot(app, dev, slot, slotPolicy, 3, base) {
-			t.Fatal("首次 CheckSlot 应通过")
-		}
 		if !s.CheckAndIncr(app, dev, slot, advA, fatiguePolicy, base) {
 			t.Fatal("首次 CheckAndIncr 应通过")
-		}
-	})
-
-	t.Run("展示间隔内拒绝", func(t *testing.T) {
-		s.RecordSlot(app, dev, slot, 1, base)
-		if s.CheckSlot(app, dev, slot, slotPolicy, 1, base.Add(10*time.Minute)) {
-			t.Fatal("间隔 20min 内应拒绝")
-		}
-	})
-
-	t.Run("间隔滑出后放行", func(t *testing.T) {
-		if !s.CheckSlot(app, dev, slot, slotPolicy, 1, base.Add(21*time.Minute)) {
-			t.Fatal("间隔滑出后应放行")
-		}
-	})
-
-	t.Run("批量count计入剩余额度", func(t *testing.T) {
-		const dev = "dev2"
-		s.RecordSlot(app, dev, slot, 6, base)
-		if s.CheckSlot(app, dev, slot, slotPolicy, 3, base.Add(21*time.Minute)) {
-			t.Fatal("剩余额度 2 不够 count=3，应拒绝")
-		}
-		if !s.CheckSlot(app, dev, slot, slotPolicy, 2, base.Add(21*time.Minute)) {
-			t.Fatal("剩余额度 2 应恰好放行 count=2")
 		}
 	})
 

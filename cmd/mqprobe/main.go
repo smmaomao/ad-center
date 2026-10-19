@@ -56,18 +56,17 @@ func main() {
 	must(err)
 	defer st.Close()
 
-	// 取真实 app / slot，满足 ad_events 外键
+	// 取真实 app（style 用素材样式字面量，ad_slots 已删除）
 	pool, err := pgxpool.New(ctx, dsn)
 	must(err)
 	defer pool.Close()
-	var appID, slotID string
+	var appID string
 	dbEnabled := true
 	if err := pool.QueryRow(ctx, "select code from apps limit 1").Scan(&appID); err != nil {
 		dbEnabled = false // 本地库没有 adcenter 表：跳过落库，只验证队列层
 		fmt.Println("（本地库无 apps 表 → 跳过 DB 落库，仅验证队列链路）")
 	} else {
-		must(pool.QueryRow(ctx, "select id from ad_slots limit 1").Scan(&slotID))
-		fmt.Printf("app=%s slot=%s\n\n", appID[:8], slotID[:8])
+		fmt.Printf("app=%s\n\n", appID[:8])
 	}
 
 	// ===== ① 生产：瞬时灌入，模拟开屏曝光峰值 =====
@@ -76,7 +75,7 @@ func main() {
 		pipe := rdb.Pipeline()
 		for i := 0; i < batchAdd && start+i < total; i++ {
 			e := event{
-				AppID: appID, Style: slotID,
+				AppID: appID, Style: "rewarded_video", // ad_slots 已删除，style 用素材样式字面量
 				AdvertiserID: "11111111-1111-1111-1111-111111111111",
 				DeviceID:     fmt.Sprintf("mqprobe-%d", start+i),
 				EventType:    "impression", Revenue: 0.0035, Ts: time.Now().UnixMilli(),

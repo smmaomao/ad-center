@@ -228,21 +228,6 @@ func (s *Server) handleAdjustWallet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "balance": balance})
 }
 
-func (s *Server) handleListSlots(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireRole(w, r, false, false); !ok {
-		return
-	}
-	list, err := s.Store.ListSlots(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if list == nil {
-		list = []*store.AdminSlot{}
-	}
-	writeJSON(w, http.StatusOK, list)
-}
-
 func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireRole(w, r, false, false); !ok {
 		return

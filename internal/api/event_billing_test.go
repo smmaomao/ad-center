@@ -34,8 +34,6 @@ func billTestServer(t *testing.T, campID string, camp *config.Campaign, balances
 		Apps:                  map[string]*config.App{},
 		AppByKeyHash:          map[string]*config.App{},
 		Advertisers:           map[string]*config.Advertiser{},
-		Slots:                 map[string]*config.Slot{},
-		SlotsByKey:            map[string]*config.Slot{},
 		CreativesByAdvertiser: map[string][]*config.Creative{},
 		CreativesByID:         map[string]*config.Creative{},
 		Campaigns:             map[string]*config.Campaign{},
@@ -44,9 +42,6 @@ func billTestServer(t *testing.T, campID string, camp *config.Campaign, balances
 	app := &config.App{ID: "app_t", Status: "active"}
 	snap.Apps[app.ID] = app
 	snap.AppByKeyHash[keyHash] = app
-	slot := &config.Slot{ID: "slot_t", AppID: app.ID, Key: "test_slot", Status: "active"}
-	snap.Slots[slot.ID] = slot
-	snap.SlotsByKey[slot.Key] = slot
 	// 广告主只承载身份（计费配置在 campaign）；出价/计费方式/CPA 单价由 camp 提供。
 	snap.Advertisers[campID] = &config.Advertiser{ID: campID, Status: "active"}
 	snap.CreativesByAdvertiser[campID] = []*config.Creative{{
