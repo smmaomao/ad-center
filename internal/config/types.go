@@ -96,21 +96,27 @@ type Slot struct {
 	Type   string `json:"type"` // rewarded_video / splash / interstitial / feed
 	Status string `json:"status"`
 
-	// 以下三个 Freq* 字段是**生效中的配置**：由 frequency 包的 SlotPolicy 消费，
-	// 构成广告位级频控（最小展示间隔 / 24h 滑动日上限 / 疲劳窗口 N 次不重复）。
-	// 见 internal/frequency/frequency.go 与频控实现的 CheckAndIncr（按 slotID 判定）。
-	FreqDailyLimit      int `json:"freq_daily_limit"`      // 滑动 24h
-	FreqIntervalMinutes int `json:"freq_interval_minutes"` // 最小展示间隔
-	FreqFatigueWindow   int `json:"freq_fatigue_window"`   // 连续 N 次不重复
+	// ⚠️ ad_slots 整表已是**废弃遗留配置**，以下 Freq* 字段当前无人消费。
+	//
+	// 真正生效的频控配置在 campaigns 表：engine.go 用 camp.FreqIntervalMinute /
+	// FreqFatigueWindow / FreqDailyLimit 构造 frequency.AdvPolicy，再调 CheckAndIncr。
+	// 而唯一吃 SlotPolicy 的 CheckSlot/RecordSlot 在生产代码中**没有任何调用点**
+	// （仅存在于 frequency 自身测试与 engine/api 的测试替身），也没有任何生产代码
+	// 构造 SlotPolicy——故这里的 freq_* 永远不会转成可执行策略。
+	FreqDailyLimit      int `json:"freq_daily_limit"`      // 已废弃：未在链路中使用
+	FreqIntervalMinutes int `json:"freq_interval_minutes"` // 已废弃：未在链路中使用
+	FreqFatigueWindow   int `json:"freq_fatigue_window"`   // 已废弃：未在链路中使用
 
 	// Priorities 填充来源优先级（来自 fill_priorities 表，仅 enabled，position 升序）。
 	//
-	// ⚠️ 当前**未被引擎消费**：internal/engine 全量检索无任何 Slots/Priorities 引用，
-	// 实际投放排序与填充走竞价/权重逻辑，改 guaranteed_share / weight 不会影响线上
-	// 效果。保留字段与管理端入口是给未来"保量投放"预留——**当前等同未启用**，
-	// 勿据此调整投放预期（与"slot 是死功能"的说法不同：频控部分是真的在生效）。
+	// ⚠️ 同样未被引擎消费：internal/engine 无任何 Slots/Priorities 引用，实际投放
+	// 排序与填充走竞价/权重逻辑，改 guaranteed_share / weight 不影响线上效果。
+	// ad_slots + fill_priorities 整体为遗产配置，保留仅为兼容历史数据与管理端页面。
 	Priorities []FillPriority `json:"priorities"`
 }
+
+// 注意：ad_slots / fill_priorities 已确认废弃（详见 Slot 注释）。
+// 配置快照不再加载这两张表（见 store.LoadSnapshot）；真正生效的频控在 campaigns。
 
 // Active 报告广告位是否可服务。
 func (s *Slot) Active() bool { return s.Status == "active" }

@@ -108,50 +108,14 @@ func (s *Store) LoadSnapshot(ctx context.Context) (*config.Snapshot, error) {
 	}
 	rows.Close()
 
-	// ad_slots：三个 freq_* 列是**生效中的频控配置**，由 frequency.SlotPolicy 消费
-	// （广告位级最小展示间隔 / 24h 滑动日上限 / 疲劳窗口），改了会真实影响投放。
-	// 注意：本表不参与引擎的广告选择与排序（internal/engine 无引用），其附属的
-	// fill_priorities（Slot.Priorities）当前亦未被引擎消费 —— 属"已配置未启用"。
-	rows, err = s.pool.Query(ctx, `
-		SELECT id::text, app_code::text, slot_key, name, type, status,
-		       freq_daily_limit, freq_interval_minutes, freq_fatigue_window
-		FROM ad_slots`)
-	if err != nil {
-		return nil, fmt.Errorf("load ad_slots: %w", err)
-	}
-	for rows.Next() {
-		sl := &config.Slot{}
-		if err := rows.Scan(&sl.ID, &sl.AppID, &sl.Key, &sl.Name, &sl.Type, &sl.Status,
-			&sl.FreqDailyLimit, &sl.FreqIntervalMinutes, &sl.FreqFatigueWindow); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		snap.Slots[sl.ID] = sl
-		snap.SlotsByKey[sl.Key] = sl
-	}
-	rows.Close()
-
-	rows, err = s.pool.Query(ctx, `
-		SELECT id::text, slot_code::text, source_type,
-		       COALESCE(advertiser_id::text, ''),
-		       expected_ecpm::float8, guaranteed_share::float8, weight::float8
-		FROM fill_priorities WHERE enabled ORDER BY slot_code, position`)
-	if err != nil {
-		return nil, fmt.Errorf("load fill_priorities: %w", err)
-	}
-	for rows.Next() {
-		fp := config.FillPriority{}
-		var slotID string
-		if err := rows.Scan(&fp.ID, &slotID, &fp.SourceType, &fp.AdvertiserID,
-			&fp.ExpectedECPM, &fp.GuaranteedShare, &fp.Weight); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		if sl, ok := snap.Slots[slotID]; ok {
-			sl.Priorities = append(sl.Priorities, fp)
-		}
-	}
-	rows.Close()
+	// ad_slots / fill_priorities 已确认废弃，**不再加载进配置快照**：
+	//   - 唯一吃 SlotPolicy 的 CheckSlot/RecordSlot 在生产代码中无任何调用点
+	//     （仅 frequency 自身测试与 engine/api 的测试替身实现过）；
+	//   - 真正生效的频控在 campaigns：engine 用 camp.Freq* 构造 AdvPolicy 调
+	//     CheckAndIncr；
+	//   - snap.Slots / SlotsByKey 无生产读取方（管理端 CRUD 走 DB 直查 store_slots.go）。
+	// 停掉后每次配置热更新（NOTIFY + 300s 对账）少两趟全表扫描。
+	// 快照中 Slots/SlotsByKey 字段保留（测试夹具仍用），但始终为空。
 
 	rows, err = s.pool.Query(ctx, `
 		SELECT id::text, COALESCE(advertiser_id::text, ''), name, media_type, storage_path,
