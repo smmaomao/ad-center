@@ -34,6 +34,14 @@ func newClickID() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
+// newEventUID 事件级幂等键：128-bit 随机串（与 newClickID 同源），前缀 ev_ 便于排查。
+// 在 enqueueEvent 统一生成，随事件经 Redis Stream 落库，重投时同一 UID 去重只处理一次。
+func newEventUID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return "ev_" + base64.RawURLEncoding.EncodeToString(b)
+}
+
 // handleAdClick 生成唯一 click_id 并落点击登记表（ads_center.clicks），同时按计费
 // 方式记一次有效点击（billing_mode=cpc 时扣费，cpa/cpm 广告主只记指标），返回
 // click_id 供 App 拼进 click_url。归属上下文来自下发时的 bid 登记（防伪造归因）。

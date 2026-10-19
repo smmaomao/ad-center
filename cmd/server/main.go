@@ -181,6 +181,25 @@ func main() {
 	// SMEMBERS，约 30 条命令），60s 一轮 ≈ 4.3 万条/天，放宽 5 倍后降到 ~0.9 万条/天。
 	go cache.RunReconcile(ctx, 300*time.Second)
 
+	// ⑥' 事件去重表清理：event_dedup 记录超过 24h 即无保留价值（消息 ACK 后不再重投），
+	// 定时删除避免表无限增长（#4 事件级幂等的配套清理）。
+	go func() {
+		t := time.NewTicker(10 * time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if n, err := st.CleanupEventDedup(ctx, 24*time.Hour); err != nil {
+					log.Error("event_dedup cleanup failed", "err", err)
+				} else if n > 0 {
+					log.Debug("event_dedup cleaned", "deleted", n)
+				}
+			}
+		}
+	}()
+
 	// ④ 频控 + 引擎 + 指标
 	var freqStore frequency.Store = frequency.NewMemory(24 * time.Hour)
 	if stateStore == "redis" {
@@ -448,9 +467,25 @@ func dropOldPartitions(ctx context.Context, st *store.Store, log *slog.Logger, r
 // 触发时机：任何一次配置快照刷新成功（NOTIFY 秒级 / 60s 对账兜底）。
 // 失败只告警不中断——配置刷新本身已成功，预算晚一拍对齐远好过让回调
 // panic 掉 listener 协程。
-func syncBudgets(ctx context.Context, st *store.Store, ctrl budget.Syncer, log *slog.Logger, reason string) {
+// budgetSyncer 预算控制器能力集合：扣费/查询(Ctrl) + 配置热更新同步(Syncer)。
+// 写回 spent_today 需要 DumpSpent（属 Ctrl）。
+type budgetSyncer interface {
+	budget.Ctrl
+	budget.Syncer
+}
+
+func syncBudgets(ctx context.Context, st *store.Store, ctrl budgetSyncer, log *slog.Logger, reason string) {
 	c, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+
+	// #3 spent_today 回写：先把 Redis/内存中的「今日已耗」真值持久化到库，再
+	// LoadBudgetBalances+SyncBalances 从库重建。SyncBalances 只刷预算上限、保留
+	// 进程内已耗，故写回不会被覆盖；Redis 清掉后从库读到的是真实已耗，预算上限不被遗忘。
+	if spent := ctrl.DumpSpent(); len(spent) > 0 {
+		if werr := st.WriteBudgetSpent(c, spent); werr != nil {
+			log.Error("budget spent writeback failed", "reason", reason, "err", werr)
+		}
+	}
 
 	balances, err := st.LoadBudgetBalances(c)
 	if err != nil {

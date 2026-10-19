@@ -50,7 +50,7 @@ func benchSnapshot(nAdv int) *config.Snapshot {
 			crs[j] = &config.Creative{
 				ID: fmt.Sprintf("cr_%s_%d", id, j), AdvertiserID: id,
 				MediaType: "video", Status: "active",
-				Styles:      []string{"rewarded_video"},
+				Styles: []string{"rewarded_video"},
 			}
 		}
 		snap.CreativesByAdvertiser[id] = crs
@@ -62,7 +62,7 @@ func benchSnapshot(nAdv int) *config.Snapshot {
 		camp := &config.Campaign{
 			ID: campID, AdvertiserID: id, Status: "active", DailyBudget: 1e9,
 			TargetKPIValue: 1 + float64(i%5)*0.2,
-			BillingMode: "cpm", BiddingPrice: 15,
+			BillingMode:    "cpm", BiddingPrice: 15,
 			CreativeIDs: []string{},
 		}
 		for _, cr := range crs {

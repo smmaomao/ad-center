@@ -56,6 +56,13 @@ func (b *fakeBudget) Stats(advID string) (float64, float64) {
 	return b.spent[advID], b.budget[advID]
 }
 func (b *fakeBudget) HourlyCalibrate() error { return nil }
+func (b *fakeBudget) DumpSpent() map[string]float64 {
+	out := make(map[string]float64, len(b.spent))
+	for k, v := range b.spent {
+		out[k] = v
+	}
+	return out
+}
 
 // 广告主总钱包替身：wallet 为 nil 或未收录该广告主 → 不限制（MaxFloat64 / 放行），
 // 保证既有预算用例不受总余额闸影响。

@@ -43,6 +43,11 @@ type Ctrl interface {
 	// WalletCredit 充值入账（后台充值成功后调用），使实时闸门立即反映新余额；
 	// 未注册的广告主会被登记（充值即启用钱包）。
 	WalletCredit(advertiserID string, amount float64)
+
+	// DumpSpent 返回当前进程内/Redis 的「今日已耗」真值（按 campaign 维度）。
+	// 用于定时写回 DB（campaigns.spent_today），使 Redis 重启/被清后从库重建时
+	// 预算上限不被"遗忘"（见 ad-center #3：spent_today 从不回写 → Redis 清掉后超投）。
+	DumpSpent() map[string]float64
 }
 
 // BatchStats 可选能力：批量读取预算快照（决策热路径优化）。

@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"adcenter/internal/config"
 )
@@ -65,6 +68,10 @@ type AdEvent struct {
 	// S2S 回调（true=HTTP 2xx；false=网络错误/非 2xx/未配置 callback_url）。
 	// 其他事件为 nil（不记录）。
 	CallbackOK *bool
+	// EventUID 事件级唯一幂等键：入队时生成（api.enqueueEvent），贯穿 Redis Stream
+	// 落库全程。落库前经 event_dedup 表去重——同一消息被 Stream 重投（PEL 回收）时
+	// 只处理一次，避免重复记明细 / 重复累加预算台账 / 重复扣广告主钱包。
+	EventUID string
 }
 
 // InsertAdEvents 批量写事件（fill/impression/click/conversion 回执与下发记录）。
@@ -98,14 +105,26 @@ func (s *Store) WriteEventBatch(ctx context.Context, events []AdEvent) error {
 	if len(events) == 0 {
 		return nil
 	}
-	// 内部投放事件与 S2S 转化回传分开落库（不同表，同一事务）。
-	internal, conv := splitEvents(events)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // 已 Commit 时 Rollback 无害
 
+	// 事件级幂等：在事务内登记本批次 EventUID（event_dedup）。已存在（Stream 重投）
+	// 即跳过——与后续写同一事务，写失败回滚时去重记录一并回滚，保证"至少一次"语义
+	// （重投可重试，不会因去重已落库就吞掉未成功的写入）。
+	newEvents, err := s.dedupeEventsTx(ctx, tx, events)
+	if err != nil {
+		slog.Default().Warn("event dedup failed, process all", "err", err)
+		newEvents = events
+	}
+	if len(newEvents) == 0 {
+		return tx.Commit(ctx) // 全是重投，无新事件可写
+	}
+
+	// 内部投放事件与 S2S 转化回传分开落库（不同表，同一事务）。
+	internal, conv := splitEvents(newEvents)
 	if q, args, ok := buildInsertAdEvents(internal); ok {
 		if _, err := tx.Exec(ctx, q, args...); err != nil {
 			return err
@@ -116,7 +135,7 @@ func (s *Store) WriteEventBatch(ctx context.Context, events []AdEvent) error {
 			return err
 		}
 	}
-	if rows := AggregateLedger(events); len(rows) > 0 {
+	if rows := AggregateLedger(newEvents); len(rows) > 0 {
 		if q, args, ok := buildUpsertLedgerAgg(rows); ok {
 			if _, err := tx.Exec(ctx, q, args...); err != nil {
 				return err
@@ -136,6 +155,92 @@ func (s *Store) WriteEventBatch(ctx context.Context, events []AdEvent) error {
 // buildWalletDebit 由聚合流水构造广告主钱包批量递减语句。
 // GREATEST(...,0) 兜底防负（正常路径 WalletDeduct 已保证余额充足）。
 // 只对已启用钱包的广告主扣减（wallet_enabled）——存量广告主不受影响。
+// dedupeEventsTx 在事务内把本批次 EventUID 写入 event_dedup（ON CONFLICT DO NOTHING
+// RETURNING 只回传首次出现的 UID），返回"首次出现"的事件。无 UID 的事件一律按新处理。
+// 必须在调用方的同一事务内执行，使去重与写操作原子提交/回滚（写失败则去重记录一并回滚，
+// 重投可重试；去重成功则重投被跳过）。
+func (s *Store) dedupeEventsTx(ctx context.Context, tx pgx.Tx, events []AdEvent) ([]AdEvent, error) {
+	uids := make([]string, 0, len(events))
+	for _, e := range events {
+		if e.EventUID != "" {
+			uids = append(uids, e.EventUID)
+		}
+	}
+	if len(uids) == 0 {
+		return events, nil // 无 UID（理论上不会发生）：全部按新事件处理
+	}
+	var sb strings.Builder
+	sb.WriteString("INSERT INTO event_dedup (event_uid) VALUES ")
+	args := make([]any, len(uids))
+	for i, u := range uids {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		fmt.Fprintf(&sb, "($%d)", i+1)
+		args[i] = u
+	}
+	sb.WriteString(" ON CONFLICT (event_uid) DO NOTHING RETURNING event_uid")
+	rows, err := tx.Query(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	seen := make(map[string]bool, len(uids))
+	for rows.Next() {
+		var u string
+		if err := rows.Scan(&u); err != nil {
+			return nil, err
+		}
+		seen[u] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]AdEvent, 0, len(events))
+	for _, e := range events {
+		if e.EventUID == "" || seen[e.EventUID] {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+// WriteBudgetSpent 将当前「今日已耗」写回 campaigns.spent_today（#3：spent_today 从不
+// 回写 → Redis 清掉后预算上限被遗忘、可超投）。每个对账周期由 syncBudgets 调用一次，
+// 把 Redis/内存中的真值持久化，使 Redis 重建时从库读到的是真实已耗。
+func (s *Store) WriteBudgetSpent(ctx context.Context, spent map[string]float64) error {
+	if len(spent) == 0 {
+		return nil
+	}
+	var sb strings.Builder
+	sb.WriteString(`UPDATE campaigns AS c SET spent_today = v.amt FROM (VALUES `)
+	args := make([]any, 0, len(spent)*2)
+	i := 0
+	for id, amt := range spent {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		fmt.Fprintf(&sb, "($%d::text,$%d::float8)", i*2+1, i*2+2)
+		args = append(args, id, amt)
+		i++
+	}
+	sb.WriteString(`) AS v(id, amt) WHERE c.id::text = v.id`)
+	_, err := s.pool.Exec(ctx, sb.String(), args...)
+	return err
+}
+
+// CleanupEventDedup 删除超过 maxAge 的去重记录（防表无限增长）。事件被 ACK 后不会再
+// 重投，旧记录无保留价值；保留窗口覆盖 Stream 重投延迟即可，默认 24h。
+func (s *Store) CleanupEventDedup(ctx context.Context, maxAge time.Duration) (int64, error) {
+	res, err := s.pool.Exec(ctx,
+		`DELETE FROM event_dedup WHERE created_at < now() - $1::interval`,
+		fmt.Sprintf("%d hours", int(maxAge.Hours())))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected(), nil
+}
+
 func buildWalletDebit(rows []LedgerAgg) (string, []any, bool) {
 	if len(rows) == 0 {
 		return "", nil, false

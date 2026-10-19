@@ -283,6 +283,23 @@ func (r *Redis) emitResets(resets []resetEntry) {
 	}
 }
 
+// DumpSpent 返回 Redis 中各 campaign 的当日已耗真值（按 campaign 维度），用于写回 DB。
+// 复用 StatsAll（含跨日重置）拿到全量 (budget, spent)，取 spent 部分。
+func (r *Redis) DumpSpent() map[string]float64 {
+	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
+	defer cancel()
+	ids, err := r.client.SMembers(ctx, r.idsKey()).Result()
+	if err != nil || len(ids) == 0 {
+		return nil
+	}
+	all := r.StatsAll(ids)
+	out := make(map[string]float64, len(all))
+	for id, v := range all {
+		out[id] = v[0] // [0]=spent, [1]=budget
+	}
+	return out
+}
+
 // SyncBalances 用 DB 全量快照对齐 Redis 预算表（语义见 budget.Syncer 接口契约）。
 //
 // 两步 pipeline（先 EXISTS 再 HSET）而非多 key Lua：Cluster 下多 key 脚本会

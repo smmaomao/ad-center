@@ -111,7 +111,7 @@ func (m *Memory) Stats(advertiserID string) (spent, budget float64) {
 }
 
 // StatsAll 批量版 Stats（BatchStats）：一次加锁遍历，跨日重置只做一次
-//（逐个 Stats 每个都会触发 rolloverLocked，幂等但重复）。未注册的 ID 不入 map，
+// （逐个 Stats 每个都会触发 rolloverLocked，幂等但重复）。未注册的 ID 不入 map，
 // 调用方按 (0,0) 处理，与 Stats 语义一致。
 func (m *Memory) StatsAll(ids []string) map[string][2]float64 {
 	m.mu.Lock()
@@ -208,6 +208,18 @@ func (m *Memory) SyncWallets(balances map[string]float64) {
 		w[id] = b
 	}
 	m.wallets = w
+}
+
+// DumpSpent 返回内存预算表的当日已耗真值（按 campaign 维度），用于写回 DB。
+func (m *Memory) DumpSpent() map[string]float64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rolloverLocked()
+	out := make(map[string]float64, len(m.balances))
+	for id, b := range m.balances {
+		out[id] = b.spent
+	}
+	return out
 }
 
 // 编译期接口实现检查。

@@ -10,9 +10,14 @@ import (
 )
 
 // enqueueEvent 决策/回执路径的唯一写入口：只入队，绝不触碰 DB。
+// 在此统一生成 EventUID（事件级幂等键），贯穿 Stream 落库全程——重投时
+// 同一 UID 经 event_dedup 去重，只落库/扣费一次。
 func (s *Server) enqueueEvent(e store.AdEvent) {
 	if s.Queue == nil {
 		return
+	}
+	if e.EventUID == "" {
+		e.EventUID = newEventUID()
 	}
 	s.Queue.Publish(e)
 }

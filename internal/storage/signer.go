@@ -30,7 +30,7 @@ type Signer struct {
 	// CDN 前置（可选）：R2 自定义域 / Cloudflare Worker 代理域名。
 	// 非空时 PresignGET 签发 CDN 域名 URL；PresignGETDirect 始终直连 R2 兜底。
 	cdnBase         string
-	cdnBucketInPath bool // false 时路径去掉桶前缀（R2 自定义域把桶绑到域名）
+	cdnBucketInPath bool          // false 时路径去掉桶前缀（R2 自定义域把桶绑到域名）
 	expiry          time.Duration // 预签名默认有效期（默认 24h，可由 R2_SIGN_TTL 覆盖）
 
 	mu    sync.Mutex
@@ -42,7 +42,7 @@ func New(accountID, bucket, accessKey, secretKey string) *Signer {
 	return &Signer{
 		accountID: accountID, bucket: bucket,
 		accessKey: accessKey, secretKey: secretKey,
-		region:           "auto",
+		region:          "auto",
 		cdnBucketInPath: true,
 		expiry:          24 * time.Hour,
 		cache:           make(map[string]urlCacheEntry),

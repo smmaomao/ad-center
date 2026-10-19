@@ -148,6 +148,22 @@ func (r *Redis) Run(ctx context.Context, h Handler) {
 		}
 	}()
 
+	// PEL 回收：消费失败/未 ACK 的消息留在 PEL；本实例重启后 consumer 名变化会让旧
+	// PEL 变成孤儿。周期性 XAUTOCLAIM 认领空闲 >30s 的待确认消息重投。事件级幂等
+	// （落库前的 event_dedup 去重）保证重投不会重复落库/扣费——故先有幂等、后有回收。
+	go func() {
+		t := time.NewTicker(10 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				r.reclaim(ctx, h)
+			}
+		}
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -235,6 +251,51 @@ func (r *Redis) Ping(ctx context.Context) error { return r.client.Ping(ctx).Err(
 // Name 队列标识（日志/排障用）。
 func (r *Redis) Name() string {
 	return fmt.Sprintf("stream=%s group=%s consumer=%s", r.stream, r.group, r.consumer)
+}
+
+// reclaim PEL 回收：认领空闲超过 minIdle 的待确认消息交由 handler 重投。
+// 重投前 event_dedup 已拦掉重复事件，故重投安全（不会重复落库/扣费）。
+// 处理成功才 XACK；失败则留在 PEL，下个周期再认领。
+func (r *Redis) reclaim(ctx context.Context, h Handler) {
+	const minIdle = 30 * time.Second
+	cursor := "0"
+	for {
+		res, next, err := r.client.XAutoClaim(ctx, &redis.XAutoClaimArgs{
+			Stream:   r.stream,
+			Group:    r.group,
+			Consumer: r.consumer,
+			MinIdle:  minIdle,
+			Start:    cursor,
+			Count:    int64(r.batchSize),
+		}).Result()
+		if err != nil {
+			return
+		}
+		if len(res) > 0 {
+			batch := make([]store.AdEvent, 0, len(res))
+			ids := make([]string, 0, len(res))
+			for _, m := range res {
+				if raw, ok := m.Values["d"].(string); ok {
+					var e store.AdEvent
+					if json.Unmarshal([]byte(raw), &e) == nil {
+						batch = append(batch, e)
+						ids = append(ids, m.ID)
+					}
+				}
+			}
+			if len(batch) > 0 {
+				if err := h(ctx, batch); err != nil {
+					r.failed.Add(1) // 仍未 ACK：留在 PEL，下个周期再认领
+				} else {
+					_ = r.client.XAck(ctx, r.stream, r.group, ids...).Err()
+				}
+			}
+		}
+		if next == "0" || next == cursor {
+			return
+		}
+		cursor = next
+	}
 }
 
 var _ Backend = (*Redis)(nil)
