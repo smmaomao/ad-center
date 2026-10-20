@@ -26,13 +26,16 @@ func NewHook(log *slog.Logger) *LogHook {
 	return &LogHook{log: log}
 }
 
-// Enabled 默认开启；REDIS_LOG 取 0 / false / off（大小写均可）时关闭。
+// Enabled 默认**关闭**；需要排查时设 REDIS_LOG=1 / true / on 打开。
+//
+// 默认关闭的原因：该 Hook 对每条命令打一行 Info，生产常开会持续刷日志（决策路径
+// 每请求 10+ 条命令），日志量与可读性成本远大于收益；排查期间临时打开即可。
 func Enabled() bool {
 	switch os.Getenv("REDIS_LOG") {
-	case "0", "false", "off", "OFF":
-		return false
-	default:
+	case "1", "true", "on", "ON":
 		return true
+	default:
+		return false
 	}
 }
 

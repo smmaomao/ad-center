@@ -43,6 +43,10 @@ type Decider interface {
 	BudgetSnapshot(snap *config.Snapshot) map[string][2]float64
 	WalletBalances(snap *config.Snapshot) map[string]float64
 	DecideWith(snap *config.Snapshot, req engine.Request, campBudgets map[string][2]float64, wallets map[string]float64) engine.Response
+	// DecideStyles 跨全部展现样式决策：频控在全部样式候选的并集上只查一次
+	// （频控键不含 style，逐样式检查会重复读最多 5 遍）。返回已去重、按得分
+	// 降序、至多 Count 条的结果。
+	DecideStyles(snap *config.Snapshot, req engine.Request, campBudgets map[string][2]float64, wallets map[string]float64) []engine.Item
 }
 
 // Server 聚合全部运行依赖（main 装配后注入）。

@@ -159,14 +159,31 @@ func (r *Redis) Run(ctx context.Context, h Handler) {
 	// PEL 变成孤儿。周期性 XAUTOCLAIM 认领空闲 >30s 的待确认消息重投。事件级幂等
 	// （落库前的 event_dedup 去重）保证重投不会重复落库/扣费——故先有幂等、后有回收。
 	go func() {
-		t := time.NewTicker(10 * time.Second)
+		// 自适应退避：PEL 绝大多数时间为空，固定 10s 一次 XAUTOCLAIM ≈ 8640 条
+		// 命令/天/实例，全是空转。连续空转则逐次翻倍至 60s 上限；一旦真的回收到
+		// 消息立刻回到 10s 高频（有积压时要尽快重投）。minIdle=30s 保证最坏 90s
+		// 内孤儿消息仍会被认领，可靠性不变。
+		const (
+			minInterval = 10 * time.Second
+			maxInterval = 60 * time.Second
+		)
+		interval := minInterval
+		t := time.NewTicker(interval)
 		defer t.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				r.reclaim(ctx, h)
+				if r.reclaim(ctx, h) > 0 {
+					interval = minInterval
+				} else if interval < maxInterval {
+					interval *= 2
+					if interval > maxInterval {
+						interval = maxInterval
+					}
+				}
+				t.Reset(interval)
 			}
 		}
 	}()
@@ -263,7 +280,9 @@ func (r *Redis) Name() string {
 // reclaim PEL 回收：认领空闲超过 minIdle 的待确认消息交由 handler 重投。
 // 重投前 event_dedup 已拦掉重复事件，故重投安全（不会重复落库/扣费）。
 // 处理成功才 XACK；失败则留在 PEL，下个周期再认领。
-func (r *Redis) reclaim(ctx context.Context, h Handler) {
+//
+// 返回本次认领到的消息条数（跨分页累加），供 Run 做自适应退避。
+func (r *Redis) reclaim(ctx context.Context, h Handler) (claimed int) {
 	const minIdle = 30 * time.Second
 	cursor := "0"
 	for {
@@ -276,8 +295,9 @@ func (r *Redis) reclaim(ctx context.Context, h Handler) {
 			Count:    int64(r.batchSize),
 		}).Result()
 		if err != nil {
-			return
+			return claimed
 		}
+		claimed += len(res)
 		if len(res) > 0 {
 			batch := make([]store.AdEvent, 0, len(res))
 			ids := make([]string, 0, len(res))
@@ -299,7 +319,7 @@ func (r *Redis) reclaim(ctx context.Context, h Handler) {
 			}
 		}
 		if next == "0" || next == cursor {
-			return
+			return claimed
 		}
 		cursor = next
 	}

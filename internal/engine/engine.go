@@ -192,6 +192,155 @@ func (e *Engine) DecideWith(snap *config.Snapshot, req Request, campBudgets map[
 	return Response{Items: items}
 }
 
+// styleCandidates 某个展现样式下的候选集合（跨样式频控合并用）。
+type styleCandidates struct {
+	style string
+	cands []candidate
+}
+
+// DecideStyles 跨全部展现样式决策（/v1/ad/list 主路径）。
+//
+// 与「API 层循环 5 个样式、各调一次 DecideWith」的区别：频控只读检查在**全部样式
+// 候选的并集上只做一次**。频控键是 {fr}:<app>:<dev>:adv:<campaign> 与
+// …:recent:<creative>（见 frequency.RedisStore 的 advKey/recentKey），**不含 style**
+// —— 同一 (campaign, creative) 在不同样式下是同一对键，逐样式检查会把它们重复读
+// 最多 5 遍（决策热路径 5 次 EVALSHA/请求）。去重后合并为 1 次。
+//
+// 语义与「逐样式 DecideWith + 调用方按 creative 去重、按得分取前 Count 条」一致：
+// 每个样式仍各取至多 Count 条，再全局去重排序取前 Count 条。
+func (e *Engine) DecideStyles(snap *config.Snapshot, req Request, campBudgets map[string][2]float64, wallets map[string]float64) []Item {
+	if req.Count < 1 {
+		req.Count = 1
+	}
+	req.Count = min(req.Count, MaxCount)
+	if req.App == nil || !req.App.Active() {
+		return nil
+	}
+
+	// ① 各样式独立筛选 + 打分 + 排序（纯内存，无 Redis）
+	per := make([]styleCandidates, 0, len(Styles))
+	for _, style := range Styles {
+		r := req
+		r.Style = style
+		cands := e.buildCandidates(snap, r, campBudgets)
+		if len(cands) == 0 {
+			continue
+		}
+		sort.SliceStable(cands, func(i, j int) bool {
+			if cands[i].score != cands[j].score {
+				return cands[i].score > cands[j].score
+			}
+			return cands[i].creative.ID < cands[j].creative.ID
+		})
+		per = append(per, styleCandidates{style: style, cands: cands})
+	}
+	if len(per) == 0 {
+		return nil
+	}
+
+	// ② 频控：跨样式候选并集去重后一次批量检查（1 次 Redis 往返）
+	freq := e.freqUnion(req.App.ID, req.DeviceID, per, req.Now)
+
+	// ③ 逐样式物化（用预取结果，不再读 Redis），按 creative 去重汇总
+	collected := make([]Item, 0, req.Count*len(Styles))
+	seen := make(map[string]bool, req.Count*len(Styles))
+	for _, sc := range per {
+		r := req
+		r.Style = sc.style
+		items := make([]Item, 0, req.Count)
+		for i := range sc.cands {
+			if len(items) >= req.Count {
+				break
+			}
+			// freq 为 nil 表示没拿到批量结果 → pass 保持 nil，materialize 自动
+			// 回退成逐条 Check（fail-open 语义与原来一致）。
+			var pass *bool
+			if freq != nil {
+				if f, ok := freq[freqKeyOf(sc.cands[i])]; ok {
+					p := f
+					pass = &p
+				}
+			}
+			item, ok := e.materialize(r, sc.cands[i], wallets, pass)
+			if !ok {
+				continue
+			}
+			items = append(items, item)
+		}
+		for _, it := range items {
+			if it.Creative == nil || seen[it.Creative.ID] {
+				continue
+			}
+			seen[it.Creative.ID] = true
+			collected = append(collected, it)
+		}
+	}
+	if len(collected) == 0 {
+		return nil
+	}
+	sort.SliceStable(collected, func(i, j int) bool { return collected[i].Score > collected[j].Score })
+	if len(collected) > req.Count {
+		collected = collected[:req.Count]
+	}
+	return collected
+}
+
+// freqKeyOf 频控身份键：频控 ZSET 只由 (campaign, creative) 决定（键里没有 style），
+// 这正是跨样式合并检查成立的前提。
+func freqKeyOf(c candidate) string {
+	if c.camp == nil || c.creative == nil {
+		return ""
+	}
+	return c.camp.ID + "\x00" + c.creative.ID
+}
+
+// freqUnion 对跨样式候选并集做一次批量频控检查，返回 (campaign, creative) → 是否放行。
+// 返回 nil 表示未取到批量结果（无 BatchChecker / 批量失败 / 没有需要限频的候选），
+// 调用方据此回退逐条 Check。
+func (e *Engine) freqUnion(appID, deviceID string, per []styleCandidates, now time.Time) map[string]bool {
+	bc, ok := e.Freq.(frequency.BatchChecker)
+	if !ok {
+		return nil
+	}
+	items := make([]frequency.CheckItem, 0)
+	keys := make([]string, 0)
+	seen := make(map[string]bool)
+	for _, sc := range per {
+		for _, c := range sc.cands {
+			if c.camp == nil || c.creative == nil {
+				continue
+			}
+			windows := CampaignFreqWindows(c.camp)
+			if len(windows) == 0 {
+				continue // 不限频：无需往返
+			}
+			k := freqKeyOf(c)
+			if seen[k] {
+				continue // 同一对键跨样式只查一次
+			}
+			seen[k] = true
+			items = append(items, frequency.CheckItem{
+				SlotID:       c.creative.ID,
+				AdvertiserID: c.camp.ID,
+				Policy:       frequency.AdvPolicy{Windows: windows},
+			})
+			keys = append(keys, k)
+		}
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	got := bc.CheckBatch(appID, deviceID, items, now)
+	if len(got) != len(items) {
+		return nil // 批量失败：回退逐条 Check（fail-open 语义不变）
+	}
+	out := make(map[string]bool, len(items))
+	for i, k := range keys {
+		out[k] = got[i]
+	}
+	return out
+}
+
 // buildCandidates 遍历所有投放任务（campaign），以各任务 creative_ids 指定的素材为候选
 // （素材只与投放任务挂钩，不再按广告主维度遍历全部素材）。素材经 style / 投放 App / 广告主
 // 定向过滤后，按归属 campaign 的预算 / 排期 / KPI 打分；未关联任何任务的素材不参与投放。

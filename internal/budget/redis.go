@@ -138,7 +138,7 @@ if redis.call('GET', KEYS[2]) ~= ARGV[1] then
       resets[#resets + 1] = id
       resets[#resets + 1] = tostring(sp)
     end
-    redis.call('HSET', k, 'day', ARGV[1], 'spent', '0')
+    redis.call('HSET', k, 'spent', '0')
     redis.call('EXPIRE', k, ttl)
   end
   redis.call('SET', KEYS[2], ARGV[1])
@@ -190,7 +190,7 @@ if redis.call('GET', KEYS[1]) ~= ARGV[1] then
       resets[#resets + 1] = id
       resets[#resets + 1] = tostring(sp)
     end
-    redis.call('HSET', k, 'day', ARGV[1], 'spent', '0')
+    redis.call('HSET', k, 'spent', '0')
     redis.call('EXPIRE', k, ttl)
   end
   redis.call('SET', KEYS[1], ARGV[1])
@@ -357,33 +357,53 @@ func (r *Redis) SyncBalances(balances map[string][2]float64) {
 		ids = append(ids, id)
 	}
 
-	today := r.today()
-	pipe := r.client.Pipeline()
-	pipe.SetNX(ctx, r.dayKey(), today, stateKeyTTL) // 确立当日（已存在则不动），并刷 7d TTL
-	if len(ids) > 0 {
-		// 跨日重置集合：一条批量 SADD 取代逐个 SADD（省 N-1 条命令/次对账）
-		members := make([]interface{}, len(ids))
-		for i, id := range ids {
-			members[i] = id
-		}
-		pipe.SAdd(ctx, r.idsKey(), members...)
-	}
+	keys := make([]string, 0, len(ids)+2)
+	keys = append(keys, r.dayKey(), r.idsKey())
+	args := make([]any, 0, 2+len(ids)*3)
+	args = append(args, r.today(), int64(stateKeyTTL.Seconds()))
 	for _, id := range ids {
 		b := balances[id]
-		k := r.key(id)
-		// 预算上限始终用同步值刷新；spent/day 仅在字段缺失时初始化（HSetNX），
-		// 避免覆盖运行时累计值。相比先 Exists 探活再分支，省掉一次管道往返。
-		pipe.HSet(ctx, k, "budget", formatFloat(b[0]))
-		pipe.HSetNX(ctx, k, "spent", formatFloat(b[1]))
-		pipe.HSetNX(ctx, k, "day", today)
-		pipe.Expire(ctx, k, stateKeyTTL) // 刷 7d TTL，活跃广告主永不过期
+		keys = append(keys, r.key(id))
+		// 预算上限始终用同步值刷新；spent 由脚本用 HSETNX 仅在字段缺失时初始化，
+		// 避免覆盖运行时累计值。原 day 字段每轮都写、但三个 Lua 脚本从不读它
+		// （跨日只判全局 {bud}:day），已移除。
+		args = append(args, id, formatFloat(b[0]), formatFloat(b[1]))
 	}
-	pipe.Expire(ctx, r.idsKey(), stateKeyTTL) // 刷 7d TTL
-	if _, err := pipe.Exec(ctx); err != nil {
-		return
+	if err := syncBalancesScript.Run(ctx, r.client, keys, args...).Err(); err != nil {
+		return // 下一轮（60s 对账）重试，宁可慢一拍也不可误覆盖
 	}
 	r.sweepDeleted(ctx, balances)
 }
+
+// syncBalancesScript 用**一个** EVALSHA 完成整轮预算对账写入。
+//
+// 原实现是 pipeline 里每个 campaign 3~4 条命令 + 2 条全局命令：Upstash 按请求计费，
+// N 个 campaign 就是 ~3N+2 次请求/轮（每次 notify:campaigns/advertisers 与 300s
+// 对账各触发一轮）。预算键、dayKey、idsKey 全部共享 {bud} hash tag（同一 slot），
+// 与 statsAllScript 同理在 Cluster 下单脚本安全，故可整体合成一个脚本：
+// 整轮对账的请求数从 ~3N+2 降到 1（命令条数不变，但计费与往返都按 1 次算）。
+//
+// KEYS[1]=dayKey，KEYS[2]=idsKey，KEYS[3..]=各任务预算键；
+// ARGV[1]=today(Jakarta YYYY-MM-DD)，ARGV[2]=TTL 秒，其后每任务三元组
+// (id, budget, spent)。
+var syncBalancesScript = redis.NewScript(`
+local ttl = tonumber(ARGV[2])
+redis.call('SETNX', KEYS[1], ARGV[1]) -- 确立当日（已存在则不动）
+redis.call('EXPIRE', KEYS[1], ttl)
+local ids = {}
+for i = 3, #KEYS do
+  ids[#ids + 1] = ARGV[3 + (i - 3) * 3]
+end
+if #ids > 0 then redis.call('SADD', KEYS[2], unpack(ids)) end
+for i = 3, #KEYS do
+  local a = 3 + (i - 3) * 3
+  local k = KEYS[i]
+  redis.call('HSET', k, 'budget', ARGV[a + 1])
+  redis.call('HSETNX', k, 'spent', ARGV[a + 2])
+  redis.call('EXPIRE', k, ttl)
+end
+redis.call('EXPIRE', KEYS[2], ttl)
+return #ids`)
 
 // sweepDeleted 清理 DB 中已不存在（软删）的广告主状态，避免无主 key 常驻。
 //

@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -57,6 +56,10 @@ type BidContext struct {
 type BidStore interface {
 	// Put 登记一次下发上下文，返回全局唯一 bid_id。
 	Put(ctx context.Context, c *BidContext) string
+	// PutBatch 批量登记，返回等长 bid_id 切片（顺序与入参一致）。
+	// Redis 实现把 N 次 SET 合成一次 EVALSHA —— 决策热路径每条下发都要登记一次，
+	// 批量化省掉 N-1 次往返（Upstash 按请求计费，N 条命令即 N 次请求）。
+	PutBatch(ctx context.Context, cs []*BidContext) []string
 	// Get 反查下发上下文；过期或不存在返回 false。
 	Get(ctx context.Context, id string) (*BidContext, bool)
 	// Consume 原子标记某 bid 的某事件类型已被处理：首次返回 true（可计费/归因），
@@ -99,6 +102,15 @@ func (r *memBidStore) Put(ctx context.Context, c *BidContext) string {
 	r.m[id] = c
 	r.mu.Unlock()
 	return id
+}
+
+// PutBatch 内存实现无往返可省，逐个 Put 即可（语义与批量版一致）。
+func (r *memBidStore) PutBatch(ctx context.Context, cs []*BidContext) []string {
+	ids := make([]string, len(cs))
+	for i, c := range cs {
+		ids[i] = r.Put(ctx, c)
+	}
+	return ids
 }
 
 func (r *memBidStore) Get(ctx context.Context, id string) (*BidContext, bool) {
@@ -150,6 +162,53 @@ func (r *redisBidStore) Put(ctx context.Context, c *BidContext) string {
 	return id
 }
 
+// bidPutScript 批量登记下发上下文：把 N 次 SET 合成一次 EVALSHA。
+// KEYS = 各 bid 键；ARGV[1] = TTL 秒，ARGV[2..] = 对应 BidContext JSON。
+var bidPutScript = redis.NewScript(`
+local ttl = tonumber(ARGV[1])
+for i = 1, #KEYS do
+  redis.call('SET', KEYS[i], ARGV[i + 1], 'EX', ttl)
+end
+return #KEYS`)
+
+// PutBatch 一次往返登记 N 条上下文（bid_id 在 Go 侧生成后随脚本写入）。
+// 脚本失败时回退逐个 SET，保持与 Put 相同的"尽力而为"语义。
+func (r *redisBidStore) PutBatch(ctx context.Context, cs []*BidContext) []string {
+	ids := make([]string, len(cs))
+	if len(cs) == 0 {
+		return ids
+	}
+	exp := time.Now().Add(r.ttl)
+	ttlSec := int64(r.ttl.Seconds())
+	if ttlSec < 1 {
+		ttlSec = 1
+	}
+	keys := make([]string, 0, len(cs))
+	args := make([]any, 0, len(cs)+1)
+	args = append(args, ttlSec)
+	for i, c := range cs {
+		id, _ := newBidID()
+		c.ExpiresAt = exp
+		ids[i] = id
+		keys = append(keys, r.prefix+id)
+		b, err := json.Marshal(c)
+		if err != nil {
+			b = []byte("{}")
+		}
+		args = append(args, string(b))
+	}
+	if err := bidPutScript.Run(ctx, r.client, keys, args...).Err(); err != nil {
+		for i, id := range ids {
+			b, merr := json.Marshal(cs[i])
+			if merr != nil {
+				continue
+			}
+			_ = r.client.Set(ctx, r.prefix+id, b, r.ttl).Err()
+		}
+	}
+	return ids
+}
+
 func (r *redisBidStore) Get(ctx context.Context, id string) (*BidContext, bool) {
 	b, err := r.client.Get(ctx, r.prefix+id).Bytes()
 	if err != nil {
@@ -162,19 +221,27 @@ func (r *redisBidStore) Get(ctx context.Context, id string) (*BidContext, bool) 
 	return &c, true
 }
 
+// bidConsumeScript 原子「登记事件类型 + 刷 TTL」：把原来的 SADD 与 EXPIRE 两次
+// 串行往返合成一次 EVALSHA（impression/click 每次都要走，省 1 条/事件）。
+// SADD 返回 1 = 首次登记（可计费/归因），0 = 重放。
+var bidConsumeScript = redis.NewScript(`
+local n = redis.call('SADD', KEYS[1], ARGV[1])
+if n == 1 then redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2])) end
+return n`)
+
 // Consume 标记某 bid 的某事件类型已处理：用 Redis SET 的 SADD 原子性，仅首次
 // 返回 true（可计费/归因），重复返回 false（重放）。事件集合键 TTL 与 bid 一致。
 func (r *redisBidStore) Consume(ctx context.Context, bidID, eventType string) (bool, error) {
 	key := r.prefix + "events:" + bidID
-	n, err := r.client.SAdd(ctx, key, eventType).Result()
+	ttlSec := int64(r.ttl.Seconds())
+	if ttlSec < 1 {
+		ttlSec = 1
+	}
+	n, err := bidConsumeScript.Run(ctx, r.client, []string{key}, eventType, ttlSec).Int64()
 	if err != nil {
 		return false, err // 调用方按 fail-open 处理（放行），避免漏扣正常事件
 	}
-	if n == 1 {
-		_ = r.client.Expire(ctx, key, r.ttl).Err()
-		return true, nil
-	}
-	return false, nil
+	return n == 1, nil
 }
 
 // 编译期接口实现检查。
@@ -352,29 +419,12 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 	// 跨全部样式决策，按素材(creative)去重汇总，取前 count 条。
 	// 一个 creative 对应一条广告：ad_style / target_scene 合并该素材支持的全部样式，
 	// required_duration 取各样式最大值；bid/指标以素材首个样式作为归因代表。
-	collected := make([]engine.Item, 0)
-	seen := map[string]bool{}
-	for _, style := range engine.Styles {
-		resp := s.Engine.DecideWith(snap, engine.Request{
-			App: app, Style: style, DeviceID: deviceID, Count: count, Now: now,
-		}, campBudgets, wallets)
-		for _, it := range resp.Items {
-			if it.Creative == nil {
-				continue
-			}
-			if seen[it.Creative.ID] {
-				continue
-			}
-			seen[it.Creative.ID] = true
-			collected = append(collected, it)
-		}
-	}
-	sort.SliceStable(collected, func(i, j int) bool {
-		return collected[i].Score > collected[j].Score
-	})
-	if len(collected) > count {
-		collected = collected[:count]
-	}
+	// 跨全部样式决策：频控在全部样式候选的并集上只查一次（频控键不含 style，
+	// 逐样式检查会把同一对键重复读最多 5 遍）。内部已完成按 creative 去重、
+	// 按得分降序、取前 count 条。
+	collected := s.Engine.DecideStyles(snap, engine.Request{
+		App: app, DeviceID: deviceID, Count: count, Now: now,
+	}, campBudgets, wallets)
 	mark("decide")
 
 	adList := make([]map[string]any, 0, len(collected))
@@ -382,6 +432,9 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 	// 未配置后台 ad_loopable 开关时，列表允许循环播放，避免客户端看完一轮就刷不出广告。
 	allLoopable := true
 	mark("build")
+	// bid 上下文先攒起来，循环结束后一次批量登记（N 次 SET → 1 次 EVALSHA）。
+	pending := make([]*BidContext, 0, len(collected))
+	bidPos := make([]int, 0, len(collected))
 	for _, it := range collected {
 		cr := it.Creative
 		tp := time.Now()
@@ -431,17 +484,17 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 		for sc := range sceneSet {
 			scenes = append(scenes, sc)
 		}
-		tb := time.Now()
-		bid := s.Bids.Put(r.Context(), &BidContext{
+		// 登记延后到循环外批量执行（bid_id 先占位，批量返回后回填）。
+		pending = append(pending, &BidContext{
 			AppID: app.ID, AdvertiserID: it.AdvertiserID, CreativeID: cr.ID, CampaignID: campID,
 			Style: repStyle, DeviceID: deviceID, UserID: req.UserID, AdjustAdid: req.AdjustAdid,
 			LandingURL: landingURL,
 		})
-		tBids += time.Since(tb)
+		bidPos = append(bidPos, len(adList))
 		// loopable 不再按素材类型推导，统一取外层 data.loopable（默认 false，
 		// 由后台 ad_loopable 总开关控制）。
 		adList = append(adList, map[string]any{
-			"bid_id":            bid,
+			"bid_id":            "",
 			"creative_id":       cr.ID,
 			"ad_style":          adStyleDur,
 			"material_type":     mediaToDoc(cr.MediaType),
@@ -462,6 +515,15 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 			CreativeID: cr.ID, DeviceID: deviceID, EventType: "fill",
 		})
 		tEnqueue += time.Since(te)
+	}
+	// 批量登记 bid 上下文：N 次 SET → 1 次 EVALSHA，省掉 N-1 次往返。
+	tb := time.Now()
+	bidIDs := s.Bids.PutBatch(r.Context(), pending)
+	tBids += time.Since(tb)
+	for k, pos := range bidPos {
+		if k < len(bidIDs) {
+			adList[pos]["bid_id"] = bidIDs[k]
+		}
 	}
 
 	if len(collected) == 0 {

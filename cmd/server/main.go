@@ -29,6 +29,7 @@ import (
 	"adcenter/internal/metrics"
 	"adcenter/internal/migrate"
 	"adcenter/internal/queue"
+	"adcenter/internal/redislog"
 	"adcenter/internal/storage"
 	"adcenter/internal/store"
 
@@ -316,6 +317,7 @@ func main() {
 	if redisURL != "" {
 		if nc, err := redis.ParseURL(redisURL); err == nil {
 			ncClient := redis.NewClient(nc)
+			redislog.Attach(ncClient) // 与其它 client 一致，否则 nonce 命令在日志里不可见
 			if perr := ncClient.Ping(ctx).Err(); perr != nil {
 				_ = ncClient.Close()
 				log.Warn("redis ping failed, nonce store falls back to in-memory", "err", perr)

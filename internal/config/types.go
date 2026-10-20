@@ -268,8 +268,14 @@ type DecisionCacheConfig struct {
 	TTLSeconds int  `json:"ttl_seconds"` // 缓存时长（秒），建议 300~600
 }
 
-// DefaultDecisionCacheConfig 未配置时的兜底：启用、5 分钟（300s）。
-var DefaultDecisionCacheConfig = DecisionCacheConfig{Enabled: true, TTLSeconds: 300}
+// DefaultDecisionCacheConfig 未配置时的兜底：**默认关闭**、TTL 5 分钟（300s）。
+//
+// 默认关闭的原因：决策缓存当前只在已下线的 `/v1/ad/req` 路径（decision.go 的
+// resolveDecision）里被调用，**生产路径从不执行 Get/Set（0 命令、0 key）**。而兜底
+// 值原本是 enabled=true——一旦将来有人把它接到 /v1/ad/list，就会在决策热路径上
+// 无预警多出 GET+SET 两条命令/请求。改为默认关闭后，"启用"必须是显式意图。
+// 已在 settings 表配过 decision_cache 行的实例不受影响（配置优先于兜底值）。
+var DefaultDecisionCacheConfig = DecisionCacheConfig{Enabled: false, TTLSeconds: 300}
 
 // DecisionCacheConfig 从快照的 settings 解析决策缓存配置；
 // 缺失 / 非法 / ttl≤0 时兜底 DefaultDecisionCacheConfig。

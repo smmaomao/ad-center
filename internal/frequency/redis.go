@@ -91,6 +91,9 @@ end
 local seq = redis.call('INCR', KEYS[1] .. ':seq')
 local member = advID .. ':' .. seq
 local ttl = math.ceil(maxWindow / 1000)
+-- seq 计数器由 INCR 隐式创建，必须一并设过期：否则 app×device×creative 组合下
+-- 该键只增不减（ZSET 有界，唯独这个派生 String 无 TTL，是唯一无限增长的 key 族）。
+redis.call('EXPIRE', KEYS[1] .. ':seq', ttl)
 redis.call('ZADD', KEYS[1], now, member)
 redis.call('ZREMRANGEBYRANK', KEYS[1], 0, -11) -- 仅保留最近 10 条（疲劳窗口上限）
 redis.call('EXPIRE', KEYS[1], ttl)
@@ -178,6 +181,9 @@ local maxWindow = tonumber(ARGV[3])
 local seq = redis.call('INCR', KEYS[1] .. ':seq')
 local member = advID .. ':' .. seq
 local ttl = math.ceil(maxWindow / 1000)
+-- seq 计数器由 INCR 隐式创建，必须一并设过期：否则 app×device×creative 组合下
+-- 该键只增不减（ZSET 有界，唯独这个派生 String 无 TTL，是唯一无限增长的 key 族）。
+redis.call('EXPIRE', KEYS[1] .. ':seq', ttl)
 redis.call('ZADD', KEYS[1], now, member)
 redis.call('ZREMRANGEBYRANK', KEYS[1], 0, -11)
 redis.call('EXPIRE', KEYS[1], ttl)

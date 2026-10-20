@@ -50,6 +50,11 @@ func (d *countingDecider) DecideWith(_ *config.Snapshot, _ engine.Request, _ map
 	return d.resp
 }
 
+func (d *countingDecider) DecideStyles(_ *config.Snapshot, _ engine.Request, _ map[string][2]float64, _ map[string]float64) []engine.Item {
+	d.calls++
+	return d.resp.Items
+}
+
 // fakeCache 内存实现 cache.DecisionCache，记录 Set 次数。
 type fakeCache struct {
 	m    map[string][]byte
@@ -114,6 +119,12 @@ func doAdReq(t *testing.T, srv *Server) string {
 
 func TestDecisionCache_Hit(t *testing.T) {
 	snap := testSnapshot()
+	// 决策缓存兜底已改为默认关闭（见 DefaultDecisionCacheConfig 注释：生产路径
+	// 从不调用它，避免误开后热路径多出 GET+SET）。本用例验证缓存逻辑本身，故显式开启。
+	if snap.Settings == nil {
+		snap.Settings = map[string]json.RawMessage{}
+	}
+	snap.Settings["decision_cache"] = json.RawMessage(`{"enabled":true,"ttl_seconds":300}`)
 	dec := &countingDecider{resp: engine.Response{Items: []engine.Item{{AdvertiserID: "adv1", Advertiser: "A", Creative: &config.Creative{ID: "cr1"}}}}}
 	fc := &fakeCache{}
 	srv := newTestServer(t, snap, dec, fc)
@@ -170,17 +181,18 @@ func TestDecisionCacheKey(t *testing.T) {
 }
 
 func TestDecisionCacheConfig(t *testing.T) {
-	// 无 Settings → 默认 enabled/300
-	if c := (&config.Snapshot{}).DecisionCacheConfig(); !c.Enabled || c.TTLSeconds != 300 {
-		t.Fatalf("默认应 enabled/300, got %+v", c)
+	// 无 Settings → 默认 disabled/300（生产路径从不调用决策缓存，默认关闭避免
+	// 误开后热路径多出 GET+SET；见 DefaultDecisionCacheConfig 注释）
+	if c := (&config.Snapshot{}).DecisionCacheConfig(); c.Enabled || c.TTLSeconds != 300 {
+		t.Fatalf("默认应 disabled/300, got %+v", c)
 	}
 	// 缺失 key → 兜底默认
-	if c := (&config.Snapshot{Settings: map[string]json.RawMessage{}}).DecisionCacheConfig(); !c.Enabled || c.TTLSeconds != 300 {
-		t.Fatalf("缺失 key 应兜底默认, got %+v", c)
+	if c := (&config.Snapshot{Settings: map[string]json.RawMessage{}}).DecisionCacheConfig(); c.Enabled || c.TTLSeconds != 300 {
+		t.Fatalf("缺失 key 应兜底 disabled/300, got %+v", c)
 	}
 	// 非法 JSON → 兜底默认
-	if c := (&config.Snapshot{Settings: map[string]json.RawMessage{"decision_cache": json.RawMessage(`not-json`)}}).DecisionCacheConfig(); !c.Enabled {
-		t.Fatalf("非法 JSON 应兜底默认 enabled")
+	if c := (&config.Snapshot{Settings: map[string]json.RawMessage{"decision_cache": json.RawMessage(`not-json`)}}).DecisionCacheConfig(); c.Enabled {
+		t.Fatalf("非法 JSON 应兜底默认 disabled")
 	}
 	// ttl<=0 → 兜底 300 但保留 enabled 配置
 	if c := (&config.Snapshot{Settings: map[string]json.RawMessage{"decision_cache": json.RawMessage(`{"enabled":false,"ttl_seconds":0}`)}}).DecisionCacheConfig(); c.Enabled || c.TTLSeconds != 300 {
