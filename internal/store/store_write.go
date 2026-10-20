@@ -452,6 +452,12 @@ func (s *Store) LoadBudgetBalances(ctx context.Context) ([]BudgetBalance, error)
 
 // GetAdminRole 查后台用户角色（管理 API RBAC 校验，actor 由 BFF 传入）。
 func (s *Store) GetAdminRole(ctx context.Context, email string) (string, error) {
+	// 命中短缓存直接返回：后台每个接口都要过这道 RBAC 校验，而角色极少变动
+	// （见 admin_auth.go「RBAC 查询短缓存」）。授权变更后由 InvalidateAdminAuth 清空。
+	key := adminAuthKey(email)
+	if role, ok := s.adminAuth.getRole(key); ok {
+		return role, nil
+	}
 	var role string
 	// 与 AuthenticateAdmin 保持一致：邮箱大小写不敏感，避免"登录能过、
 	// 但 RBAC 校验（看板 SSE 等）因大小写不一致查不到账号而 403"的坑。
@@ -463,6 +469,7 @@ func (s *Store) GetAdminRole(ctx context.Context, email string) (string, error) 
 	if err != nil {
 		return "", fmt.Errorf("actor not in admin_users: %s", email)
 	}
+	s.adminAuth.putRole(key, role)
 	return role, nil
 }
 

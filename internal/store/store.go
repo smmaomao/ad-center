@@ -15,6 +15,10 @@ import (
 // Store 持有连接池。决策路径不得引用本包。
 type Store struct {
 	pool *pgxpool.Pool
+	// adminAuth 后台 RBAC 查询（角色 + 菜单树）的进程内短缓存，见 admin_auth.go
+	// 末尾「RBAC 查询短缓存」说明。直接构造 Store（不经 New）时为 nil，
+	// 缓存方法对 nil 接收者安全降级为不缓存。
+	adminAuth *adminAuthCache
 }
 
 // Pool 暴露底层连接池，供迁移等基础设施使用。
@@ -39,7 +43,7 @@ func New(ctx context.Context, dsn string) (*Store, error) {
 		pool.Close()
 		return nil, fmt.Errorf("ping: %w", err)
 	}
-	return &Store{pool: pool}, nil
+	return &Store{pool: pool, adminAuth: newAdminAuthCache()}, nil
 }
 
 // Close 关闭连接池。

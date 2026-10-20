@@ -65,6 +65,7 @@ func (s *Store) CreateUser(ctx context.Context, email, role, status, password st
 	if err != nil {
 		return "", err
 	}
+	s.InvalidateAdminAuth()
 	return id, nil
 }
 
@@ -100,6 +101,7 @@ func (s *Store) UpdateUser(ctx context.Context, authUserID string, fields map[st
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("user not found: %s", authUserID)
 	}
+	s.InvalidateAdminAuth()
 	return nil
 }
 
@@ -112,6 +114,7 @@ func (s *Store) DeleteUser(ctx context.Context, authUserID string) error {
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("user not found: %s", authUserID)
 	}
+	s.InvalidateAdminAuth()
 	return nil
 }
 
@@ -154,7 +157,11 @@ func (s *Store) CreateRole(ctx context.Context, code, name, description string) 
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO roles (code, name, description) VALUES ($1, $2, $3)`,
 		code, name, description)
-	return err
+	if err != nil {
+		return err
+	}
+	s.InvalidateAdminAuth()
+	return nil
 }
 
 // roleWritable 角色可写列（code 是主键、is_system 是内置标记，均不可改）。
@@ -175,6 +182,7 @@ func (s *Store) UpdateRole(ctx context.Context, code string, fields map[string]a
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("role not found: %s", code)
 	}
+	s.InvalidateAdminAuth()
 	return nil
 }
 
@@ -187,6 +195,7 @@ func (s *Store) DeleteRole(ctx context.Context, code string) error {
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("role not found or is system role: %s", code)
 	}
+	s.InvalidateAdminAuth()
 	return nil
 }
 
@@ -228,7 +237,11 @@ func (s *Store) CreateMenu(ctx context.Context, m *AdminMenu) error {
 		INSERT INTO menus (code, label, href, parent_code, sort_order, enabled)
 		VALUES ($1, $2, $3, $4, $5, $6)`,
 		m.Code, m.Label, m.Href, m.ParentCode, m.SortOrder, m.Enabled)
-	return err
+	if err != nil {
+		return err
+	}
+	s.InvalidateAdminAuth()
+	return nil
 }
 
 // menuWritable 菜单可写列（code 是主键，不可改）。
@@ -252,6 +265,7 @@ func (s *Store) UpdateMenu(ctx context.Context, code string, fields map[string]a
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("menu not found: %s", code)
 	}
+	s.InvalidateAdminAuth()
 	return nil
 }
 
@@ -264,6 +278,7 @@ func (s *Store) DeleteMenu(ctx context.Context, code string) error {
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("menu not found: %s", code)
 	}
+	s.InvalidateAdminAuth()
 	return nil
 }
 
@@ -284,7 +299,11 @@ func (s *Store) SetRoleMenus(ctx context.Context, roleCode string, menuCodes []s
 			return err
 		}
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	s.InvalidateAdminAuth()
+	return nil
 }
 
 // RoleMenuCodes 某角色已授权的菜单 code（供后台勾选回显）。
