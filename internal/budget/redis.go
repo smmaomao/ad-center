@@ -28,9 +28,10 @@ import (
 // 金额仍为 float64（与 Memory 一致）；整数 micros 化见 SCALING.md §7，待 M2 一并落地。
 //
 // 钱包（广告主总余额）不使用 Redis：真相在 DB（advertisers.wallet_balance），
-// 消费端扣费同事务递减（GREATEST 兜底不扣负）、充值同事务递增。此处只维护一份
-// 由 SyncWallets 从 DB 全量灌入的内存快照，供决策只读闸判断「余额是否归 0」。
-// 扣减不预扣（WalletDeduct 恒返回 true），超扣由消费端 GREATEST 兜底到 0。
+// 消费端扣费同事务递减（允许扣成负数，赊账由 campaign 日预算闸 + 对账流程控制）、
+// 充值同事务递增。此处只维护一份由 SyncWallets 从 DB 全量灌入的内存快照，
+// 供决策只读闸判断「余额是否归 0」。扣减不预扣（WalletDeduct 恒返回 true），
+// 超扣即扣负，由对账流程事后催收 / 停服。
 type Redis struct {
 	client  *redis.Client
 	prefix  string
@@ -474,12 +475,12 @@ func parseDeductResult(v any) (ok bool, resets []resetEntry) {
 // ---- 广告主总钱包（充值 - 扣费）----
 //
 // 不使用 Redis。真相在 DB（advertisers.wallet_balance）：
-//   - 扣费：消费端 WriteEventBatch 同事务递减（GREATEST(balance-amt,0) 兜底不扣负）
+//   - 扣费：消费端 WriteEventBatch 同事务递减（允许扣成负数，赊账由 campaign 日预算闸 + 对账控制）
 //   - 充值：store.Recharge 同事务递增
 //   - 读：SyncWallets 从 DB 全量灌入本进程内存快照，决策只读闸判断「余额是否归 0」
 //
 // WalletDeduct 恒返回 true（不预扣）：请求路径只靠 campaign 日预算闸（Redis），
-// 钱包扣减交给消费端 DB 事务。超扣由 GREATEST 兜底到 0，不会扣成负数。
+// 钱包扣减交给消费端 DB 事务，允许扣成负数（赊账由对账事后催收 / 停服）。
 
 // WalletBalance 总余额；未启用钱包 → MaxFloat64（不受总余额限制）。
 // 读内存快照，0 Redis 0 DB。
@@ -494,7 +495,7 @@ func (r *Redis) WalletBalance(advertiserID string) float64 {
 }
 
 // WalletDeduct 总余额扣减：恒返回 true。
-// 不做预扣，扣减由消费端 DB 事务（buildWalletDebit）负责，GREATEST 兜底不扣负。
+// 不做预扣，扣减由消费端 DB 事务（buildWalletDebit）负责，允许扣成负数（赊账由对账控制）。
 func (r *Redis) WalletDeduct(advertiserID string, amount float64) bool {
 	return true
 }
