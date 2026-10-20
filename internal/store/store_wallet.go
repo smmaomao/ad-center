@@ -121,6 +121,7 @@ type WalletAdjustInput struct {
 
 // AdjustWallet 手动调账：修正余额并写一条调账流水（amount = 实际变动额，可正可负）。
 // 不改变 wallet_enabled（闸门开关由列表页单独控制）；不并入"累计充值"。
+// 调整后余额允许扣成负数（与消费端自动扣费一致），赊账由对账流程控制。
 // 返回调整后的余额。
 func (s *Store) AdjustWallet(ctx context.Context, advertiserID string, in WalletAdjustInput, actor string) (float64, error) {
 	if in.Mode != "set" && in.Mode != "delta" {
@@ -149,9 +150,7 @@ func (s *Store) AdjustWallet(ctx context.Context, advertiserID string, in Wallet
 		return 0, fmt.Errorf("调整后余额无变化")
 	}
 	newBalance := old + delta
-	if newBalance < 0 {
-		return 0, fmt.Errorf("调整后余额不能为负（当前 $%.2f）", old)
-	}
+	// 允许扣到负数（与消费端自动扣费一致）：赊账由 campaign 日预算闸 + 对账流程控制。
 
 	if _, err := tx.Exec(ctx, `
 		UPDATE advertisers
