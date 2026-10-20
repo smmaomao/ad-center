@@ -141,8 +141,10 @@ func (s *Store) WriteEventBatch(ctx context.Context, events []AdEvent) error {
 				return err
 			}
 		}
-		// 广告主总钱包同事务递减：余额真相在 DB，进程内 WalletDeduct 只是实时
-		// 只读闸。与流水同事务保证「扣了钱就有流水、有流水就扣了钱」。
+		// 广告主总钱包同事务递减：余额真相在 DB。请求路径不预扣钱包（Redis 版
+		// WalletDeduct 恒返回 true），扣减在此同事务完成。允许扣到负数（超投由
+		// campaign 日预算闸 + 对账流程控制）。
+		// 与流水同事务保证「扣了钱就有流水、有流水就扣了钱」。
 		if q, args, ok := buildWalletDebit(rows); ok {
 			if _, err := tx.Exec(ctx, q, args...); err != nil {
 				return err
@@ -153,7 +155,7 @@ func (s *Store) WriteEventBatch(ctx context.Context, events []AdEvent) error {
 }
 
 // buildWalletDebit 由聚合流水构造广告主钱包批量递减语句。
-// GREATEST(...,0) 兜底防负（正常路径 WalletDeduct 已保证余额充足）。
+// 允许扣到负数（不设下限），超投由 campaign 日预算闸 + 对账流程控制。
 // 只对已启用钱包的广告主扣减（wallet_enabled）——存量广告主不受影响。
 // dedupeEventsTx 在事务内把本批次 EventUID 写入 event_dedup（ON CONFLICT DO NOTHING
 // RETURNING 只回传首次出现的 UID），返回"首次出现"的事件。无 UID 的事件一律按新处理。
@@ -247,7 +249,7 @@ func buildWalletDebit(rows []LedgerAgg) (string, []any, bool) {
 	}
 	var sb strings.Builder
 	sb.WriteString(`UPDATE advertisers a
-		SET wallet_balance = GREATEST(a.wallet_balance - v.amt, 0), updated_at = now()
+		SET wallet_balance = a.wallet_balance - v.amt, updated_at = now()
 		FROM (VALUES `)
 	args := make([]any, 0, len(rows)*2)
 	for i, r := range rows {

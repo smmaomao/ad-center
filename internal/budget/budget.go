@@ -36,7 +36,13 @@ type Ctrl interface {
 	// 返回 math.MaxFloat64 = 不受总余额限制，使只读闸放行——保证上线兼容。
 	WalletBalance(advertiserID string) float64
 
-	// WalletDeduct 从总钱包原子扣减：余额充足则扣减返回 true；不足返回 false。
+	// WalletDeduct 从总钱包扣减。
+	//
+	// 实现语义差异：
+	//   - Memory：原子扣减，余额不足返回 false（用于本地开发 / 单实例）
+	//   - Redis：恒返回 true（不预扣），扣减交给消费端 DB 事务
+	//     （buildWalletDebit，GREATEST 兜底不扣负）。钱包真相在 DB，
+	//     请求路径只靠 campaign 日预算闸控制投放。
 	// 未注册钱包返回 true（放行扣费，存量广告主照旧走 campaign 日预算闸）。
 	WalletDeduct(advertiserID string, amount float64) bool
 

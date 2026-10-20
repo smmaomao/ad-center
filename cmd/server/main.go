@@ -171,16 +171,33 @@ func main() {
 	// LoadBudgetBalances 是浪费且会与扣费路径抢同一把预算锁）。
 	cache.OnChange(func(reason string) {
 		if reason == "reconcile" || reason == "reconnect" || reason == "initial" ||
-			strings.HasPrefix(reason, "notify:advertisers") ||
 			strings.HasPrefix(reason, "notify:campaigns") {
 			syncBudgets(ctx, st, budgetCtrl, log, reason)
 		}
+		// 广告主钱包变更（充值/调账/启停）单独同步钱包，不触发预算回写。
+		if strings.HasPrefix(reason, "notify:advertisers") {
+			syncWallets(ctx, st, budgetCtrl, log, reason)
+		}
 	})
 	go cache.RunListener(ctx, dsn, log)
-	// 对账间隔 300s（原 60s）：NOTIFY 是配置/预算变更的主通道，reconcile 只兜底
-	// 监听断线瞬间的丢失。每轮对账会跑 SyncBalances+SyncWallets（各一轮 pipeline +
-	// SMEMBERS，约 30 条命令），60s 一轮 ≈ 4.3 万条/天，放宽 5 倍后降到 ~0.9 万条/天。
+	// 对账间隔 300s：NOTIFY 是配置/预算变更的主通道，reconcile 只兜底
+	// 监听断线瞬间的丢失。每轮对账跑 SyncBalances（campaign 预算回写 + 重建）。
 	go cache.RunReconcile(ctx, 300*time.Second)
+
+	// ⑥'' 钱包对账 30min：钱包允许扣到负数，不需要高频同步。
+	// 充值/调账由 advertisers NOTIFY 实时触发，此定时器只兜底。
+	go func() {
+		t := time.NewTicker(30 * time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				syncWallets(ctx, st, budgetCtrl, log, "ticker")
+			}
+		}
+	}()
 
 	// ⑥' 事件去重表清理：event_dedup 记录超过 24h 即无保留价值（消息 ACK 后不再重投），
 	// 定时删除避免表无限增长（#4 事件级幂等的配套清理）。
@@ -499,15 +516,21 @@ func syncBudgets(ctx context.Context, st *store.Store, ctrl budgetSyncer, log *s
 		bm[b.CampaignID] = [2]float64{b.DailyBudget, b.SpentToday}
 	}
 	ctrl.SyncBalances(bm)
+	log.Debug("budget synced", "reason", reason, "campaigns", len(bm))
+}
 
-	// 广告主总钱包同步（充值 / 扣费后对账）。失败不回退日预算——两者独立，
-	// 钱包晚一拍对齐即可。
-	if wallets, werr := st.LoadWalletBalances(c); werr != nil {
-		log.Error("wallet sync failed", "reason", reason, "err", werr)
-	} else {
-		ctrl.SyncWallets(wallets)
+// syncWallets 把 DB 的广告主钱包余额全量灌入进程内只读闸。
+// 钱包允许扣到负数，不需要高频对账：30min 定时 + advertisers NOTIFY 触发即可。
+func syncWallets(ctx context.Context, st *store.Store, ctrl budgetSyncer, log *slog.Logger, reason string) {
+	c, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	wallets, err := st.LoadWalletBalances(c)
+	if err != nil {
+		log.Error("wallet sync failed", "reason", reason, "err", err)
+		return
 	}
-	log.Debug("budget synced", "reason", reason, "advertisers", len(bm))
+	ctrl.SyncWallets(wallets)
+	log.Debug("wallets synced", "reason", reason, "advertisers", len(wallets))
 }
 
 func getenv(k, def string) string {

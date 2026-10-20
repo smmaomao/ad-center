@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"math"
-	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -27,15 +26,11 @@ import (
 //     Stats 返回 (0,0)（engine 只读闸中 budget>0 才停投，故放行）
 //
 // 金额仍为 float64（与 Memory 一致）；整数 micros 化见 SCALING.md §7，待 M2 一并落地。
-// defaultWalletCacheTTL 钱包余额进程内缓存时长（可用 WALLET_CACHE_TTL 覆盖，
-// 设为 0 关闭）。
 //
-// 背景：engine.WalletBalances 遍历**全部广告主**逐个 WalletBalance，每个广告主
-// 1~2 条 Redis 命令（EXISTS + HGET），而 /v1/ad/list 每次请求都要跑一遍。余额
-// 是慢变量（只在扣费/充值/对账时变），故加一层进程内短缓存，写路径主动失效。
-// 代价：跨实例最坏陈旧一个 TTL，即"余额硬顶晚几秒生效"，与既有 fail-open 取舍一致。
-const defaultWalletCacheTTL = 2 * time.Second
-
+// 钱包（广告主总余额）不使用 Redis：真相在 DB（advertisers.wallet_balance），
+// 消费端扣费同事务递减（GREATEST 兜底不扣负）、充值同事务递增。此处只维护一份
+// 由 SyncWallets 从 DB 全量灌入的内存快照，供决策只读闸判断「余额是否归 0」。
+// 扣减不预扣（WalletDeduct 恒返回 true），超扣由消费端 GREATEST 兜底到 0。
 type Redis struct {
 	client  *redis.Client
 	prefix  string
@@ -43,10 +38,11 @@ type Redis struct {
 	now     func() time.Time
 	timeout time.Duration
 
-	// 钱包余额缓存（见 defaultWalletCacheTTL）。key = advertiserID。
+	// 钱包余额内存快照：key = advertiserID，只含已启用钱包的广告主。
+	// 未启用钱包（不在 map 中）按 MaxFloat64 处理 = 不受总余额限制。
+	// 由 SyncWallets 全量覆盖，充值时 WalletCredit 增量更新。
 	walletMu    sync.RWMutex
-	walletCache map[string]walletCacheEntry
-	walletTTL   time.Duration
+	walletCache map[string]float64
 
 	// #7 扣费/预算查询失败的可观测性：Redis 故障时 TryDeduct 返回 false（不扣钱）、
 	// Stats 返回 (0,0)（引擎闸 budget>0 不成立 → 放行），两者都导致「广告照投、
@@ -58,11 +54,6 @@ type Redis struct {
 	lastStatsWarn  atomic.Int64
 }
 
-type walletCacheEntry struct {
-	bal   float64
-	expAt time.Time
-}
-
 // NewRedis 从 REDIS_URL 构造预算控制器（redis:// 与 rediss:// 均可）。
 func NewRedis(redisURL, prefix string, ledger LedgerFn) (*Redis, error) {
 	opt, err := redis.ParseURL(redisURL)
@@ -71,22 +62,12 @@ func NewRedis(redisURL, prefix string, ledger LedgerFn) (*Redis, error) {
 	}
 	client := redis.NewClient(opt)
 	redislog.Attach(client)
-	ttl := defaultWalletCacheTTL
-	if v := os.Getenv("WALLET_CACHE_TTL"); v != "" {
-		if d, perr := time.ParseDuration(v); perr == nil {
-			ttl = d
-		}
-	}
-	if ttl < 0 {
-		ttl = 0
-	}
 	return &Redis{
-		client:    client,
-		prefix:    prefix,
-		ledger:    ledger,
-		now:       time.Now,
-		timeout:   100 * time.Millisecond, // 决策/扣费路径的 Redis 预算，见 SCALING.md §5
-		walletTTL: ttl,
+		client:  client,
+		prefix:  prefix,
+		ledger:  ledger,
+		now:     time.Now,
+		timeout: 100 * time.Millisecond, // 决策/扣费路径的 Redis 预算，见 SCALING.md §5
 	}, nil
 }
 
@@ -118,9 +99,9 @@ func (r *Redis) today() string { return r.now().In(jakarta).Format("2006-01-02")
 // resetBlock 跨日重置的 Lua 片段（deduct / stats 共用）：
 // 全局 day 与今日不符时，把已知广告主的 spent 全部归零并回传被重置的金额，
 // 由 Go 侧补记 daily_reset 流水。多实例并发执行一次是幂等的（第二次读到 spent=0）。
-// stateKeyTTL 预算/钱包/跨日标记等状态键的过期上限（用户要求：所有 Redis key ≤7 天）。
-// 数据真相在 DB，SyncBalances/SyncWallets 每 60s 重建并刷新此 TTL，故活跃广告主
-// 永不过期；停投/删除的广告主在 ≤7 天后自动清理，无需 sweep。
+// stateKeyTTL 预算/跨日标记等状态键的过期上限（用户要求：所有 Redis key ≤7 天）。
+// 数据真相在 DB，SyncBalances 每 300s 重建并刷新此 TTL，故活跃 campaign
+// 永不过期；停投/删除的 campaign 在 ≤7 天后自动清理，无需 sweep。
 const stateKeyTTL = 7 * 24 * time.Hour
 
 // resetBlock 跨日重置的 Lua 片段（deduct / stats 共用）：
@@ -490,175 +471,54 @@ func parseDeductResult(v any) (ok bool, resets []resetEntry) {
 	return ok, parseResets(arr[1])
 }
 
-// ---- 广告主总钱包（充值 - 扣费），与 Memory 同语义 ----
+// ---- 广告主总钱包（充值 - 扣费）----
 //
-// 状态：Redis Hash {wal}:{advertiserID} 字段 balance。**键存在 = 已启用钱包**；
-// 键不存在 = 未启用（不受总余额限制）—— 用 EXISTS 区分"未启用"与"余额为 0"。
-
-func (r *Redis) walletKey(advertiserID string) string {
-	return r.prefix + "{wal}:" + advertiserID
-}
-
-// walletIDsKey 已启用钱包的广告主集合（SyncWallets 维护，sweepWallets 枚举用），
-// 与 walletKey 同 {wal} hash tag（同 slot，Cluster 兼容）。
-func (r *Redis) walletIDsKey() string { return r.prefix + "{wal}:ids" }
-
-// walletDeductScript 原子扣减总余额：
+// 不使用 Redis。真相在 DB（advertisers.wallet_balance）：
+//   - 扣费：消费端 WriteEventBatch 同事务递减（GREATEST(balance-amt,0) 兜底不扣负）
+//   - 充值：store.Recharge 同事务递增
+//   - 读：SyncWallets 从 DB 全量灌入本进程内存快照，决策只读闸判断「余额是否归 0」
 //
-//	键不存在 → 返回 1（未启用，放行扣费，仍走 campaign 日预算闸）
-//	余额不足 → 返回 0
-//	否则扣减并返回 1
-var walletDeductScript = redis.NewScript(`
-if redis.call('EXISTS', KEYS[1]) == 0 then return 1 end
-local bal = tonumber(redis.call('HGET', KEYS[1], 'balance')) or 0
-local amount = tonumber(ARGV[1])
-if amount < 0 or bal < amount then return 0 end
-redis.call('HSET', KEYS[1], 'balance', tostring(bal - amount))
-redis.call('EXPIRE', KEYS[1], 604800)
-return 1
-`)
+// WalletDeduct 恒返回 true（不预扣）：请求路径只靠 campaign 日预算闸（Redis），
+// 钱包扣减交给消费端 DB 事务。超扣由 GREATEST 兜底到 0，不会扣成负数。
 
-// WalletBalance 总余额；未启用 / 读失败 → MaxFloat64（不限制，fail-open）。
-//
-// 读走进程内短缓存（写路径 Deduct/Credit/SyncWallets 主动失效），避免每次决策
-// 都对全部广告主各发一条 EXISTS——那是按请求数线性增长的命令量。
+// WalletBalance 总余额；未启用钱包 → MaxFloat64（不受总余额限制）。
+// 读内存快照，0 Redis 0 DB。
 func (r *Redis) WalletBalance(advertiserID string) float64 {
-	if v, ok := r.cachedWalletBalance(advertiserID); ok {
-		return v
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
-	defer cancel()
-	k := r.walletKey(advertiserID)
-	n, err := r.client.Exists(ctx, k).Result()
-	if err != nil || n == 0 {
-		// 未启用钱包：缓存 MaxFloat64（负缓存），同样省掉后续 EXISTS。
-		r.setWalletCache(advertiserID, math.MaxFloat64)
+	r.walletMu.RLock()
+	bal, ok := r.walletCache[advertiserID]
+	r.walletMu.RUnlock()
+	if !ok {
 		return math.MaxFloat64
 	}
-	v, err := r.client.HGet(ctx, k, "balance").Result()
-	if err != nil {
-		return math.MaxFloat64 // 读失败不缓存，下次照常重试
-	}
-	bal := parseFloat(v)
-	r.setWalletCache(advertiserID, bal)
 	return bal
 }
 
-// cachedWalletBalance 取进程内缓存；未命中 / 已过期 / 未启用缓存返回 false。
-func (r *Redis) cachedWalletBalance(advertiserID string) (float64, bool) {
-	if r.walletTTL <= 0 {
-		return 0, false
-	}
-	r.walletMu.RLock()
-	e, ok := r.walletCache[advertiserID]
-	r.walletMu.RUnlock()
-	if !ok || time.Now().After(e.expAt) {
-		return 0, false
-	}
-	return e.bal, true
-}
-
-func (r *Redis) setWalletCache(advertiserID string, bal float64) {
-	if r.walletTTL <= 0 {
-		return
-	}
-	r.walletMu.Lock()
-	if r.walletCache == nil {
-		r.walletCache = make(map[string]walletCacheEntry)
-	}
-	r.walletCache[advertiserID] = walletCacheEntry{bal: bal, expAt: time.Now().Add(r.walletTTL)}
-	r.walletMu.Unlock()
-}
-
-// invalidateWalletCache 写路径（扣费 / 充值 / 停用清理）后失效，保证本进程读到新值。
-func (r *Redis) invalidateWalletCache(advertiserID string) {
-	if r.walletTTL <= 0 {
-		return
-	}
-	r.walletMu.Lock()
-	delete(r.walletCache, advertiserID)
-	r.walletMu.Unlock()
-}
-
-// WalletDeduct 总余额扣减；未启用 / 失败放行（true）。
+// WalletDeduct 总余额扣减：恒返回 true。
+// 不做预扣，扣减由消费端 DB 事务（buildWalletDebit）负责，GREATEST 兜底不扣负。
 func (r *Redis) WalletDeduct(advertiserID string, amount float64) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
-	defer cancel()
-	res, err := walletDeductScript.Run(ctx, r.client,
-		[]string{r.walletKey(advertiserID)}, formatFloat(amount)).Result()
-	if err != nil {
-		return true // fail-open：Redis 不可用 → 放行（仍受 campaign 日预算闸）
-	}
-	r.invalidateWalletCache(advertiserID) // 余额已变，本进程缓存立即失效
-	n, ok := res.(int64)
-	return !ok || n == 1
+	return true
 }
 
-// WalletCredit 充值入账；键不存在时创建（充值即启用钱包）。
+// WalletCredit 充值入账：更新内存快照（充值已由 store.Recharge 写 DB）。
 func (r *Redis) WalletCredit(advertiserID string, amount float64) {
 	if amount <= 0 {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
-	defer cancel()
-	_ = r.client.HIncrByFloat(ctx, r.walletKey(advertiserID), "balance", amount).Err()
-	_ = r.client.Expire(ctx, r.walletKey(advertiserID), stateKeyTTL).Err() // 刷 7d TTL
-	r.invalidateWalletCache(advertiserID)                                  // 充值即启用钱包，缓存必须失效
+	r.walletMu.Lock()
+	r.walletCache[advertiserID] += amount
+	r.walletMu.Unlock()
 }
 
-// SyncWallets 用 DB 快照覆盖钱包余额，并清理不再启用的钱包键。
+// SyncWallets 用 DB 全量快照覆盖内存钱包余额。
+// 入参只含已启用钱包的广告主；不在入参中的（未启用/已删除）从内存移除 → 不受总余额限制。
 func (r *Redis) SyncWallets(balances map[string]float64) {
-	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
-	defer cancel()
-	pipe := r.client.Pipeline()
-	if len(balances) > 0 {
-		// 已启用钱包集合：一条批量 SADD（sweepWallets 枚举用，免全量 SCAN）
-		members := make([]interface{}, 0, len(balances))
-		for id := range balances {
-			members = append(members, id)
-		}
-		pipe.SAdd(ctx, r.walletIDsKey(), members...)
-	}
-	pipe.Expire(ctx, r.walletIDsKey(), stateKeyTTL)
+	w := make(map[string]float64, len(balances))
 	for id, b := range balances {
-		pipe.HSet(ctx, r.walletKey(id), "balance", formatFloat(b))
-		pipe.Expire(ctx, r.walletKey(id), stateKeyTTL) // 刷 7d TTL
+		w[id] = b
 	}
-	if _, err := pipe.Exec(ctx); err != nil {
-		return
-	}
-	// DB 是余额真相：对账成功后直接把权威值写进进程内缓存，下一轮决策免读 Redis。
-	for id, b := range balances {
-		r.setWalletCache(id, b)
-	}
-	r.sweepWallets(ctx, balances)
-}
-
-// sweepWallets 清理 DB 中未启用（已停用钱包/已删除）的广告主钱包键。
-// 与 sweepDeleted 同思路：走 {wal}:ids 集合枚举，不做全量 SCAN。
-func (r *Redis) sweepWallets(ctx context.Context, keep map[string]float64) {
-	ids, err := r.client.SMembers(ctx, r.walletIDsKey()).Result()
-	if err != nil || len(ids) == 0 {
-		return
-	}
-	var del []string
-	srem := make([]interface{}, 0, len(ids))
-	for _, id := range ids {
-		if _, ok := keep[id]; ok {
-			continue
-		}
-		del = append(del, r.walletKey(id))
-		srem = append(srem, id)
-	}
-	if len(del) > 0 {
-		_ = r.client.Del(ctx, del...).Err()
-		_ = r.client.SRem(ctx, r.walletIDsKey(), srem...).Err()
-		for _, id := range srem {
-			if s, ok := id.(string); ok {
-				r.invalidateWalletCache(s) // 钱包已停用 → 回到"不受限"，缓存必须清掉
-			}
-		}
-	}
+	r.walletMu.Lock()
+	r.walletCache = w
+	r.walletMu.Unlock()
 }
 
 // 编译期接口实现检查。
