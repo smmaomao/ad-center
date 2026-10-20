@@ -156,13 +156,19 @@ func (s *Store) GetAdminMenu(ctx context.Context, email string) ([]*MenuRow, err
 // 前两者查的是极少变动的授权配置，每次导航重查纯属浪费。这里给它们加进程内
 // 短 TTL 缓存，把每次导航的查库次数从 3 降到 1（只剩业务数据那一次）。
 //
-// 一致性：后台所有 RBAC 写操作（用户 / 角色 / 菜单 / 角色授权）都会调用
-// InvalidateAdminAuth 立刻清空，所以通过后台改的权限即时生效；多实例部署时，
-// 处理写请求的实例立刻失效，其余实例最多残留 adminAuthTTL 后自动过期——
-// 授权变更的可接受窗口（不引入跨实例广播的复杂度）。
+// 一致性（两道保险）：
+//   1. 后台 RBAC 写操作（用户 / 角色 / 菜单 / 角色授权）成功后调用
+//      InvalidateAdminAuth 立刻清空本进程缓存 —— 改的人自己即时生效。
+//   2. migration 000069 在 admin_users / roles / menus / role_menus 上挂了
+//      NOTIFY 触发器，各实例经 RunAdminAuthListener 订阅后同样立刻清空 ——
+//      多实例部署时其余实例也不再残留旧角色 / 旧菜单，失效窗口从 TTL 缩到
+//      毫秒级（连手工改库也会广播，触发器覆盖所有写入端）。
+//
+// 因此 adminAuthTTL 只作为「监听断线」时的兜底：断线期间靠 TTL 过期自愈，
+// 重连后监听循环会再清一次。断线是罕见的，所以 TTL 可以放得比较长。
 // ============================================================
 
-const adminAuthTTL = 15 * time.Second
+const adminAuthTTL = 5 * time.Minute
 
 type adminAuthEntry[V any] struct {
 	val     V

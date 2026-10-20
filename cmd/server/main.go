@@ -180,6 +180,10 @@ func main() {
 		}
 	})
 	go cache.RunListener(ctx, dsn, log)
+	// RBAC 缓存跨实例失效：授权表（admin_users / roles / menus / role_menus）
+	// 变更由 migration 000069 的触发器广播，各实例收到后清空进程内的角色 /
+	// 菜单缓存。有了它，缓存 TTL 只作为监听断线时的兜底（见 admin_auth.go）。
+	go st.RunAdminAuthListener(ctx, dsn, log)
 	// 对账间隔 300s：NOTIFY 是配置/预算变更的主通道，reconcile 只兜底
 	// 监听断线瞬间的丢失。每轮对账跑 SyncBalances（campaign 预算回写 + 重建）。
 	go cache.RunReconcile(ctx, 300*time.Second)
