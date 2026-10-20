@@ -37,13 +37,14 @@ import (
 const defaultBlock = 30 * time.Second
 
 type Redis struct {
-	client    *redis.Client
-	stream    string
-	group     string
-	consumer  string
-	maxLen    int64 // XADD MAXLEN（~ 近似裁剪）
-	batchSize int
-	block     time.Duration
+	client        *redis.Client
+	stream        string
+	group         string
+	consumer      string
+	maxLen        int64 // XADD MAXLEN（~ 近似裁剪）
+	batchSize     int
+	block         time.Duration
+	flushInterval time.Duration // 低峰兜底攒批刷出间隔（QUEUE_FLUSH，默认 2s）
 
 	mu      sync.Mutex
 	buf     []store.AdEvent // 生产端攒批
@@ -72,18 +73,31 @@ func NewRedis(redisURL, prefix, group string, batchSize int) (*Redis, error) {
 			block = d
 		}
 	}
+	// 低峰兜底刷出间隔（可用 QUEUE_FLUSH 覆盖，如 "500ms"）。原为 10ms：事件几乎逐条
+	// 进流，消费端 XREADGROUP 每批只拿 1~3 条，XREADGROUP/XACK 摊到每事件 ~1 条命令
+	// （Upstash 按命令计费，与 XADD 本身同量级）。默认 2s 对齐 Memory 队列语义：
+	// 攒到几十~几百条/批，消费端命令量降约 20 倍；代价是事件落库延迟 +2s——报表/
+	// 对账场景可接受（扣费真相在消费端 DB 事务，延迟不影响正确性）。
+	// 注意只影响落库延迟与消费批大小：XADD 命令数不变（每事件 1 条，pipeline 只省 RTT）。
+	flushInterval := 2 * time.Second
+	if v := os.Getenv("QUEUE_FLUSH"); v != "" {
+		if d, perr := time.ParseDuration(v); perr == nil && d > 0 {
+			flushInterval = d
+		}
+	}
 	host, _ := os.Hostname()
 	client := redis.NewClient(opt)
 	redislog.Attach(client)
 	r := &Redis{
-		client:    client,
-		stream:    prefix + "events",
-		group:     group,
-		consumer:  host + "-" + strconv.Itoa(os.Getpid()),
-		maxLen:    200000, // ≈ 数小时的事件量，足够吸收峰值
-		batchSize: batchSize,
-		block:     block,
-		buf:       make([]store.AdEvent, 0, batchSize),
+		client:        client,
+		stream:        prefix + "events",
+		group:         group,
+		consumer:      host + "-" + strconv.Itoa(os.Getpid()),
+		maxLen:        200000, // ≈ 数小时的事件量，足够吸收峰值
+		batchSize:     batchSize,
+		block:         block,
+		flushInterval: flushInterval,
+		buf:           make([]store.AdEvent, 0, batchSize),
 	}
 	// 幂等建组：已存在返回 BUSYGROUP，忽略
 	if err := r.client.XGroupCreateMkStream(context.Background(), r.stream, group, "0").Err(); err != nil &&
@@ -140,9 +154,10 @@ func (r *Redis) flush(ctx context.Context) error {
 
 // Run 消费循环：XREADGROUP（阻塞） → 批量交给 Handler → 成功后 ACK。
 func (r *Redis) Run(ctx context.Context, h Handler) {
-	// 低峰兜底：定时把没攒满的批次刷出去
+	// 低峰兜底：定时把没攒满的批次刷出去。间隔宁大勿小：批次越大，消费端
+	// XREADGROUP/XACK 摊得越薄（见 NewRedis 的 QUEUE_FLUSH 说明）。
 	go func() {
-		t := time.NewTicker(10 * time.Millisecond)
+		t := time.NewTicker(r.flushInterval)
 		defer t.Stop()
 		for {
 			select {

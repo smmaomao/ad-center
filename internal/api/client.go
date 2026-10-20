@@ -62,9 +62,14 @@ type BidStore interface {
 	PutBatch(ctx context.Context, cs []*BidContext) []string
 	// Get 反查下发上下文；过期或不存在返回 false。
 	Get(ctx context.Context, id string) (*BidContext, bool)
-	// Consume 原子标记某 bid 的某事件类型已被处理：首次返回 true（可计费/归因），
-	// 重复返回 false（重放，调用方跳过计费与归因副作用）。用于防止 bid_id 重放重复报账。
-	Consume(ctx context.Context, bidID, eventType string) (bool, error)
+	// GetAndConsume 一次往返完成「取上下文 + 幂等标记」：
+	// bid 不存在/过期 → (nil, false, nil)；首次 → (上下文, true, nil)；
+	// 重放 → (上下文, false, nil)。Redis 实现合成单个 Lua——曝光/点击热路径
+	// 每事件省 1 条命令（Upstash 按命令计费）。
+	GetAndConsume(ctx context.Context, bidID, eventType string) (*BidContext, bool, error)
+	// Unconsume 回退 GetAndConsume 打上的事件标记：取到上下文后校验失败
+	// （如 creative_id 不符）时归还一次性计费名额，避免正常上报被误判重放。
+	Unconsume(ctx context.Context, bidID, eventType string)
 }
 
 // NewMemBidStore 构造进程内下发上下文登记表（默认 30 分钟 TTL），用于无 Redis 环境。
@@ -128,18 +133,36 @@ func (r *memBidStore) Get(ctx context.Context, id string) (*BidContext, bool) {
 	return c, true
 }
 
-// Consume 标记某 bid 的某事件类型已处理，重复调用返回 false（重放）。
-func (r *memBidStore) Consume(_ context.Context, bidID, eventType string) (bool, error) {
+// GetAndConsume 取上下文 + 标记事件（同一把锁内天然原子）。
+func (r *memBidStore) GetAndConsume(_ context.Context, bidID, eventType string) (*BidContext, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	c, ok := r.m[bidID]
+	if !ok {
+		return nil, false, nil
+	}
+	if time.Now().After(c.ExpiresAt) {
+		delete(r.m, bidID)
+		delete(r.consumed, bidID)
+		return nil, false, nil
+	}
 	if r.consumed[bidID] == nil {
 		r.consumed[bidID] = map[string]bool{}
 	}
 	if r.consumed[bidID][eventType] {
-		return false, nil
+		return c, false, nil // 重放
 	}
 	r.consumed[bidID][eventType] = true
-	return true, nil
+	return c, true, nil
+}
+
+// Unconsume 回退事件标记（取到上下文后校验失败的补偿）。
+func (r *memBidStore) Unconsume(_ context.Context, bidID, eventType string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.consumed[bidID] != nil {
+		delete(r.consumed[bidID], eventType)
+	}
 }
 
 // redisBidStore Redis 版下发上下文登记表，跨实例共享且重启不丢。
@@ -221,27 +244,47 @@ func (r *redisBidStore) Get(ctx context.Context, id string) (*BidContext, bool) 
 	return &c, true
 }
 
-// bidConsumeScript 原子「登记事件类型 + 刷 TTL」：把原来的 SADD 与 EXPIRE 两次
-// 串行往返合成一次 EVALSHA（impression/click 每次都要走，省 1 条/事件）。
-// SADD 返回 1 = 首次登记（可计费/归因），0 = 重放。
-var bidConsumeScript = redis.NewScript(`
-local n = redis.call('SADD', KEYS[1], ARGV[1])
-if n == 1 then redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2])) end
-return n`)
+// bidGetConsumeScript 原子「取上下文 + 登记事件类型 + 刷 TTL」：
+// GET 上下文 + SADD 标记（首次返回 1 = 可计费/归因，0 = 重放）+ 刷 TTL，
+// 一次 EVALSHA 完成（impression/click 每次都要走，省 1 条/事件）。
+// KEYS[1]=bid 上下文键，KEYS[2]=事件集合键；ARGV[1]=eventType，ARGV[2]=TTL 秒。
+// bid 不存在 → 返回空数组；否则返回 {上下文 JSON, SADD 结果}。
+// 两个键同前缀无 hash tag，但 Upstash 为单实例（非 Cluster），多键脚本无碍。
+var bidGetConsumeScript = redis.NewScript(`
+local c = redis.call('GET', KEYS[1])
+if not c then return {} end
+local n = redis.call('SADD', KEYS[2], ARGV[1])
+if n == 1 then redis.call('EXPIRE', KEYS[2], tonumber(ARGV[2])) end
+return {c, n}`)
 
-// Consume 标记某 bid 的某事件类型已处理：用 Redis SET 的 SADD 原子性，仅首次
-// 返回 true（可计费/归因），重复返回 false（重放）。事件集合键 TTL 与 bid 一致。
-func (r *redisBidStore) Consume(ctx context.Context, bidID, eventType string) (bool, error) {
-	key := r.prefix + "events:" + bidID
+// GetAndConsume 一次往返完成取上下文 + 幂等标记（见接口注释）。
+func (r *redisBidStore) GetAndConsume(ctx context.Context, bidID, eventType string) (*BidContext, bool, error) {
 	ttlSec := int64(r.ttl.Seconds())
 	if ttlSec < 1 {
 		ttlSec = 1
 	}
-	n, err := bidConsumeScript.Run(ctx, r.client, []string{key}, eventType, ttlSec).Int64()
+	res, err := bidGetConsumeScript.Run(ctx, r.client,
+		[]string{r.prefix + bidID, r.prefix + "events:" + bidID},
+		eventType, ttlSec).Result()
 	if err != nil {
-		return false, err // 调用方按 fail-open 处理（放行），避免漏扣正常事件
+		return nil, false, err
 	}
-	return n == 1, nil
+	arr, ok := res.([]interface{})
+	if !ok || len(arr) != 2 {
+		return nil, false, nil // 空数组 = bid 不存在/已过期
+	}
+	raw, _ := arr[0].(string)
+	var c BidContext
+	if err := json.Unmarshal([]byte(raw), &c); err != nil {
+		return nil, false, nil
+	}
+	n, _ := arr[1].(int64)
+	return &c, n == 1, nil
+}
+
+// Unconsume 回退事件标记（取到上下文后校验失败的补偿）：仅异常路径才走，1 条命令。
+func (r *redisBidStore) Unconsume(ctx context.Context, bidID, eventType string) {
+	_ = r.client.SRem(ctx, r.prefix+"events:"+bidID, eventType).Err()
 }
 
 // 编译期接口实现检查。
@@ -361,7 +404,7 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 		steps = append(steps, name+"="+now.Sub(last).String())
 		last = now
 	}
-	var tPresign, tBids, tMetrics, tEnqueue time.Duration
+	var tPresign, tBids, tMetrics time.Duration
 
 	app := s.authenticateApp(w, r)
 	if app == nil {
@@ -505,16 +548,13 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 			"required_duration": maxDur,
 			"click_url":         clickURL,
 		})
-		// fill 指标 + 事件（仅记日志/填充率，不计费）。repStyle 取素材首个样式作为归因代表。
+		// fill 指标（仅记日志/填充率，不计费）。repStyle 取素材首个样式作为归因代表。
+		// fill 不入队：填充率报表口径来自 metrics_minute.fills（上方 Metrics.Record
+		// 的内存聚合按分钟刷库），没有任何报表读 ad_events 的 fill 行；入队只会白耗
+		// 每条下发 1 次 XADD + 消费端 1 次落库（Upstash 按命令计费）。
 		tm := time.Now()
 		s.Metrics.Record(app.ID, repStyle, it.AdvertiserID, 1, 0, now)
 		tMetrics += time.Since(tm)
-		te := time.Now()
-		s.enqueueEvent(store.AdEvent{
-			AppID: app.ID, Style: repStyle, AdvertiserID: it.AdvertiserID,
-			CreativeID: cr.ID, DeviceID: deviceID, EventType: "fill",
-		})
-		tEnqueue += time.Since(te)
 	}
 	// 批量登记 bid 上下文：N 次 SET → 1 次 EVALSHA，省掉 N-1 次往返。
 	tb := time.Now()
@@ -538,7 +578,6 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 		"presign="+tPresign.String(),
 		"bids="+tBids.String(),
 		"metrics="+tMetrics.String(),
-		"enqueue="+tEnqueue.String(),
 	)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"code": 200, "msg": "success",
@@ -549,7 +588,7 @@ func (s *Server) handleAdList(w http.ResponseWriter, r *http.Request) {
 	})
 	mark("write")
 	// 诊断日志：各阶段耗时见 steps 字段（auth/snapshot/decide/build/presign/bids/
-	// metrics/enqueue/write 各段时长），用于定位首请求慢的瓶颈。
+	// metrics/write 各段时长），用于定位首请求慢的瓶颈。
 	s.Log.Info("ad/list response",
 		"app", app.ID,
 		"device_id", deviceID,
@@ -595,27 +634,24 @@ func (s *Server) handleAdImpression(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	bid, ok := s.Bids.Get(r.Context(), req.BidID)
-	if !ok {
+	// 取上下文 + 幂等标记一次往返完成（原 Get+Consume 两次）：同一 bid 的同一
+	// 事件类型只计费一次，防止客户端/网络重放重复报账。Redis 故障时脚本失败 →
+	// bid 为 nil → 400（与原 Get 失败行为一致）。
+	bid, first, _ := s.Bids.GetAndConsume(r.Context(), req.BidID, "impression")
+	if bid == nil {
 		writeError(w, http.StatusBadRequest, "invalid or expired bid_id")
 		return
 	}
 	if req.CreativeID != "" && req.CreativeID != bid.CreativeID {
+		// 校验失败：归还已打的幂等标记，否则后续正常上报会被误判为重放。
+		s.Bids.Unconsume(r.Context(), req.BidID, "impression")
 		writeError(w, http.StatusBadRequest, "creative_id mismatch")
 		return
 	}
-	// 幂等：同一 bid 的同一事件类型只计费一次，防止客户端/网络重放重复报账。
-	if s.Bids != nil {
-		first, derr := s.Bids.Consume(r.Context(), req.BidID, "impression")
-		if derr != nil {
-			s.Log.Warn("bid dedup check failed", "bid_id", req.BidID, "event", "impression", "err", derr)
-			first = true // fail-open：放行，避免漏扣正常曝光
-		}
-		if !first {
-			s.Log.Info("duplicate client event skipped", "bid_id", req.BidID, "event", "impression")
-			writeJSON(w, http.StatusOK, map[string]any{"code": 200, "msg": "success", "deduped": true})
-			return
-		}
+	if !first {
+		s.Log.Info("duplicate client event skipped", "bid_id", req.BidID, "event", "impression")
+		writeJSON(w, http.StatusOK, map[string]any{"code": 200, "msg": "success", "deduped": true})
+		return
 	}
 	charged := s.chargeClientEvent(app, bid.AdvertiserID, bid.CreativeID, bid.CampaignID, bid.Style, bid.DeviceID, "impression", time.Now())
 	s.Log.Info("ad impression",

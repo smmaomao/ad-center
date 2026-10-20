@@ -1,7 +1,7 @@
 # Redis 操作清单
 
 > 排查 Redis 相关问题（首请求延迟、多余命令、key 对账）时的速查表。
-> 最后更新：2026-09-22
+> 最后更新：2026-10-20
 
 ## 总览
 
@@ -9,7 +9,7 @@
 
 | 子系统 | 文件 | key 前缀 / hash-tag | 启动语义 |
 |---|---|---|---|
-| 预算控制 | `internal/budget/redis.go` | `{bud}:` `{wal}:` | fail-loud（连不上启动退出）|
+| 预算控制 | `internal/budget/redis.go` | `{bud}:` | fail-loud（连不上启动退出）|
 | 频控 | `internal/frequency/redis.go` | `{fr}:` | fail-loud |
 | 事件队列 | `internal/queue/redis.go` | Streams（stream=`events`/group/consumer）| fail-loud |
 | 决策缓存 | `internal/cache/redis.go` | `decision:` | 降级 Noop（**生产 0 命令，见 §4**）|
@@ -25,13 +25,18 @@
 
 ## 各模块具体 Redis 操作
 
-### 1. 预算控制 `budget/redis.go`（`{bud}` / `{wal}`）
-- 读：`Stats`（Lua 跨日重置 → 读 `budget`/`spent`）、`StatsAll`（BatchStats，决策热路径 1 次/请求，跨样式只取 1 次）、`WalletBalance`（EXISTS + HGET 钱包余额，按广告主预取一次；**读走进程内短缓存** `WALLET_CACHE_TTL`，命中则 0 命令）
-- 写：`TryDeduct`（Lua 原子扣费）、`WalletDeduct`（Lua 扣总钱包）、`WalletCredit`（HINCRBYFLOAT 充值）
-- 后台对账：`SyncBalances`（**单个 Lua** `syncBalancesScript`）、`SyncWallets`（pipeline）、`sweepDeleted`（`SMEMBERS {bud}:ids` → `DEL` + `SREM`）、`sweepWallets`（`SMEMBERS {wal}:ids` → `DEL` + `SREM`）；两者都刻意不做 SCAN（Upstash 按请求计费）
+### 1. 预算控制 `budget/redis.go`（`{bud}`）
+- 读：`Stats`（Lua 跨日重置 → 读 `budget`/`spent`）、`StatsAll`（BatchStats，决策热路径 1 次/请求，跨样式只取 1 次）
+- 写：`TryDeduct`（Lua 原子扣费；cpa 首充模式下仅 `first_purchase` 事件触发，`impression`/`click`/`install` 不扣）
+- 后台对账：`SyncBalances`（**单个 Lua** `syncBalancesScript`）、`sweepDeleted`（`SMEMBERS {bud}:ids` → `DEL` + `SREM`）；刻意不做 SCAN（Upstash 按请求计费）
   - **对账已脚本化**：原来 pipeline 里每 campaign 3~4 条命令 ≈ 3N 次请求/轮；预算键/dayKey/idsKey 全共享 `{bud}` hash tag（同 slot，与 `statsAllScript` 同理），故整体合成 1 个 EVALSHA —— 请求数 ≈3N+2 → 1
   - Hash 里的 `day` 字段已移除：原来每轮都写，但三个 Lua 脚本从不读它（跨日只判全局 `{bud}:day`）
-- 命令族：EVALSHA、HGET / HSET / HSETNX / SADD / SMEMBERS / DEL / SREM / EXISTS / HINCRBYFLOAT、GET / SETNX（dayKey）
+- 命令族：EVALSHA、HSET / HSETNX / SADD / SMEMBERS / DEL / SREM / EXISTS / GET / SETNX（dayKey）
+
+> **钱包已彻底去 Redis**：广告主总余额（`advertisers.wallet_balance`）是 DB 唯一真相，原 `{wal}` 子系统（`WalletBalance`/`WalletDeduct`/`WalletCredit`/`SyncWallets` pipeline）已整体移除。
+> 请求路径 0 Redis 0 DB：`WalletBalance` 只读由 `SyncWallets` 从 DB 全量灌入的**进程内快照**（决策只读闸判断「余额是否归 0」），`WalletDeduct` 恒返回 `true`（不预扣）。
+> 扣减只在消费端 `WriteEventBatch` 同事务递减（允许扣成负数，赊账由 campaign 日预算闸 + 对账兜底）；充值经 `store.Recharge` 同事务递增后增量更新快照。
+> 消费端扣 DB 触发 `trg_advertisers_notify → pg_notify('advertisers')`，各实例 `OnChange("notify:advertisers") → syncWallets()` **秒级刷新**只读闸；`main.go` 的 30min 定时器仅兜底断线丢失。
 
 ### 2. 频控 `frequency/redis.go`（`{fr}`）
 - ZSET 滑动窗口，key：`{fr}:{app}:{dev}:adv:{campaign}`、`:recent:{creative}`；另有 `{fr}:…:recent:{creative}:seq` 计数器（String，由 `INCR` 隐式创建）
@@ -42,7 +47,7 @@
 - 命令族：EVALSHA、EXPIRE
 
 ### 3. 事件队列 `queue/redis.go`（Redis Streams）
-- 写：`Publish` → 攒批 `flush` → `XADD`（pipeline，`MAXLEN≈20万` 裁剪）
+- 写：`Publish` → 攒批 `flush` → `XADD`（pipeline，`MAXLEN≈20万` 裁剪）。**生产端攒批间隔默认 2s**（`QUEUE_FLUSH` 可覆盖，如 `"500ms"`；原 10ms 会让事件几乎逐条入流、消费批永远攒不大）；缓冲满 500 条立即刷。攒批只影响落库/消费延迟（不在请求路径上），不影响 XADD 总条数
 - 读：`Run` 消费协程 `XReadGroup BLOCK`（空闲时每 ~30s 一次往返，返回 `nil` 即正常）→ 成功 `XAck`；消费失败不 ACK，留 PEL 重试
 - **PEL 回收自适应退避**：`reclaim` 原来每 10s 无条件一次 `XAUTOCLAIM`（≈8640 条/天/实例，绝大多数是空转）。现连续空转则间隔翻倍至 60s 上限，一旦真的回收到消息立刻回到 10s；`minIdle=30s` 保证最坏 90s 内孤儿消息仍会被认领
 - 监控：`XLen`、`XPending`（看积压，不看 Buffered）
@@ -55,8 +60,8 @@
 
 ### 5. Bid 登记表 `api/client.go`（`redisBidStore`）（`adcenter:bid:`）
 - 写：`PutBatch`（**一个 EVALSHA 批量 SET N 条**，原为每条下发一次 SET）；单条 `Put` 保留
-- 读：`Get`（GET 反查下发上下文，用于归因/计费回传）
-- `Consume`（防 bid_id 重放）：原 `SADD` + `EXPIRE` 两次串行，现合成 `bidConsumeScript` 一次往返
+- 读+幂等 `GetAndConsume`（**一个 EVALSHA 完成「GET 上下文 + SADD 事件标记 + EXPIRE」**，原 `Get`+`Consume` 两次串行往返合成一次；`bidGetConsumeScript`）。`Unconsume` 回退该标记（取到上下文后 creative 校验失败时归还名额）
+- 读：`Get`（GET 反查下发上下文，仍用于 video-complete 归因回传，不再做幂等标记）
 - 降级内存
 
 ### 6. 一次性 nonce `api/nonce.go`（`adcenter:nonce:`）
@@ -71,7 +76,7 @@
 
 ## 排查要点
 
-- **请求路径实际打到 Redis 的**：预算快照（`StatsAll` 1 次）、频控（`CheckBatch` 1 次，跨样式合并后）、bid 登记（`PutBatch` 1 次）、队列 `XADD`（事件入队，攒批摊薄）。其余都在**后台对账 / 消费协程**里。决策缓存不参与（见 §4）。
+- **请求路径实际打到 Redis 的**：预算快照（`StatsAll` 1 次）、频控（`CheckBatch` 1 次，跨样式合并后）、bid 登记（`PutBatch` 1 次）、队列 `XADD`（事件入队，攒批摊薄）。**钱包读进程内快照 0 命令**（见 §1）。其余都在**后台对账 / 消费协程**里。决策缓存不参与（见 §4）。
 - `ad/list` 的 `metrics` 步骤是本地 `*metrics.Agg`（内存聚合），**不走 Redis**。
 - 6 个 client 共用一个 Upstash SG 端点，连接都是**懒建**的——首次执行命令才建连（DNS + TLS ≈ 2.4s）。所以部署后 30s 内的首个请求会付一次冷建连代价，之后全部 < 6ms。日志里那条 `xreadgroup ... dur_ms≈30004` 是后台阻塞读，与请求延迟无关，可忽略。
 - 对账 key：`{bud}:ids`、`{wal}:ids`（SMEMBERS 枚举）、`{fr}:*`、`adcenter:decision:*`、`adcenter:bid:*`。
@@ -85,7 +90,7 @@
 | 步骤 | 命令数 |
 |---|---|
 | `BudgetSnapshot` → `StatsAll` | 1（Lua 批量，已最优） |
-| `WalletBalances`（遍历全部广告主） | 广告主数 ×1（未启用钱包只 EXISTS；启用则 EXISTS+HGET） |
+| `WalletBalances`（读进程内快照） | **0**（钱包已去 Redis，详见 §1；请求路径读内存快照，0 命令） |
 | 频控 | **5 → 1**（原每样式一次 `CheckBatch`；现跨样式候选并集去重后一次） |
 | 每条下发 bid 登记 | **N → 1**（默认 count=5、上限 20 条 SET；现 `PutBatch` 一个 EVALSHA） |
 
@@ -94,8 +99,8 @@
 
 典型 count=5：每请求约 **11 → 4** 次。
 
-事件路径：`impression` ≈ 6 → 5（`Consume` 的 SADD+EXPIRE 合成 1 次）、`click` ≈ 5、`video-complete` ≈ 2。
-后台：`SyncBalances` ≈3N+2 → **1** 次/轮（单 Lua）、`SyncWallets` 仍为 pipeline（2M+2）、`XAUTOCLAIM` 1 次/10~60s（自适应）、`XREADGROUP` 1 次/30s。
+事件路径（cpa 首充模式，仅 `first_purchase` 触发 `TryDeduct`）：`impression` = 3（`GetAndConsume` + `Record` 频控计数 + `XADD`）、`click` = 2（`GetAndConsume` + `XADD`）、`video-complete` = 1（`Get` 反查，不再做幂等）、`install`/`first_charge`（S2S）= 1（`XADD`）+ 首充 `TryDeduct` 1。**`fill` 不再入队**——原每条下发一个 fill 事件，现只走进程内 `metrics` 聚合（填充率指标来自 `metrics_minute`，不经 Stream），省 XADD ~60 万/天 + 消费分摊，并减 DB 写（`ad_events` + 去重行）。
+后台：`SyncBalances` ≈3N+2 → **1** 次/轮（单 Lua）、`SyncWallets` 从 DB 全量读（不再走 Redis pipeline）、`XAUTOCLAIM` 1 次/10~60s（自适应）、`XREADGROUP` 1 次/30s。
 
 已做的削减（累计）：
 
@@ -103,12 +108,15 @@
 2. **频控跨样式合并**：`engine.DecideStyles` 把 5 个样式的候选并集去重后只查一次（频控键不含 style）。
 3. **bid 登记批量化**：`PutBatch` 一个 EVALSHA 写 N 条；`Consume` 的 SADD+EXPIRE 合成单脚本。
 4. **对账脚本化**：`SyncBalances` 单 Lua（≈3N+2 → 1）；并移除写了从不读的 `day` 字段。
-5. **钱包余额进程内缓存**：`budget.Redis` 读走短 TTL 缓存（`WALLET_CACHE_TTL`，默认 2s，0=关闭），写路径主动失效。
+5. **钱包彻底去 Redis**：真相收归 DB（`advertisers.wallet_balance`），请求路径 0 Redis 0 DB；只读闸读进程内快照（`SyncWallets` 从 DB 灌入），消费端扣减经 DB 触发器 `pg_notify` 秒级刷新。详见 §1。
 6. **对账间隔 60s → 300s**（`cmd/server/main.go`）：NOTIFY 是主通道，reconcile 只兜底断线丢失。
 7. **PEL 回收自适应退避**：空转时 10s → 60s（≈8640 → ≤1440 条/天/实例）。
 8. **`:seq` 补 TTL**：止住唯一无限增长的 key 族。
 9. **决策缓存默认关闭**：消除"接上就翻倍"的陷阱（生产路径本就 0 命令）。
 10. **`redislog` 默认关闭**：不再每条命令刷一行 Info。
+11. **Get+Consume 合并**：`bidGetConsumeScript` 把「GET 上下文 + SADD 幂等标记 + EXPIRE」合成一次往返（原 Get+Consume 两次），impression/click 各省 1 条/次。
+12. **fill 不再入队**：下发事件只走进程内 `metrics` 聚合（填充率来自 `metrics_minute`，不经 Stream），不再写 `ad_events` 明细，省 XADD ~60 万/天 + 消费分摊，并减 DB 写（`ad_events` + 去重行）。
+13. **队列攒批间隔 10ms → 2s**（`QUEUE_FLUSH` 可覆盖）：低流量下让消费批真正攒大，消费循环 XREADGROUP+XACK 从 85~250 万/天降到 ~3.5 万/天（XADD 总条数不变）。
 
 ---
 

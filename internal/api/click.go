@@ -68,28 +68,24 @@ func (s *Server) handleAdClick(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bid_id required")
 		return
 	}
-	bid, ok := s.Bids.Get(r.Context(), req.BidID)
-	if !ok {
+	// 取上下文 + 幂等标记一次往返完成（原 Get+Consume 两次）：同一 bid 的 click
+	// 只处理一次（生成 click_id + 归因 + 计费），防止重放重复报账、并避免每次重放
+	// 都生成新 click_id 污染转化归因。Redis 故障时脚本失败 → bid 为 nil → 400。
+	bid, first, _ := s.Bids.GetAndConsume(r.Context(), req.BidID, "click")
+	if bid == nil {
 		writeError(w, http.StatusBadRequest, "invalid or expired bid_id")
 		return
 	}
 	if req.CreativeID != "" && req.CreativeID != bid.CreativeID {
+		// 校验失败：归还已打的幂等标记，否则后续正常上报会被误判为重放。
+		s.Bids.Unconsume(r.Context(), req.BidID, "click")
 		writeError(w, http.StatusBadRequest, "creative_id mismatch")
 		return
 	}
-	// 幂等：同一 bid 的 click 只处理一次（生成 click_id + 归因 + 计费），防止重放
-	// 重复报账、并避免每次重放都生成新 click_id 污染转化归因。
-	if s.Bids != nil {
-		first, derr := s.Bids.Consume(r.Context(), req.BidID, "click")
-		if derr != nil {
-			s.Log.Warn("bid dedup check failed", "bid_id", req.BidID, "event", "click", "err", derr)
-			first = true // fail-open：放行，避免漏扣正常点击
-		}
-		if !first {
-			s.Log.Info("duplicate client event skipped", "bid_id", req.BidID, "event", "click")
-			writeJSON(w, http.StatusOK, map[string]any{"code": 200, "msg": "success", "deduped": true})
-			return
-		}
+	if !first {
+		s.Log.Info("duplicate client event skipped", "bid_id", req.BidID, "event", "click")
+		writeJSON(w, http.StatusOK, map[string]any{"code": 200, "msg": "success", "deduped": true})
+		return
 	}
 
 	clickID, err := newClickID()
