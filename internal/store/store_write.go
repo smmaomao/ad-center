@@ -215,7 +215,7 @@ func (s *Store) WriteBudgetSpent(ctx context.Context, spent map[string]float64) 
 		return nil
 	}
 	var sb strings.Builder
-	sb.WriteString(`UPDATE campaigns AS c SET spent_today = v.amt FROM (VALUES `)
+	sb.WriteString(`UPDATE campaigns AS c SET spent_today = v.amt::numeric(12,2) FROM (VALUES `)
 	args := make([]any, 0, len(spent)*2)
 	i := 0
 	for id, amt := range spent {
@@ -226,7 +226,13 @@ func (s *Store) WriteBudgetSpent(ctx context.Context, spent map[string]float64) 
 		args = append(args, id, amt)
 		i++
 	}
-	sb.WriteString(`) AS v(id, amt) WHERE c.id::text = v.id`)
+	// 只更新真正变化的行（值相同则整行不动）：
+	// 000060 给 campaigns 挂的是**行级** trg_campaigns_notify，无条件 UPDATE 即使
+	// 值没变也会触发 pg_notify → 重载 → 再写回 → 自激循环。
+	// 两侧统一转成 numeric(12,2) 再比较：否则 float8 尾数（0.1+0.2 的
+	// 0.30000000000000004）与 numeric 存值比不出相等，每轮都判定"有变化"，
+	// 循环照样停不下来。
+	sb.WriteString(`) AS v(id, amt) WHERE c.id::text = v.id AND c.spent_today IS DISTINCT FROM v.amt::numeric(12,2)`)
 	_, err := s.pool.Exec(ctx, sb.String(), args...)
 	return err
 }

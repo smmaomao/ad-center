@@ -504,9 +504,17 @@ func syncBudgets(ctx context.Context, st *store.Store, ctrl budgetSyncer, log *s
 	// #3 spent_today 回写：先把 Redis/内存中的「今日已耗」真值持久化到库，再
 	// LoadBudgetBalances+SyncBalances 从库重建。SyncBalances 只刷预算上限、保留
 	// 进程内已耗，故写回不会被覆盖；Redis 清掉后从库读到的是真实已耗，预算上限不被遗忘。
-	if spent := ctrl.DumpSpent(); len(spent) > 0 {
-		if werr := st.WriteBudgetSpent(c, spent); werr != nil {
-			log.Error("budget spent writeback failed", "reason", reason, "err", werr)
+	// 只在定时对账（initial/reconcile/reconnect）时写回，**NOTIFY 触发的重载不写回**：
+	// 000060 给 campaigns 挂了行级 trg_campaigns_notify，写回本身就是 UPDATE campaigns
+	// → pg_notify → 又进 syncBudgets → 自激循环（实测 ~43 次/秒，每次还带一次 Redis
+	// StatsAll + SyncBalances 回写，是 Redis 命令量飙升到上亿的元凶）。
+	// spent_today 回写是"定时持久化"语义（防 Redis 被清后遗忘已耗），本就不该跟着
+	// 即时重载走；这样即便上游再出类似的写-通知回路，也不会被 NOTIFY 路径放大。
+	if !strings.HasPrefix(reason, "notify:") {
+		if spent := ctrl.DumpSpent(); len(spent) > 0 {
+			if werr := st.WriteBudgetSpent(c, spent); werr != nil {
+				log.Error("budget spent writeback failed", "reason", reason, "err", werr)
+			}
 		}
 	}
 
