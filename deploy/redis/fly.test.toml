@@ -1,0 +1,32 @@
+# 自托管 Redis（测试环境）——与生产同配置，只是规格更小（256MB）。
+#
+# 网络要点同 fly.toml：[[services]] 不写 [[services.ports]] → 不对公网暴露，
+# 同组织 app 经 ad-center-redis-test.internal:6379 访问。
+# 红线：不要加 [[services.ports]]，否则等于把无 TLS 的 Redis 暴露公网。
+app = "ad-center-redis-test"
+primary_region = "sin"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[[mounts]]
+  source = "redis_data"
+  destination = "/data"
+
+[[services]]
+  protocol = "tcp"
+  internal_port = 6379
+
+[[checks]]
+  name = "redis-tcp"
+  port = 6379
+  type = "tcp"
+  interval = "1m"
+  timeout = "2s"
+  grace_period = "5s"
+
+# 测试环境数据量小，256MB 足够；maxmemory 经 secret REDIS_MAXMEMORY 配置
+# （190mb ≈ 机器内存的 74%）。
+[vm]
+  size = "shared-cpu-1x"
+  memory = "256mb"
