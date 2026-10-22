@@ -1,0 +1,23 @@
+# 自托管 Redis（生产）。
+#
+# 网络要点：[[services]] 里**不写** [[services.ports]] → 不分配公网 IP，
+# 6379 不对公网暴露；同组织其它 app 经私有网络 <app>.internal:6379 访问。
+# 红线：以后谁往里加 [[services.ports]] 都等于把无 TLS 的 Redis 暴露公网。
+#
+# 有状态服务：挂卷 + 常驻，不要 auto_stop（停机再启动有冷启动延迟）。
+app = "ad-center-redis-prod"
+primary_region = "sin"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[[mounts]]
+  source = "redis_data"
+  destination = "/data"
+
+[[services]]
+  protocol = "tcp"
+  internal_port = 6379
+
+[vm]
+  size = "shared-cpu-1x"
