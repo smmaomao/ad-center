@@ -19,5 +19,19 @@ primary_region = "sin"
   protocol = "tcp"
   internal_port = 6379
 
+# 健康检查：默认只有 on-failure 重启（进程没了才重启），检测不到"进程活着但
+# 不响应"（卡死 / OOM 卡住）。这里加 TCP 探活，Redis 不响应时 Fly 自动重启机器。
+[[checks]]
+  name = "redis-tcp"
+  port = 6379
+  type = "tcp"
+  interval = "1m"
+  timeout = "2s"
+  grace_period = "5s"
+
+# 内存写在这里：否则每次 fly deploy 都会把 fly scale memory 的结果重置回 256MB。
+# maxmemory（Redis 内部上限）经 Fly secret REDIS_MAXMEMORY 配置，取机器内存的 ~74%，
+# 留出进程本身与 AOF 缓冲的余量，两者要一起调。
 [vm]
   size = "shared-cpu-1x"
+  memory = "512mb"
